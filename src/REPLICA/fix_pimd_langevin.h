@@ -50,6 +50,7 @@ class FixPIMDLangevin : public Fix {
   void restart(char *buf) override;
 
   double compute_vector(int) override;
+  void *extract(const char *, int &) override;
 
  protected:
   // System setting variables

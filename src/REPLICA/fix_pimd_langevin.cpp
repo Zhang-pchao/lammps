@@ -738,29 +738,49 @@ void FixPIMDLangevin::collect_xc()
   int nlocal = atom->nlocal;
   double **x = atom->x;
   tagint *tag = atom->tag;
-  if (ireplica == 0) {
-    if (cmode == SINGLE_PROC) {
-      for (int i = 0; i < nlocal; i++) {
-        xcall[3 * i + 0] = xcall[3 * i + 1] = xcall[3 * i + 2] = 0.0;
-      }
-    } else if (cmode == MULTI_PROC) {
+
+  if (method == PIMD) {
+    inter_replica_comm(x);
+    if (ireplica == 0) {
       for (int i = 0; i < ntotal; i++) {
-        xcall[3 * i + 0] = xcall[3 * i + 1] = xcall[3 * i + 2] = 0.0;
+        for (int d = 0; d < 3; d++) {
+          xcall[3 * i + d] = 0.0;
+          for (int bead = 0; bead < np; bead++)
+            xcall[3 * i + d] += bufsortedall[bead * ntotal + i][d] * inverse_np;
+        }
       }
     }
+  } else {
+    if (ireplica == 0) {
+      for (int i = 0; i < ntotal; i++)
+        xcall[3 * i + 0] = xcall[3 * i + 1] = xcall[3 * i + 2] = 0.0;
 
-    const double sqrtnp = sqrt((double) np);
-    for (int i = 0; i < nlocal; i++) {
-      xcall[3 * (tag[i] - 1) + 0] = x[i][0] / sqrtnp;
-      xcall[3 * (tag[i] - 1) + 1] = x[i][1] / sqrtnp;
-      xcall[3 * (tag[i] - 1) + 2] = x[i][2] / sqrtnp;
-    }
+      const double sqrtnp = sqrt((double) np);
+      for (int i = 0; i < nlocal; i++) {
+        xcall[3 * (tag[i] - 1) + 0] = x[i][0] / sqrtnp;
+        xcall[3 * (tag[i] - 1) + 1] = x[i][1] / sqrtnp;
+        xcall[3 * (tag[i] - 1) + 2] = x[i][2] / sqrtnp;
+      }
 
-    if (cmode == MULTI_PROC) {
-      MPI_Allreduce(MPI_IN_PLACE, xcall, ntotal * 3, MPI_DOUBLE, MPI_SUM, world);
+      if (cmode == MULTI_PROC)
+        MPI_Allreduce(MPI_IN_PLACE, xcall, ntotal * 3, MPI_DOUBLE, MPI_SUM, world);
     }
   }
   MPI_Bcast(xcall, ntotal * 3, MPI_DOUBLE, 0, universe->uworld);
+}
+
+/* ---------------------------------------------------------------------- */
+
+void *FixPIMDLangevin::extract(const char *str, int &dim)
+{
+  dim = 0;
+  if (strcmp(str, "centroid_coordinates") == 0) {
+    dim = 1;
+    return xcall;
+  }
+  if (strcmp(str, "nbeads") == 0) return &np;
+  if (strcmp(str, "method") == 0) return &method;
+  return nullptr;
 }
 
 /* ---------------------------------------------------------------------- */
