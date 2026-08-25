@@ -46,12 +46,22 @@ class FixPlumed : public Fix {
   double memory_usage() override;
 
  private:
+  enum { PATH_INTEGRAL_OFF, PATH_INTEGRAL_CENTROID };
+
   PLMD::Plumed *p;           // pointer to plumed object
+  class Fix *pimd_fix;       // fix providing the Cartesian PIMD centroid
   int nlocal;                // number of atoms local to this process
   int natoms;                // total number of atoms
+  int path_integral_mode;    // path-integral coupling mode
+  int plumed_active;         // this partition owns the PLUMED state
+  double centroid_force_scale;    // chain-rule force scale supplied by the PIMD fix
   int *gatindex;             // array of atom indexes local to this process
   double *masses;            // array of masses for local atoms
   double *charges;           // array of charges for local atoms
+  double *centroid_coordinates;    // tag-ordered Cartesian centroid coordinates
+  double *centroid_positions;      // local centroid coordinates passed to PLUMED
+  double *centroid_forces;         // local centroid forces returned by PLUMED
+  double *centroid_forces_all;     // tag-ordered centroid forces shared by all beads
   int nlevels_respa;         // this is something to enable respa
   double bias;               // output bias potential
   class Compute *c_pe;       // Compute for the energy
@@ -59,6 +69,11 @@ class FixPlumed : public Fix {
   int plumedNeedsEnergy;     // Flag to trigger calculation of the
                              // energy and virial
   char *id_pe, *id_press;    // ID for potential energy and pressure compute
+  char *id_pimd;             // ID for the coupled fix pimd/langevin
+
+  void check_path_integral_compatibility();
+  void update_atom_data();
+  void post_force_centroid();
 };
 
 };    // namespace LAMMPS_NS
