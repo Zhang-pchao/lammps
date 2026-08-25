@@ -77,6 +77,8 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
         path_integral_mode = PATH_INTEGRAL_OFF;
       else if (strcmp(arg[i + 1], "centroid") == 0)
         path_integral_mode = PATH_INTEGRAL_CENTROID;
+      else if (strcmp(arg[i + 1], "bead_mean") == 0)
+        path_integral_mode = PATH_INTEGRAL_BEAD_MEAN;
       else
         error->all(FLERR, "Unknown fix plumed path_integral value: {}", arg[i + 1]);
     } else if (strcmp(arg[i], "pimd_fix") == 0) {
@@ -86,12 +88,12 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
       error->all(FLERR, "Unknown fix plumed keyword: {}", arg[i]);
     }
   }
-  if (path_integral_mode == PATH_INTEGRAL_CENTROID && id_pimd == nullptr)
-    error->all(FLERR, "Fix plumed path_integral centroid requires the pimd_fix keyword");
+  if (path_integral_mode != PATH_INTEGRAL_OFF && id_pimd == nullptr)
+    error->all(FLERR, "Fix plumed path_integral mode requires the pimd_fix keyword");
   if (path_integral_mode == PATH_INTEGRAL_OFF && id_pimd != nullptr)
-    error->all(FLERR, "Fix plumed pimd_fix requires path_integral centroid");
+    error->all(FLERR, "Fix plumed pimd_fix requires a path_integral mode");
 
-  plumed_active = (path_integral_mode == PATH_INTEGRAL_OFF) || (universe->iworld == 0);
+  plumed_active = (path_integral_mode != PATH_INTEGRAL_CENTROID) || (universe->iworld == 0);
 
 #if defined(__PLUMED_DEFAULT_KERNEL)
   if (getenv("PLUMED_KERNEL") == nullptr) platform::putenv(plumed_default_kernel);
@@ -121,7 +123,7 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
   // inter-partition communication
 
   try {
-    if ((plumed_active) && (path_integral_mode == PATH_INTEGRAL_OFF) &&
+    if ((plumed_active) && (path_integral_mode != PATH_INTEGRAL_CENTROID) &&
         (universe->existflag == 1)) {
       MPI_Comm inter_comm;
 
@@ -225,7 +227,7 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
   if (plumed_active) {
     try {
       if (outfile) {
-        if ((path_integral_mode == PATH_INTEGRAL_OFF) && (universe->existflag == 1))
+        if ((path_integral_mode != PATH_INTEGRAL_CENTROID) && (universe->existflag == 1))
           p->cmd("setLogFile", fmt::format("{}.{}", outfile, universe->iworld).c_str());
         else
           p->cmd("setLogFile", outfile);
@@ -248,7 +250,7 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
 
   // Define compute to calculate potential energy
 
-  if (path_integral_mode == PATH_INTEGRAL_OFF) {
+  if (path_integral_mode != PATH_INTEGRAL_CENTROID) {
     delete[] id_pe;
     id_pe = utils::strdup("plmd_pe");
     c_pe = modify->add_compute(std::string(id_pe) + " all pe");
@@ -296,7 +298,7 @@ void FixPlumed::check_path_integral_compatibility()
 
   if (path_integral_mode == PATH_INTEGRAL_OFF && has_path_integral_fix)
     error->all(FLERR, "Fix plumed is incompatible with path-integrals");
-  if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+  if (path_integral_mode != PATH_INTEGRAL_OFF) {
     pimd_fix = modify->get_fix_by_id(id_pimd);
     if (!pimd_fix || strcmp(pimd_fix->style, "pimd/langevin") != 0)
       error->all(FLERR, "Fix plumed pimd_fix {} must use style pimd/langevin", id_pimd);
@@ -333,38 +335,41 @@ void FixPlumed::init()
 {
   check_path_integral_compatibility();
 
-  if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+  if (path_integral_mode != PATH_INTEGRAL_OFF) {
     if (utils::strmatch(update->integrate_style, "^respa"))
-      error->all(FLERR, "Fix plumed path_integral centroid does not support r-RESPA");
-    if (comm->nprocs != 1)
-      error->all(FLERR,
-                 "Fix plumed path_integral centroid currently requires one MPI rank per bead");
+      error->all(FLERR, "Fix plumed path_integral modes do not support r-RESPA");
 
     int dim = -1;
-    auto *force_scale =
-        static_cast<double *>(pimd_fix->extract("centroid_bias_force_scale", dim));
+    auto *force_scale = static_cast<double *>(pimd_fix->extract("centroid_bias_force_scale", dim));
     if (!force_scale || dim != 0)
-      error->all(FLERR,
-                 "Fix plumed path_integral centroid requires method pimd and ensemble nvt");
-    centroid_force_scale = *force_scale;
+      error->all(FLERR, "Fix plumed path_integral modes require method pimd and ensemble nvt");
     auto *beads = static_cast<int *>(pimd_fix->extract("nbeads", dim));
     if (!beads || dim != 0 || *beads != universe->nworlds)
       error->all(FLERR, "Fix plumed could not determine the PIMD bead count");
-    centroid_coordinates =
-        static_cast<double *>(pimd_fix->extract("centroid_coordinates", dim));
-    if (!centroid_coordinates || dim != 1)
-      error->all(FLERR, "Fix plumed could not access the PIMD centroid coordinates");
 
-    delete[] centroid_forces_all;
-    centroid_forces_all = new double[3 * natoms]();
-    if (plumed_active) {
-      delete[] centroid_positions;
-      delete[] centroid_forces;
-      centroid_positions = new double[3 * natoms];
-      centroid_forces = new double[3 * natoms];
+    if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN) {
+      if (universe->existflag == 0 || universe->nworlds < 2)
+        error->all(FLERR, "Fix plumed path_integral bead_mean requires multiple partitions");
+    } else {
+      if (comm->nprocs != 1)
+        error->all(FLERR,
+                   "Fix plumed path_integral centroid currently requires one MPI rank per bead");
+      centroid_force_scale = *force_scale;
+      centroid_coordinates = static_cast<double *>(pimd_fix->extract("centroid_coordinates", dim));
+      if (!centroid_coordinates || dim != 1)
+        error->all(FLERR, "Fix plumed could not access the PIMD centroid coordinates");
+
+      delete[] centroid_forces_all;
+      centroid_forces_all = new double[3 * natoms]();
+      if (plumed_active) {
+        delete[] centroid_positions;
+        delete[] centroid_forces;
+        centroid_positions = new double[3 * natoms];
+        centroid_forces = new double[3 * natoms];
+      }
+      for (int i = 0; i < 6; i++) virial[i] = 0.0;
+      return;
     }
-    for (int i = 0; i < 6; i++) virial[i] = 0.0;
-    return;
   }
 
   if (utils::strmatch(update->integrate_style, "^respa"))
@@ -414,8 +419,8 @@ void FixPlumed::setup(int vflag)
 
 void FixPlumed::min_setup(int vflag)
 {
-  if (path_integral_mode == PATH_INTEGRAL_CENTROID)
-    error->all(FLERR, "Fix plumed path_integral centroid does not support minimization");
+  if (path_integral_mode != PATH_INTEGRAL_OFF)
+    error->all(FLERR, "Fix plumed path_integral modes do not support minimization");
   // This has to be checked.
   // For instance it might have problems with fix_box_relax
   post_force(vflag);
@@ -529,6 +534,13 @@ void FixPlumed::post_force(int /* vflag */)
 
   plumedNeedsEnergy = 0;
   p->cmd("isEnergyNeeded", &plumedNeedsEnergy);
+  if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN) {
+    int energy_requests = plumedNeedsEnergy;
+    MPI_Allreduce(MPI_IN_PLACE, &energy_requests, 1, MPI_INT, MPI_SUM, universe->uworld);
+    if (energy_requests)
+      error->universe_all(
+          FLERR, "Fix plumed path_integral bead_mean does not support energy-dependent actions");
+  }
 
   // Pass potential energy and virial if needed
   double *virial_lmp;
@@ -583,6 +595,11 @@ void FixPlumed::post_force(int /* vflag */)
   // do the real calculation:
   p->cmd("performCalc");
 
+  if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN) {
+    p->cmd("getBias", &bias);
+    MPI_Allreduce(MPI_IN_PLACE, &plumedStopCondition, 1, MPI_INT, MPI_MAX, universe->uworld);
+    if (universe->iworld != 0) bias = 0.0;
+  }
   if (plumedStopCondition) timer->force_timeout();
 
   // retransform virial to lammps representation and assign it to this

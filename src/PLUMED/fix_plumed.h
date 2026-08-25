@@ -46,14 +46,14 @@ class FixPlumed : public Fix {
   double memory_usage() override;
 
  private:
-  enum { PATH_INTEGRAL_OFF, PATH_INTEGRAL_CENTROID };
+  enum { PATH_INTEGRAL_OFF, PATH_INTEGRAL_CENTROID, PATH_INTEGRAL_BEAD_MEAN };
 
   PLMD::Plumed *p;           // pointer to plumed object
   class Fix *pimd_fix;       // fix providing the Cartesian PIMD centroid
   int nlocal;                // number of atoms local to this process
   int natoms;                // total number of atoms
   int path_integral_mode;    // path-integral coupling mode
-  int plumed_active;         // this partition owns the PLUMED state
+  int plumed_active;         // this partition runs a PLUMED instance
   double centroid_force_scale;    // chain-rule force scale supplied by the PIMD fix
   int *gatindex;             // array of atom indexes local to this process
   double *masses;            // array of masses for local atoms
