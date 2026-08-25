@@ -18,7 +18,7 @@ Syntax
 
        *plumedfile* arg = name of PLUMED input file to use (default: NULL)
        *outfile* arg = name of file on which to write the PLUMED log (default: NULL)
-       *path_integral* arg = *off* or *centroid* (default: off)
+       *path_integral* arg = *off*, *centroid*, or *bead_mean* (default: off)
        *pimd_fix* arg = ID of the coupled fix pimd/langevin
 
 Examples
@@ -28,6 +28,7 @@ Examples
 
    fix pl all plumed plumedfile plumed.dat outfile p.log
    fix pl all plumed plumedfile plumed.dat outfile p.log path_integral centroid pimd_fix fpimd
+   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral bead_mean pimd_fix fpimd
 
 Description
 """""""""""
@@ -96,6 +97,30 @@ zero so they are counted once in the ring-polymer Hamiltonian.  Bead-resolved
 trajectories are still required to reconstruct a bead-defined quantum free
 energy.
 
+The *path_integral bead_mean* setting creates one PLUMED instance on every
+bead partition and enables PLUMED's multiple-replica communication.  Use the
+PLUMED ``ENSEMBLE`` action to define the arithmetic bead mean of a
+collective variable and apply biases only to that mean.  For example:
+
+.. code-block:: plumed
+
+   d: DISTANCE ATOMS=1,2
+   mean: ENSEMBLE ARG=d
+   bias: RESTRAINT ARG=mean.d AT=0.5 KAPPA=10
+
+If :math:`S=P^{-1}\sum_b s(\mathbf{R}_b)`, PLUMED propagates the bias force
+with the chain-rule factor :math:`1/P`, so bead :math:`b` receives
+:math:`-(\partial V/\partial S)\nabla_b s/P`.  Applying a bias directly to
+``d`` instead of ``mean.d`` creates independent per-bead biases and is not a
+bead-mean calculation.
+
+All PLUMED instances evaluate the same bead-mean bias in lockstep.  PLUMED
+adds the partition suffix to its output and restart files.  The LAMMPS scalar
+bias energy is reported only on partition zero so that it is counted once;
+the chain-rule force and virial contributions remain local to every bead.
+Do not use a multiple-walker option to combine the PIMD beads: they are parts
+of one ring polymer, not statistically independent walkers.
+
 Restart, fix_modify, output, run start/stop, minimize info
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -139,10 +164,12 @@ LAMMPS was built with that package.  See the :doc:`Build package
 
 There can only be one fix plumed command active at a time.
 
-The *path_integral centroid* mode currently requires
-:doc:`fix pimd/langevin <fix_pimd>` with *method pimd*, *ensemble nvt*, one MPI
-rank per bead, a fixed atom count, consecutive atom IDs, and an atom map.  It
-does not support energy-dependent PLUMED actions, minimization, or r-RESPA.
+Both path-integral modes require :doc:`fix pimd/langevin <fix_pimd>` with
+*method pimd* and *ensemble nvt*.  The *centroid* mode additionally requires
+one MPI rank per bead, a fixed atom count, consecutive atom IDs, and an atom
+map.  The *bead_mean* mode requires multiple LAMMPS partitions and a PLUMED
+input that explicitly routes each bias through ``ENSEMBLE``.  Neither
+mode supports energy-dependent PLUMED actions, minimization, or r-RESPA.
 The default *path_integral off* setting remains incompatible with path-integral
 fixes.
 
