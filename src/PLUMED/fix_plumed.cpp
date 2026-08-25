@@ -33,6 +33,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <exception>
 
 #include "plumed/wrapper/Plumed.h"
 
@@ -48,8 +49,12 @@ using namespace LAMMPS_NS;
 using namespace FixConst;
 
 FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
-    Fix(lmp, narg, arg), p(nullptr), nlocal(0), gatindex(nullptr), masses(nullptr),
-    charges(nullptr), id_pe(nullptr), id_press(nullptr)
+    Fix(lmp, narg, arg), p(nullptr), pimd_fix(nullptr), nlocal(0), natoms(0),
+    path_integral_mode(PATH_INTEGRAL_OFF), plumed_active(1), centroid_force_scale(0.0),
+    gatindex(nullptr), masses(nullptr), charges(nullptr), centroid_coordinates(nullptr),
+    centroid_positions(nullptr), centroid_forces(nullptr), centroid_forces_all(nullptr),
+    nlevels_respa(0), bias(0.0), c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0),
+    id_pe(nullptr), id_press(nullptr), id_pimd(nullptr)
 {
 
   if (!atom->tag_enable) error->all(FLERR, "Fix plumed requires atom tags");
@@ -59,16 +64,53 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
   if (igroup != 0 && comm->me == 0)
     error->warning(FLERR, "Fix group for fix plumed is not 'all'. Group will be ignored.");
 
+  const char *plumedfile = nullptr;
+  const char *outfile = nullptr;
+  for (int i = 3; i < narg; i += 2) {
+    if (i + 1 >= narg) utils::missing_cmd_args(FLERR, "fix plumed", error);
+    if (strcmp(arg[i], "plumedfile") == 0) {
+      plumedfile = arg[i + 1];
+    } else if (strcmp(arg[i], "outfile") == 0) {
+      outfile = arg[i + 1];
+    } else if (strcmp(arg[i], "path_integral") == 0) {
+      if (strcmp(arg[i + 1], "off") == 0)
+        path_integral_mode = PATH_INTEGRAL_OFF;
+      else if (strcmp(arg[i + 1], "centroid") == 0)
+        path_integral_mode = PATH_INTEGRAL_CENTROID;
+      else
+        error->all(FLERR, "Unknown fix plumed path_integral value: {}", arg[i + 1]);
+    } else if (strcmp(arg[i], "pimd_fix") == 0) {
+      delete[] id_pimd;
+      id_pimd = utils::strdup(arg[i + 1]);
+    } else {
+      error->all(FLERR, "Unknown fix plumed keyword: {}", arg[i]);
+    }
+  }
+  if (path_integral_mode == PATH_INTEGRAL_CENTROID && id_pimd == nullptr)
+    error->all(FLERR, "Fix plumed path_integral centroid requires the pimd_fix keyword");
+  if (path_integral_mode == PATH_INTEGRAL_OFF && id_pimd != nullptr)
+    error->all(FLERR, "Fix plumed pimd_fix requires path_integral centroid");
+
+  plumed_active = (path_integral_mode == PATH_INTEGRAL_OFF) || (universe->iworld == 0);
+
 #if defined(__PLUMED_DEFAULT_KERNEL)
   if (getenv("PLUMED_KERNEL") == nullptr) platform::putenv(plumed_default_kernel);
 #endif
 
-  p = new PLMD::Plumed;
-
   // Check API version
 
   int api_version = 0;
-  p->cmd("getApiVersion", &api_version);
+  if (plumed_active) {
+    try {
+      p = new PLMD::Plumed;
+      p->cmd("getApiVersion", &api_version);
+    } catch (const std::exception &exception) {
+      error->universe_one(FLERR,
+                          fmt::format("Could not initialize PLUMED: {}", exception.what()));
+    }
+  }
+  if (path_integral_mode == PATH_INTEGRAL_CENTROID)
+    MPI_Bcast(&api_version, 1, MPI_INT, 0, universe->uworld);
   if ((api_version < 5) || (api_version > 11))
     error->all(FLERR,
                "Incompatible API version for PLUMED in fix plumed. "
@@ -78,40 +120,51 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
   // If the -partition option is activated then enable
   // inter-partition communication
 
-  if (universe->existflag == 1) {
-    MPI_Comm inter_comm;
+  try {
+    if ((plumed_active) && (path_integral_mode == PATH_INTEGRAL_OFF) &&
+        (universe->existflag == 1)) {
+      MPI_Comm inter_comm;
 
-    // Change MPI_COMM_WORLD to universe->uworld which seems more appropriate
+      // Change MPI_COMM_WORLD to universe->uworld which seems more appropriate
 
-    MPI_Comm_split(universe->uworld, comm->me, 0, &inter_comm);
-    p->cmd("GREX setMPIIntracomm", &world);
-    if (comm->me == 0) {
-      // The inter-partition communicator is only defined for the root in
-      //    each partition (a.k.a. world). This is due to the way in which
-      //    it is defined inside plumed.
-      p->cmd("GREX setMPIIntercomm", &inter_comm);
+      MPI_Comm_split(universe->uworld, comm->me, 0, &inter_comm);
+      p->cmd("GREX setMPIIntracomm", &world);
+      if (comm->me == 0) {
+        // The inter-partition communicator is only defined for the root in
+        //    each partition (a.k.a. world). This is due to the way in which
+        //    it is defined inside plumed.
+        p->cmd("GREX setMPIIntercomm", &inter_comm);
+      }
+      p->cmd("GREX init", nullptr);
     }
-    p->cmd("GREX init", nullptr);
+
+    // The general communicator is independent of the existence of partitions,
+    // if there are partitions, world is defined within each partition,
+    // whereas if partitions are not defined then world is equal to
+    // MPI_COMM_WORLD.
+
+    // plumed does not know about LAMMPS using the MPI STUBS library and will
+    // fail if this is called under these circumstances
+    if (plumed_active) p->cmd("setMPIComm", &world);
+  } catch (const std::exception &exception) {
+    error->universe_one(FLERR,
+                        fmt::format("Could not configure PLUMED MPI: {}", exception.what()));
   }
-
-  // The general communicator is independent of the existence of partitions,
-  // if there are partitions, world is defined within each partition,
-  // whereas if partitions are not defined then world is equal to
-  // MPI_COMM_WORLD.
-
-  // plumed does not know about LAMMPS using the MPI STUBS library and will
-  // fail if this is called under these circumstances
-  p->cmd("setMPIComm", &world);
 #endif
 
   // Set up units
   // LAMMPS units wrt kj/mol - nm - ps
   // Set up units
 
-  if (strcmp(update->unit_style, "lj") == 0) {
+  if (plumed_active && strcmp(update->unit_style, "lj") == 0) {
     // LAMMPS units lj
-    p->cmd("setNaturalUnits");
-  } else {
+    try {
+      p->cmd("setNaturalUnits");
+    } catch (const std::exception &exception) {
+      error->universe_one(FLERR,
+                          fmt::format("Could not configure PLUMED units: {}", exception.what()));
+    }
+  } else if (plumed_active) {
 
     // Conversion factor from LAMMPS energy units to kJ/mol (units of PLUMED)
 
@@ -153,70 +206,59 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
 
     double timeUnits = 0.001 / force->femtosecond;
 
-    p->cmd("setMDEnergyUnits", &energyUnits);
-    p->cmd("setMDLengthUnits", &lengthUnits);
-    p->cmd("setMDTimeUnits", &timeUnits);
+    try {
+      p->cmd("setMDEnergyUnits", &energyUnits);
+      p->cmd("setMDLengthUnits", &lengthUnits);
+      p->cmd("setMDTimeUnits", &timeUnits);
+    } catch (const std::exception &exception) {
+      error->universe_one(FLERR,
+                          fmt::format("Could not configure PLUMED units: {}", exception.what()));
+    }
   }
-
-  // Read fix parameters:
-
-  int next = 0;
-  for (int i = 3; i < narg; ++i) {
-    if (!strcmp(arg[i], "outfile")) {
-      next = 1;
-    } else if (next == 1) {
-      if (universe->existflag == 1) {
-        // Each replica writes an independent log file
-        //  with suffix equal to the replica id
-        p->cmd("setLogFile", fmt::format("{}.{}", arg[i], universe->iworld).c_str());
-        next = 0;
-      } else {
-        // partition option not used
-        p->cmd("setLogFile", arg[i]);
-        next = 0;
-      }
-    } else if (!strcmp(arg[i], "plumedfile")) {
-      next = 2;
-    } else if (next == 2) {
-      p->cmd("setPlumedDat", arg[i]);
-      next = 0;
-    } else
-      error->all(FLERR,
-                 "Syntax error - use 'fix <fix-ID> plumed "
-                 "plumedfile plumed.dat outfile plumed.out' ");
-  }
-  if (next == 1) error->all(FLERR, "missing argument for outfile option");
-  if (next == 2) error->all(FLERR, "missing argument for plumedfile option");
-
-  p->cmd("setMDEngine", "LAMMPS");
 
   if (atom->natoms > MAXSMALLINT)
     error->all(FLERR, "Fix plumed can only handle up to 2.1 billion atoms");
 
   natoms = int(atom->natoms);
-  p->cmd("setNatoms", &natoms);
-
   double dt = update->dt;
-  p->cmd("setTimestep", &dt);
+
+  if (plumed_active) {
+    try {
+      if (outfile) {
+        if ((path_integral_mode == PATH_INTEGRAL_OFF) && (universe->existflag == 1))
+          p->cmd("setLogFile", fmt::format("{}.{}", outfile, universe->iworld).c_str());
+        else
+          p->cmd("setLogFile", outfile);
+      }
+      if (plumedfile) p->cmd("setPlumedDat", plumedfile);
+      p->cmd("setMDEngine", "LAMMPS");
+      p->cmd("setNatoms", &natoms);
+      p->cmd("setTimestep", &dt);
+      p->cmd("init");
+    } catch (const std::exception &exception) {
+      error->universe_one(FLERR,
+                          fmt::format("Could not configure PLUMED: {}", exception.what()));
+    }
+  }
 
   extscalar = 1;
   scalar_flag = 1;
   energy_global_flag = virial_global_flag = 1;
   thermo_energy = thermo_virial = 1;
 
-  // This is the real initialization:
-
-  p->cmd("init");
-
   // Define compute to calculate potential energy
 
-  id_pe = utils::strdup("plmd_pe");
-  c_pe = modify->add_compute(std::string(id_pe) + " all pe");
+  if (path_integral_mode == PATH_INTEGRAL_OFF) {
+    delete[] id_pe;
+    id_pe = utils::strdup("plmd_pe");
+    c_pe = modify->add_compute(std::string(id_pe) + " all pe");
 
-  // Define compute to calculate pressure tensor
+    // Define compute to calculate pressure tensor
 
-  id_press = utils::strdup("plmd_press");
-  c_press = modify->add_compute(std::string(id_press) + " all pressure NULL virial");
+    delete[] id_press;
+    id_press = utils::strdup("plmd_press");
+    c_press = modify->add_compute(std::string(id_press) + " all pressure NULL virial");
+  }
 
   for (const auto &fix : modify->get_fix_list()) {
     const char *const check_style = fix->style;
@@ -225,11 +267,6 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
 
     if (strcmp(check_style, "plumed") == 0)
       error->all(FLERR, "There must be only one instance of fix plumed");
-
-    // PLUMED knows nothing about path integrals
-
-    if (utils::strmatch(check_style, "^pimd") || utils::strmatch(check_style, "^ipi"))
-      error->all(FLERR, "Fix plumed is incompatible with path-integrals");
 
     // Avoid conflict with fixes that define internal pressure computes.
     // See comment in the setup method
@@ -245,18 +282,41 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
                  "pressure internally",
                  check_style);
   }
+  check_path_integral_compatibility();
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPlumed::check_path_integral_compatibility()
+{
+  int has_path_integral_fix = 0;
+  for (const auto &fix : modify->get_fix_list())
+    if (utils::strmatch(fix->style, "^pimd") || utils::strmatch(fix->style, "^ipi"))
+      has_path_integral_fix = 1;
+
+  if (path_integral_mode == PATH_INTEGRAL_OFF && has_path_integral_fix)
+    error->all(FLERR, "Fix plumed is incompatible with path-integrals");
+  if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+    pimd_fix = modify->get_fix_by_id(id_pimd);
+    if (!pimd_fix || strcmp(pimd_fix->style, "pimd/langevin") != 0)
+      error->all(FLERR, "Fix plumed pimd_fix {} must use style pimd/langevin", id_pimd);
+  }
 }
 
 FixPlumed::~FixPlumed()
 {
   delete p;
-  modify->delete_compute(id_pe);
-  modify->delete_compute(id_press);
+  if (id_pe) modify->delete_compute(id_pe);
+  if (id_press) modify->delete_compute(id_press);
   delete[] id_pe;
   delete[] id_press;
+  delete[] id_pimd;
   delete[] masses;
   delete[] charges;
   delete[] gatindex;
+  delete[] centroid_positions;
+  delete[] centroid_forces;
+  delete[] centroid_forces_all;
 }
 
 int FixPlumed::setmask()
@@ -271,6 +331,42 @@ int FixPlumed::setmask()
 
 void FixPlumed::init()
 {
+  check_path_integral_compatibility();
+
+  if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+    if (utils::strmatch(update->integrate_style, "^respa"))
+      error->all(FLERR, "Fix plumed path_integral centroid does not support r-RESPA");
+    if (comm->nprocs != 1)
+      error->all(FLERR,
+                 "Fix plumed path_integral centroid currently requires one MPI rank per bead");
+
+    int dim = -1;
+    auto *force_scale =
+        static_cast<double *>(pimd_fix->extract("centroid_bias_force_scale", dim));
+    if (!force_scale || dim != 0)
+      error->all(FLERR,
+                 "Fix plumed path_integral centroid requires method pimd and ensemble nvt");
+    centroid_force_scale = *force_scale;
+    auto *beads = static_cast<int *>(pimd_fix->extract("nbeads", dim));
+    if (!beads || dim != 0 || *beads != universe->nworlds)
+      error->all(FLERR, "Fix plumed could not determine the PIMD bead count");
+    centroid_coordinates =
+        static_cast<double *>(pimd_fix->extract("centroid_coordinates", dim));
+    if (!centroid_coordinates || dim != 1)
+      error->all(FLERR, "Fix plumed could not access the PIMD centroid coordinates");
+
+    delete[] centroid_forces_all;
+    centroid_forces_all = new double[3 * natoms]();
+    if (plumed_active) {
+      delete[] centroid_positions;
+      delete[] centroid_forces;
+      centroid_positions = new double[3 * natoms];
+      centroid_forces = new double[3 * natoms];
+    }
+    for (int i = 0; i < 6; i++) virial[i] = 0.0;
+    return;
+  }
+
   if (utils::strmatch(update->integrate_style, "^respa"))
     nlevels_respa = ((Respa *) update->integrate)->nlevels;
 
@@ -318,23 +414,23 @@ void FixPlumed::setup(int vflag)
 
 void FixPlumed::min_setup(int vflag)
 {
+  if (path_integral_mode == PATH_INTEGRAL_CENTROID)
+    error->all(FLERR, "Fix plumed path_integral centroid does not support minimization");
   // This has to be checked.
   // For instance it might have problems with fix_box_relax
   post_force(vflag);
 }
 
-void FixPlumed::post_force(int /* vflag */)
-{
+/* ---------------------------------------------------------------------- */
 
+void FixPlumed::update_atom_data()
+{
   int update_gatindex = 0;
 
   if (natoms != int(atom->natoms))
     error->all(FLERR, "Fix plumed does not support simulations with varying numbers of atoms");
 
-  // Try to find out if the domain decomposition has been updated:
-
   if (nlocal != atom->nlocal) {
-
     delete[] charges;
     delete[] masses;
     delete[] gatindex;
@@ -344,9 +440,7 @@ void FixPlumed::post_force(int /* vflag */)
     masses = new double[nlocal];
     charges = new double[nlocal];
     update_gatindex = 1;
-
   } else {
-
     for (int i = 0; i < nlocal; i++) {
       if (gatindex[i] != atom->tag[i] - 1) {
         update_gatindex = 1;
@@ -356,26 +450,39 @@ void FixPlumed::post_force(int /* vflag */)
   }
   MPI_Allreduce(MPI_IN_PLACE, &update_gatindex, 1, MPI_INT, MPI_SUM, world);
 
-  // In case it has been updated, rebuild the local mass/charges array
-  // and tell plumed about the change:
-
   if (update_gatindex) {
     for (int i = 0; i < nlocal; i++) gatindex[i] = atom->tag[i] - 1;
-    // Get masses
     if (atom->rmass_flag) {
       for (int i = 0; i < nlocal; i++) masses[i] = atom->rmass[i];
     } else {
       for (int i = 0; i < nlocal; i++) masses[i] = atom->mass[atom->type[i]];
     }
-    // Get charges
     if (atom->q_flag) {
       for (int i = 0; i < nlocal; i++) charges[i] = atom->q[i];
     } else {
       for (int i = 0; i < nlocal; i++) charges[i] = 0.0;
     }
-    p->cmd("setAtomsNlocal", &nlocal);
-    p->cmd("setAtomsGatindex", gatindex);
+    try {
+      p->cmd("setAtomsNlocal", &nlocal);
+      p->cmd("setAtomsGatindex", gatindex);
+    } catch (const std::exception &exception) {
+      error->universe_one(FLERR,
+                          fmt::format("Could not update PLUMED atom data: {}", exception.what()));
+    }
   }
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPlumed::post_force(int /* vflag */)
+{
+
+  if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+    post_force_centroid();
+    return;
+  }
+
+  update_atom_data();
 
   // set up local virial/box. plumed uses full 3x3 matrices
   double plmd_virial[3][3];
@@ -508,6 +615,98 @@ void FixPlumed::post_force(int /* vflag */)
   c_press->addstep(update->ntimestep + 1);
 }
 
+/* ---------------------------------------------------------------------- */
+
+void FixPlumed::post_force_centroid()
+{
+  int invalid_atom_count = natoms != int(atom->natoms) || atom->nlocal != natoms;
+  MPI_Allreduce(MPI_IN_PLACE, &invalid_atom_count, 1, MPI_INT, MPI_SUM, universe->uworld);
+  if (invalid_atom_count)
+    error->universe_all(
+        FLERR, "Fix plumed path_integral centroid requires a fixed atom count on each bead");
+
+  for (int i = 0; i < 6; i++) virial[i] = 0.0;
+  bias = 0.0;
+  int plumed_stop_condition = 0;
+  int needs_energy = 0;
+  double plmd_virial[3][3] = {};
+
+  if (plumed_active) {
+    update_atom_data();
+    for (int i = 0; i < nlocal; i++) {
+      const int index = atom->tag[i] - 1;
+      for (int d = 0; d < 3; d++) {
+        centroid_positions[3 * i + d] = centroid_coordinates[3 * index + d];
+        centroid_forces[3 * i + d] = 0.0;
+      }
+    }
+
+    double box[3][3] = {};
+    box[0][0] = domain->h[0];
+    box[1][1] = domain->h[1];
+    box[2][2] = domain->h[2];
+    box[2][1] = domain->h[3];
+    box[2][0] = domain->h[4];
+    box[1][0] = domain->h[5];
+
+    if (update->ntimestep > MAXSMALLINT)
+      error->all(FLERR, "Fix plumed can only handle up to 2.1 billion timesteps");
+    int step = int(update->ntimestep);
+    try {
+      p->cmd("setStep", &step);
+      p->cmd("setStopFlag", &plumed_stop_condition);
+      p->cmd("setPositions", centroid_positions);
+      p->cmd("setBox", &box[0][0]);
+      p->cmd("setForces", centroid_forces);
+      p->cmd("setMasses", masses);
+      p->cmd("setCharges", charges);
+      p->cmd("setVirial", &plmd_virial[0][0]);
+      p->cmd("prepareCalc");
+      p->cmd("isEnergyNeeded", &needs_energy);
+    } catch (const std::exception &exception) {
+      error->universe_one(FLERR,
+                          fmt::format("Could not prepare PLUMED: {}", exception.what()));
+    }
+  }
+
+  MPI_Bcast(&needs_energy, 1, MPI_INT, 0, universe->uworld);
+  if (needs_energy)
+    error->universe_all(
+        FLERR, "Fix plumed path_integral centroid does not support energy-dependent actions");
+
+  if (plumed_active) {
+    try {
+      p->cmd("performCalc");
+      p->cmd("getBias", &bias);
+    } catch (const std::exception &exception) {
+      error->universe_one(FLERR,
+                          fmt::format("Could not execute PLUMED: {}", exception.what()));
+    }
+    for (int i = 0; i < 3 * natoms; i++) centroid_forces_all[i] = 0.0;
+    for (int i = 0; i < nlocal; i++) {
+      const int index = atom->tag[i] - 1;
+      for (int d = 0; d < 3; d++)
+        centroid_forces_all[3 * index + d] = centroid_forces[3 * i + d];
+    }
+    virial[0] = -plmd_virial[0][0];
+    virial[1] = -plmd_virial[1][1];
+    virial[2] = -plmd_virial[2][2];
+    virial[3] = -plmd_virial[0][1];
+    virial[4] = -plmd_virial[0][2];
+    virial[5] = -plmd_virial[1][2];
+  }
+
+  MPI_Bcast(centroid_forces_all, 3 * natoms, MPI_DOUBLE, 0, universe->uworld);
+  for (int i = 0; i < atom->nlocal; i++) {
+    const int index = atom->tag[i] - 1;
+    for (int d = 0; d < 3; d++)
+      atom->f[i][d] += centroid_forces_all[3 * index + d] * centroid_force_scale;
+  }
+
+  MPI_Bcast(&plumed_stop_condition, 1, MPI_INT, 0, universe->uworld);
+  if (plumed_stop_condition) timer->force_timeout();
+}
+
 void FixPlumed::post_force_respa(int vflag, int ilevel, int /* iloop */)
 {
   if (ilevel == nlevels_respa - 1) post_force(vflag);
@@ -530,6 +729,11 @@ double FixPlumed::compute_scalar()
 
 int FixPlumed::modify_param(int narg, char **arg)
 {
+  if (path_integral_mode == PATH_INTEGRAL_CENTROID &&
+      (strcmp(arg[0], "pe") == 0 || strcmp(arg[0], "press") == 0))
+    error->all(FLERR,
+               "Fix_modify pe and press are not supported with fix plumed path_integral centroid");
+
   if (strcmp(arg[0], "pe") == 0) {
     if (narg < 2) error->all(FLERR, "Fix_modify pe requires an argument");
     modify->delete_compute(id_pe);
@@ -568,5 +772,10 @@ int FixPlumed::modify_param(int narg, char **arg)
 
 double FixPlumed::memory_usage()
 {
-  return double((8 + 8 + 4) * atom->nlocal);
+  double bytes = double((8 + 8 + 4) * atom->nlocal);
+  if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+    bytes += double(3 * sizeof(double) * natoms);
+    if (plumed_active) bytes += double(6 * sizeof(double) * natoms);
+  }
+  return bytes;
 }

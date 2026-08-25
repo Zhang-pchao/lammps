@@ -12,12 +12,14 @@ Syntax
 
 * ID, group-ID are documented in :doc:`fix <fix>` command
 * plumed = style name of this fix command
-* keyword = *plumedfile* or *outfile*
+* keyword = *plumedfile* or *outfile* or *path_integral* or *pimd_fix*
 
   .. parsed-literal::
 
        *plumedfile* arg = name of PLUMED input file to use (default: NULL)
        *outfile* arg = name of file on which to write the PLUMED log (default: NULL)
+       *path_integral* arg = *off* or *centroid* (default: off)
+       *pimd_fix* arg = ID of the coupled fix pimd/langevin
 
 Examples
 """"""""
@@ -25,6 +27,7 @@ Examples
 .. code-block:: LAMMPS
 
    fix pl all plumed plumedfile plumed.dat outfile p.log
+   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral centroid pimd_fix fpimd
 
 Description
 """""""""""
@@ -76,6 +79,23 @@ correctly read and parsed.  The names of the files in which the results
 are stored from the various analysis options performed by PLUMED will
 be specified by the user in the PLUMED input file.
 
+.. versionadded:: TBD
+
+The *path_integral centroid* setting couples PLUMED to the Cartesian coordinate
+centroid provided by the :doc:`fix pimd/langevin <fix_pimd>` command selected
+with *pimd_fix*.  The PIMD fix must be defined before fix plumed.  One PLUMED
+state is created on partition zero, so there is one bias history rather than an
+independent history for each bead.  If the centroid bias force is
+:math:`\mathbf{F}_c`, this fix adds :math:`\mathbf{F}_c/P` to every one of the
+:math:`P` Cartesian beads.
+
+This mode biases a collective variable evaluated from the coordinate centroid,
+which is generally different from averaging the collective variable over the
+beads.  The scalar bias energy and bias virial are nonzero only on partition
+zero so they are counted once in the ring-polymer Hamiltonian.  Bead-resolved
+trajectories are still required to reconstruct a bead-defined quantum free
+energy.
+
 Restart, fix_modify, output, run start/stop, minimize info
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -119,6 +139,13 @@ LAMMPS was built with that package.  See the :doc:`Build package
 
 There can only be one fix plumed command active at a time.
 
+The *path_integral centroid* mode currently requires
+:doc:`fix pimd/langevin <fix_pimd>` with *method pimd*, *ensemble nvt*, one MPI
+rank per bead, a fixed atom count, consecutive atom IDs, and an atom map.  It
+does not support energy-dependent PLUMED actions, minimization, or r-RESPA.
+The default *path_integral off* setting remains incompatible with path-integral
+fixes.
+
 Related commands
 """"""""""""""""
 
@@ -128,7 +155,7 @@ Related commands
 Default
 """""""
 
-The default options are plumedfile = NULL and outfile = NULL
+The default options are plumedfile = NULL, outfile = NULL, and path_integral = off.
 
 ----------
 

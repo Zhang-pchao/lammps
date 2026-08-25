@@ -779,7 +779,8 @@ void *FixPIMDLangevin::extract(const char *str, int &dim)
     return xcall;
   }
   if (strcmp(str, "nbeads") == 0) return &np;
-  if (strcmp(str, "method") == 0) return &method;
+  if (strcmp(str, "centroid_bias_force_scale") == 0 && method == PIMD && ensemble == NVT)
+    return &inverse_np;
   return nullptr;
 }
 
