@@ -102,7 +102,7 @@ bead partition and enables PLUMED's multiple-replica communication.  Use the
 PLUMED ``ENSEMBLE`` action to define the arithmetic bead mean of a
 collective variable and apply biases only to that mean.  For example:
 
-.. code-block:: plumed
+.. code-block:: text
 
    d: DISTANCE ATOMS=1,2
    mean: ENSEMBLE ARG=d

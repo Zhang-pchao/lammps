@@ -3,7 +3,12 @@
 #define LAMMPS_LIB_MPI 1
 #include "lammps.h"
 #include "library.h"
+#include "lmptype.h"
 #include "timer.h"
+
+#include <array>
+#include <cstdio>
+#include <fstream>
 #include <string>
 
 #include "gmock/gmock.h"
@@ -11,6 +16,7 @@
 
 #include "../testing/test_mpi_main.h"
 
+using ::LAMMPS_NS::tagint;
 using ::testing::ExitedWithCode;
 using ::testing::HasSubstr;
 using ::testing::StartsWith;
@@ -194,6 +200,364 @@ TEST(MPI, multi_partition)
 
     lammps_close(lmp);
 };
+
+#if LAMMPS_HAS_PIMD
+
+namespace {
+
+void *open_multirank_partition()
+{
+    const char *args[] = {"LAMMPS_test", "-screen", "none", "-log",    "none", "-partition",
+                          "2x2",         "-in",     "none", "-nocite", nullptr};
+    char **argv        = (char **)args;
+    int argc           = (sizeof(args) / sizeof(char *)) - 1;
+    return lammps_open(argc, argv, MPI_COMM_WORLD, nullptr);
+}
+
+void create_multirank_two_atom_system(void *lmp)
+{
+    lammps_command(lmp, "variable x2 world 19.0 10.0");
+    lammps_command(lmp, "variable y2 world 10.0 17.0");
+    lammps_command(lmp, "units lj");
+    lammps_command(lmp, "atom_style atomic");
+    lammps_command(lmp, "atom_modify map array");
+    lammps_command(lmp, "boundary p p p");
+    lammps_command(lmp, "region box block 0.0 20.0 0.0 20.0 0.0 20.0");
+    lammps_command(lmp, "create_box 1 box");
+    lammps_command(lmp, "create_atoms 1 single 10.0 10.0 2.0");
+    lammps_command(lmp, "create_atoms 1 single ${x2} ${y2} 2.0");
+    lammps_command(lmp, "mass 1 1.0");
+    lammps_command(lmp, "pair_style lj/cut 2.5");
+    lammps_command(lmp, "pair_coeff * * 0.0 1.0");
+    lammps_command(lmp, "timestep 0.001");
+    lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
+}
+
+} // namespace
+
+TEST(MPI, pimd_multirank_spring_force)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    void *lmp = open_multirank_partition();
+    ASSERT_NE(lmp, nullptr);
+    EXPECT_EQ(lammps_extract_setting(lmp, "world_size"), 2);
+    create_multirank_two_atom_system(lmp);
+    lammps_command(lmp, "group first id 1");
+    lammps_command(lmp, "group second id 2");
+    lammps_command(lmp, "compute first_force first reduce sum fx fy fz");
+    lammps_command(lmp, "compute second_force second reduce sum fx fy fz");
+    lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                        "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+    lammps_command(lmp, "run 0");
+
+    auto *first =
+        (double *)lammps_extract_compute(lmp, "first_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
+    auto *second =
+        (double *)lammps_extract_compute(lmp, "second_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    for (int dimension = 0; dimension < 3; ++dimension)
+        EXPECT_NEAR(first[dimension], 0.0, 1.0e-12);
+    if (me / 2 == 0) {
+        EXPECT_LT(second[0], 0.0);
+        EXPECT_GT(second[1], 0.0);
+    } else {
+        EXPECT_GT(second[0], 0.0);
+        EXPECT_LT(second[1], 0.0);
+    }
+    EXPECT_NEAR(7.0 * second[0] + 9.0 * second[1], 0.0, 1.0e-10);
+    EXPECT_NEAR(second[2], 0.0, 1.0e-12);
+    lammps_close(lmp);
+}
+
+#endif
+
+#if LAMMPS_HAS_PLUMED_PIMD
+
+TEST(MPI, plumed_pimd_input_contract)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+
+    auto open_lammps = []() {
+        const char *args[] = {"LAMMPS_test", "-screen", "none", "-log",    "none", "-partition",
+                              "4x1",         "-in",     "none", "-nocite", nullptr};
+        char **argv        = (char **)args;
+        int argc           = (sizeof(args) / sizeof(char *)) - 1;
+        void *lmp          = lammps_open(argc, argv, MPI_COMM_WORLD, nullptr);
+        lammps_command(lmp, "units lj");
+        lammps_command(lmp, "atom_style atomic");
+        lammps_command(lmp, "atom_modify map array");
+        lammps_command(lmp, "boundary p p p");
+        lammps_command(lmp, "region box block 0.0 20.0 0.0 20.0 0.0 20.0");
+        lammps_command(lmp, "create_box 1 box");
+        lammps_command(lmp, "create_atoms 1 single 10.0 10.0 2.0");
+        lammps_command(lmp, "create_atoms 1 single 19.0 10.0 2.0");
+        lammps_command(lmp, "mass 1 1.0");
+        lammps_command(lmp, "pair_style lj/cut 2.5");
+        lammps_command(lmp, "pair_coeff * * 0.0 1.0");
+        lammps_command(lmp, "timestep 0.001");
+        lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
+        lammps_set_show_error(lmp, 0);
+        return lmp;
+    };
+    auto expect_error = [](void *lmp, const char *command, const char *expected_message) {
+        lammps_command(lmp, command);
+        const int has_error = lammps_has_error(lmp);
+        EXPECT_EQ(has_error, 1);
+        if (has_error) {
+            char error_message[512];
+            EXPECT_NE(lammps_get_last_error_message(lmp, error_message, sizeof(error_message)), 0);
+            EXPECT_THAT(error_message, HasSubstr(expected_message));
+        }
+    };
+
+    const std::array<std::array<const char *, 2>, 3> invalid_commands = {{
+        {"fix guard all plumed path_integral invalid",
+         "Unknown fix plumed path_integral value: invalid"},
+        {"fix guard all plumed path_integral centroid",
+         "Fix plumed path_integral mode requires the pimd_fix keyword"},
+        {"fix guard all plumed pimd_fix fpimd",
+         "Fix plumed pimd_fix requires a path_integral mode"},
+    }};
+    for (const auto &test_case : invalid_commands) {
+        void *lmp = open_lammps();
+        expect_error(lmp, test_case[0], test_case[1]);
+        lammps_close(lmp);
+    }
+
+    void *lmp = open_lammps();
+    lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nve "
+                        "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+    lammps_command(lmp, "fix guard all plumed path_integral centroid pimd_fix fpimd");
+    EXPECT_EQ(lammps_has_error(lmp), 0);
+    expect_error(lmp, "run 0 post no",
+                 "Fix plumed path_integral modes require method pimd and ensemble nvt");
+    lammps_close(lmp);
+}
+
+TEST(MPI, plumed_pimd_bias_modes)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    const char *bead_zero_file          = "test_plumed_pimd_bead_zero.dat";
+    const char *bead_restraint_file     = "test_plumed_pimd_bead_restraint.dat";
+    const char *centroid_zero_file      = "test_plumed_pimd_centroid_zero.dat";
+    const char *centroid_restraint_file = "test_plumed_pimd_centroid_restraint.dat";
+    const char *bead_zero_log           = "test_plumed_pimd_bead_zero.log";
+    const char *bead_restraint_log      = "test_plumed_pimd_bead_restraint.log";
+    const char *centroid_zero_log       = "test_plumed_pimd_centroid_zero.log";
+    const char *centroid_restraint_log  = "test_plumed_pimd_centroid_restraint.log";
+    if (me == 0) {
+        std::ofstream bead_zero(bead_zero_file);
+        bead_zero << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                  << "mean: ENSEMBLE ARG=d\n";
+        std::ofstream bead_restraint(bead_restraint_file);
+        bead_restraint << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                       << "mean: ENSEMBLE ARG=d\n"
+                       << "bias: RESTRAINT ARG=mean.d AT=6.5 KAPPA=4.0\n";
+        std::ofstream centroid_zero(centroid_zero_file);
+        centroid_zero << "d: DISTANCE ATOMS=1,2 NOPBC\n";
+        std::ofstream centroid_restraint(centroid_restraint_file);
+        centroid_restraint << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                           << "bias: RESTRAINT ARG=d AT=0.0 KAPPA=4.0\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const char *args[] = {"LAMMPS_test", "-screen", "none", "-log",    "none", "-partition",
+                          "4x1",         "-in",     "none", "-nocite", nullptr};
+    char **argv        = (char **)args;
+    int argc           = (sizeof(args) / sizeof(char *)) - 1;
+    void *lmp          = lammps_open(argc, argv, MPI_COMM_WORLD, nullptr);
+    ASSERT_NE(lmp, nullptr);
+
+    lammps_command(lmp, "variable x2 world 19.0 10.0 3.0 10.0");
+    lammps_command(lmp, "variable y2 world 10.0 18.0 10.0 4.0");
+    lammps_command(lmp, "units lj");
+    lammps_command(lmp, "atom_style atomic");
+    lammps_command(lmp, "atom_modify map array");
+    lammps_command(lmp, "boundary p p p");
+    lammps_command(lmp, "region box block 0.0 20.0 0.0 20.0 0.0 20.0");
+    lammps_command(lmp, "create_box 1 box");
+    lammps_command(lmp, "create_atoms 1 single 10.0 10.0 2.0");
+    lammps_command(lmp, "create_atoms 1 single ${x2} ${y2} 2.0");
+    lammps_command(lmp, "mass 1 1.0");
+    lammps_command(lmp, "pair_style lj/cut 2.5");
+    lammps_command(lmp, "pair_coeff * * 0.0 1.0");
+    lammps_command(lmp, "timestep 0.001");
+    lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
+    lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                        "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+    const std::array<std::array<double, 6>, 4> bead_force_delta = {
+        {{1.0, 0.0, 0.0, -1.0, 0.0, 0.0},
+         {0.0, 1.0, 0.0, 0.0, -1.0, 0.0},
+         {-1.0, 0.0, 0.0, 1.0, 0.0, 0.0},
+         {0.0, -1.0, 0.0, 0.0, 1.0, 0.0}}};
+    const std::array<double, 6> centroid_force_delta = {0.5, 0.5, 0.0, -0.5, -0.5, 0.0};
+    auto extract_forces                              = [&]() {
+        std::array<double, 6> result{};
+        auto **forces = (double **)lammps_extract_atom(lmp, "f");
+        EXPECT_NE(forces, nullptr);
+        if (!forces) return result;
+
+        for (int atom = 0; atom < 2; ++atom) {
+            const tagint atom_id = atom + 1;
+            const int index      = lammps_map_atom(lmp, &atom_id);
+            EXPECT_GE(index, 0);
+            if (index < 0) continue;
+            for (int dimension = 0; dimension < 3; ++dimension)
+                result[3 * atom + dimension] = forces[index][dimension];
+        }
+        return result;
+    };
+    auto check_mode = [&](const char *zero_command, const char *bias_command, double expected_bias,
+                          const std::array<double, 6> &expected_force_delta) {
+        lammps_command(lmp, zero_command);
+        lammps_command(lmp, "run 0 post no");
+        const auto zero_forces = extract_forces();
+        lammps_command(lmp, "unfix zero");
+
+        lammps_command(lmp, bias_command);
+        lammps_command(lmp, "run 0 post no");
+        const auto biased_forces = extract_forces();
+        auto *bias =
+            (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+        ASSERT_NE(bias, nullptr);
+        EXPECT_NEAR(*bias, me == 0 ? expected_bias : 0.0, 1.0e-12);
+        lammps_free(bias);
+
+        for (std::size_t i = 0; i < expected_force_delta.size(); ++i)
+            EXPECT_NEAR(biased_forces[i] - zero_forces[i], expected_force_delta[i], 1.0e-12);
+        lammps_command(lmp, "unfix bias");
+    };
+
+    check_mode("fix zero all plumed plumedfile test_plumed_pimd_bead_zero.dat "
+               "outfile test_plumed_pimd_bead_zero.log path_integral bead_mean pimd_fix fpimd",
+               "fix bias all plumed plumedfile test_plumed_pimd_bead_restraint.dat "
+               "outfile test_plumed_pimd_bead_restraint.log path_integral bead_mean pimd_fix "
+               "fpimd",
+               2.0, bead_force_delta[me]);
+    check_mode("fix zero all plumed plumedfile test_plumed_pimd_centroid_zero.dat "
+               "outfile test_plumed_pimd_centroid_zero.log path_integral centroid pimd_fix fpimd",
+               "fix bias all plumed plumedfile test_plumed_pimd_centroid_restraint.dat "
+               "outfile test_plumed_pimd_centroid_restraint.log path_integral centroid pimd_fix "
+               "fpimd",
+               1.0, centroid_force_delta);
+
+    lammps_close(lmp);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) {
+        std::remove(bead_zero_file);
+        std::remove(bead_restraint_file);
+        std::remove(centroid_zero_file);
+        std::remove(centroid_restraint_file);
+        for (int i = 0; i < nprocs; ++i) {
+            std::remove((std::string(bead_zero_log) + "." + std::to_string(i)).c_str());
+            std::remove((std::string(bead_restraint_log) + "." + std::to_string(i)).c_str());
+        }
+        std::remove(centroid_zero_log);
+        std::remove(centroid_restraint_log);
+    }
+};
+
+TEST(MPI, plumed_pimd_multirank_bead_mean)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    const char *zero_file      = "test_plumed_pimd_multirank_zero.dat";
+    const char *restraint_file = "test_plumed_pimd_multirank_restraint.dat";
+    const char *zero_log       = "test_plumed_pimd_multirank_zero.log";
+    const char *restraint_log  = "test_plumed_pimd_multirank_restraint.log";
+    if (me == 0) {
+        std::ofstream zero(zero_file);
+        zero << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+             << "mean: ENSEMBLE ARG=d\n";
+        std::ofstream restraint(restraint_file);
+        restraint << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                  << "mean: ENSEMBLE ARG=d\n"
+                  << "bias: RESTRAINT ARG=mean.d AT=7.5 KAPPA=4.0\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const int bead = me / 2;
+    ASSERT_GE(bead, 0);
+    ASSERT_LT(bead, 2);
+    auto run_case = [&](const char *plumed_file, const char *plumed_log) {
+        std::array<double, 7> result{};
+        void *lmp = open_multirank_partition();
+        EXPECT_NE(lmp, nullptr);
+        if (!lmp) return result;
+
+        EXPECT_EQ(lammps_extract_setting(lmp, "world_size"), 2);
+        create_multirank_two_atom_system(lmp);
+        lammps_command(lmp, "group first id 1");
+        lammps_command(lmp, "group second id 2");
+        lammps_command(lmp, "compute first_force first reduce sum fx fy fz");
+        lammps_command(lmp, "compute second_force second reduce sum fx fy fz");
+        lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                            "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+        const std::string fix_command = "fix bias all plumed plumedfile " +
+                                        std::string(plumed_file) + " outfile " + plumed_log +
+                                        " path_integral bead_mean pimd_fix fpimd";
+        lammps_command(lmp, fix_command.c_str());
+        lammps_command(lmp, "run 0");
+
+        auto *first =
+            (double *)lammps_extract_compute(lmp, "first_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
+        auto *second = (double *)lammps_extract_compute(lmp, "second_force", LMP_STYLE_GLOBAL,
+                                                        LMP_TYPE_VECTOR);
+        EXPECT_NE(first, nullptr);
+        EXPECT_NE(second, nullptr);
+        if (first && second) {
+            for (int dimension = 0; dimension < 3; ++dimension) {
+                result[dimension]     = first[dimension];
+                result[3 + dimension] = second[dimension];
+            }
+        }
+        auto *bias =
+            (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+        EXPECT_NE(bias, nullptr);
+        if (bias) {
+            result[6] = *bias;
+            lammps_free(bias);
+        }
+        lammps_close(lmp);
+        return result;
+    };
+
+    const auto zero_result   = run_case(zero_file, zero_log);
+    const auto biased_result = run_case(restraint_file, restraint_log);
+    EXPECT_NEAR(zero_result[6], 0.0, 1.0e-12);
+    EXPECT_NEAR(biased_result[6], bead == 0 ? 0.5 : 0.0, 1.0e-12);
+
+    const std::array<std::array<double, 6>, 2> expected_force_delta = {
+        {{1.0, 0.0, 0.0, -1.0, 0.0, 0.0}, {0.0, 1.0, 0.0, 0.0, -1.0, 0.0}}};
+    for (std::size_t i = 0; i < expected_force_delta[bead].size(); ++i)
+        EXPECT_NEAR(biased_result[i] - zero_result[i], expected_force_delta[bead][i], 1.0e-12);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) {
+        std::remove(zero_file);
+        std::remove(restraint_file);
+        for (int bead_index = 0; bead_index < 2; ++bead_index) {
+            std::remove((std::string(zero_log) + "." + std::to_string(bead_index)).c_str());
+            std::remove((std::string(restraint_log) + "." + std::to_string(bead_index)).c_str());
+        }
+    }
+};
+
+#endif
 
 class MPITest : public ::testing::Test {
 public:
