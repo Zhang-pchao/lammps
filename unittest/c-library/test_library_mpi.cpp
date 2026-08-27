@@ -341,6 +341,189 @@ TEST(MPI, plumed_pimd_input_contract)
     lammps_close(lmp);
 }
 
+TEST(MPI, plumed_pimd_single_bead_limit)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    const char *plumed_file = "test_plumed_pimd_single_bead.dat";
+    const std::string regular_log =
+        "test_plumed_pimd_single_bead_regular." + std::to_string(me) + ".log";
+    const std::string centroid_log =
+        "test_plumed_pimd_single_bead_centroid." + std::to_string(me) + ".log";
+    if (me == 0) {
+        std::ofstream restraint(plumed_file);
+        restraint << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                  << "bias: RESTRAINT ARG=d AT=6.0 KAPPA=4.0\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const char *args[] = {"LAMMPS_test", "-screen", "none", "-log", "none", "-nocite", nullptr};
+    char **argv        = (char **)args;
+    int argc           = (sizeof(args) / sizeof(char *)) - 1;
+    void *lmp          = lammps_open(argc, argv, MPI_COMM_SELF, nullptr);
+    ASSERT_NE(lmp, nullptr);
+    EXPECT_EQ(lammps_extract_setting(lmp, "world_size"), 1);
+
+    lammps_command(lmp, "units lj");
+    lammps_command(lmp, "atom_style atomic");
+    lammps_command(lmp, "atom_modify map array");
+    lammps_command(lmp, "boundary p p p");
+    lammps_command(lmp, "region box block 0.0 20.0 0.0 20.0 0.0 20.0");
+    lammps_command(lmp, "create_box 1 box");
+    lammps_command(lmp, "create_atoms 1 single 10.0 10.0 2.0");
+    lammps_command(lmp, "create_atoms 1 single 19.0 10.0 2.0");
+    lammps_command(lmp, "mass 1 1.0");
+    lammps_command(lmp, "pair_style lj/cut 2.5");
+    lammps_command(lmp, "pair_coeff * * 0.0 1.0");
+    lammps_command(lmp, "timestep 0.001");
+    lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
+
+    auto run_case = [&](const std::string &fix_command) {
+        std::array<double, 7> result{};
+        lammps_command(lmp, fix_command.c_str());
+        lammps_command(lmp, "run 0 post no");
+        // Stock fix plumed exposes its first calculated bias on the next setup.
+        lammps_command(lmp, "run 0 post no");
+        auto **forces = (double **)lammps_extract_atom(lmp, "f");
+        EXPECT_NE(forces, nullptr);
+        if (forces) {
+            for (int atom = 0; atom < 2; ++atom) {
+                const tagint atom_id = atom + 1;
+                const int index      = lammps_map_atom(lmp, &atom_id);
+                EXPECT_GE(index, 0);
+                if (index < 0) continue;
+                for (int dimension = 0; dimension < 3; ++dimension)
+                    result[3 * atom + dimension] = forces[index][dimension];
+            }
+        }
+        auto *bias =
+            (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+        EXPECT_NE(bias, nullptr);
+        if (bias) {
+            result[6] = *bias;
+            lammps_free(bias);
+        }
+        lammps_command(lmp, "unfix bias");
+        return result;
+    };
+
+    const auto regular = run_case("fix bias all plumed plumedfile " + std::string(plumed_file) +
+                                  " outfile " + regular_log);
+    lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                        "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+    const auto centroid =
+        run_case("fix bias all plumed plumedfile " + std::string(plumed_file) + " outfile " +
+                 centroid_log + " path_integral centroid pimd_fix fpimd");
+
+    EXPECT_NEAR(regular[6], 18.0, 1.0e-12);
+    EXPECT_NEAR(centroid[6], 18.0, 1.0e-12);
+    for (std::size_t i = 0; i < regular.size(); ++i)
+        EXPECT_NEAR(centroid[i], regular[i], 1.0e-12);
+
+    lammps_close(lmp);
+    std::remove(regular_log.c_str());
+    std::remove(centroid_log.c_str());
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) std::remove(plumed_file);
+};
+
+TEST(MPI, plumed_pimd_cyclic_bead_permutation)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    const char *centroid_file  = "test_plumed_pimd_cyclic_centroid.dat";
+    const char *bead_mean_file = "test_plumed_pimd_cyclic_bead_mean.dat";
+    const char *centroid_log   = "test_plumed_pimd_cyclic_centroid.log";
+    const char *bead_mean_log  = "test_plumed_pimd_cyclic_bead_mean.log";
+    if (me == 0) {
+        std::ofstream centroid(centroid_file);
+        centroid << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                 << "bias: RESTRAINT ARG=d AT=0.0 KAPPA=4.0\n";
+        std::ofstream bead_mean(bead_mean_file);
+        bead_mean << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                  << "mean: ENSEMBLE ARG=d\n"
+                  << "bias: RESTRAINT ARG=mean.d AT=6.5 KAPPA=4.0\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const std::array<std::array<double, 2>, 4> positions = {
+        {{{19.0, 10.0}}, {{10.0, 18.0}}, {{3.0, 10.0}}, {{10.0, 4.0}}}};
+    auto run_case = [&](const char *plumed_file, const char *plumed_log,
+                        const char *path_integral_mode, int shift) {
+        const char *args[] = {"LAMMPS_test", "-screen", "none", "-log",    "none", "-partition",
+                              "4x1",         "-in",     "none", "-nocite", nullptr};
+        char **argv        = (char **)args;
+        int argc           = (sizeof(args) / sizeof(char *)) - 1;
+        void *lmp          = lammps_open(argc, argv, MPI_COMM_WORLD, nullptr);
+        EXPECT_NE(lmp, nullptr);
+        if (!lmp) return 0.0;
+
+        EXPECT_EQ(lammps_extract_setting(lmp, "world_size"), 1);
+        const auto &position = positions[(me + shift) % nprocs];
+        lammps_command(lmp, "units lj");
+        lammps_command(lmp, "atom_style atomic");
+        lammps_command(lmp, "atom_modify map array");
+        lammps_command(lmp, "boundary p p p");
+        lammps_command(lmp, "region box block 0.0 20.0 0.0 20.0 0.0 20.0");
+        lammps_command(lmp, "create_box 1 box");
+        lammps_command(lmp, "create_atoms 1 single 10.0 10.0 2.0");
+        const std::string create_second = "create_atoms 1 single " + std::to_string(position[0]) +
+                                          " " + std::to_string(position[1]) + " 2.0";
+        lammps_command(lmp, create_second.c_str());
+        lammps_command(lmp, "mass 1 1.0");
+        lammps_command(lmp, "pair_style lj/cut 2.5");
+        lammps_command(lmp, "pair_coeff * * 0.0 1.0");
+        lammps_command(lmp, "timestep 0.001");
+        lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
+        lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                            "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+        const std::string fix_command = "fix bias all plumed plumedfile " +
+                                        std::string(plumed_file) + " outfile " + plumed_log + "." +
+                                        std::to_string(shift) + " path_integral " +
+                                        path_integral_mode + " pimd_fix fpimd";
+        lammps_command(lmp, fix_command.c_str());
+        lammps_command(lmp, "run 0 post no");
+
+        double result = 0.0;
+        auto *bias =
+            (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+        EXPECT_NE(bias, nullptr);
+        if (bias) {
+            result = *bias;
+            lammps_free(bias);
+        }
+        lammps_close(lmp);
+        return result;
+    };
+
+    const double centroid_original  = run_case(centroid_file, centroid_log, "centroid", 0);
+    const double centroid_shifted   = run_case(centroid_file, centroid_log, "centroid", 1);
+    const double bead_mean_original = run_case(bead_mean_file, bead_mean_log, "bead_mean", 0);
+    const double bead_mean_shifted  = run_case(bead_mean_file, bead_mean_log, "bead_mean", 1);
+    EXPECT_NEAR(centroid_original, centroid_shifted, 1.0e-12);
+    EXPECT_NEAR(bead_mean_original, bead_mean_shifted, 1.0e-12);
+    EXPECT_NEAR(centroid_original, me == 0 ? 1.0 : 0.0, 1.0e-12);
+    EXPECT_NEAR(bead_mean_original, me == 0 ? 2.0 : 0.0, 1.0e-12);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) {
+        std::remove(centroid_file);
+        std::remove(bead_mean_file);
+        std::remove((std::string(centroid_log) + ".0").c_str());
+        std::remove((std::string(centroid_log) + ".1").c_str());
+    }
+    for (int shift = 0; shift < 2; ++shift)
+        std::remove(
+            (std::string(bead_mean_log) + "." + std::to_string(shift) + "." + std::to_string(me))
+                .c_str());
+};
+
 TEST(MPI, plumed_pimd_bias_modes)
 {
     int nprocs, me;
