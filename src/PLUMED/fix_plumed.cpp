@@ -107,8 +107,7 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
       p = new PLMD::Plumed;
       p->cmd("getApiVersion", &api_version);
     } catch (const std::exception &exception) {
-      error->universe_one(FLERR,
-                          fmt::format("Could not initialize PLUMED: {}", exception.what()));
+      error->universe_one(FLERR, fmt::format("Could not initialize PLUMED: {}", exception.what()));
     }
   }
   if (path_integral_mode == PATH_INTEGRAL_CENTROID)
@@ -149,8 +148,7 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     // fail if this is called under these circumstances
     if (plumed_active) p->cmd("setMPIComm", &world);
   } catch (const std::exception &exception) {
-    error->universe_one(FLERR,
-                        fmt::format("Could not configure PLUMED MPI: {}", exception.what()));
+    error->universe_one(FLERR, fmt::format("Could not configure PLUMED MPI: {}", exception.what()));
   }
 #endif
 
@@ -238,8 +236,7 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
       p->cmd("setTimestep", &dt);
       p->cmd("init");
     } catch (const std::exception &exception) {
-      error->universe_one(FLERR,
-                          fmt::format("Could not configure PLUMED: {}", exception.what()));
+      error->universe_one(FLERR, fmt::format("Could not configure PLUMED: {}", exception.what()));
     }
   }
 
@@ -681,8 +678,7 @@ void FixPlumed::post_force_centroid()
       p->cmd("prepareCalc");
       p->cmd("isEnergyNeeded", &needs_energy);
     } catch (const std::exception &exception) {
-      error->universe_one(FLERR,
-                          fmt::format("Could not prepare PLUMED: {}", exception.what()));
+      error->universe_one(FLERR, fmt::format("Could not prepare PLUMED: {}", exception.what()));
     }
   }
 
@@ -696,14 +692,12 @@ void FixPlumed::post_force_centroid()
       p->cmd("performCalc");
       p->cmd("getBias", &bias);
     } catch (const std::exception &exception) {
-      error->universe_one(FLERR,
-                          fmt::format("Could not execute PLUMED: {}", exception.what()));
+      error->universe_one(FLERR, fmt::format("Could not execute PLUMED: {}", exception.what()));
     }
     for (int i = 0; i < 3 * natoms; i++) centroid_forces_all[i] = 0.0;
     for (int i = 0; i < nlocal; i++) {
       const int index = atom->tag[i] - 1;
-      for (int d = 0; d < 3; d++)
-        centroid_forces_all[3 * index + d] = centroid_forces[3 * i + d];
+      for (int d = 0; d < 3; d++) centroid_forces_all[3 * index + d] = centroid_forces[3 * i + d];
     }
     virial[0] = -plmd_virial[0][0];
     virial[1] = -plmd_virial[1][1];

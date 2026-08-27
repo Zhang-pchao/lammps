@@ -53,6 +53,8 @@ class FixPIMDLangevin : public Fix {
   void *extract(const char *, int &) override;
 
  protected:
+  FixPIMDLangevin(class LAMMPS *, int, char **, bool);
+
   // System setting variables
   int method;                              // PIMD or NMPIMD or CMD
   int fmmode;                              // physical or normal
@@ -105,10 +107,6 @@ class FixPIMDLangevin : public Fix {
   void comm_init();
   virtual void prepare_coordinates();
   void inter_replica_comm(double **ptr);
-  void ring_collect(const std::vector<tagint> &miss_tag,
-                                            double **ptr,
-                                            std::vector<tagint> &rep_tag,
-                                            std::vector<double> &rep_val);
   void virtual spring_force();
 
   /* normal-mode operations */
