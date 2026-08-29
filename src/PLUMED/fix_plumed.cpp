@@ -49,7 +49,7 @@ using namespace LAMMPS_NS;
 using namespace FixConst;
 
 FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
-    Fix(lmp, narg, arg), p(nullptr), pimd_fix(nullptr), nlocal(0), natoms(0),
+    Fix(lmp, narg, arg), p(nullptr), pimd_fix(nullptr), nlocal(-1), natoms(0),
     path_integral_mode(PATH_INTEGRAL_OFF), plumed_active(1), centroid_force_scale(0.0),
     bead_density_force_scale(0.0), gatindex(nullptr), masses(nullptr), charges(nullptr),
     centroid_coordinates(nullptr), centroid_positions(nullptr), centroid_forces(nullptr),
@@ -445,11 +445,13 @@ void FixPlumed::update_atom_data()
     delete[] forces_before_plumed;
 
     nlocal = atom->nlocal;
-    gatindex = new int[nlocal];
-    masses = new double[nlocal];
-    charges = new double[nlocal];
-    forces_before_plumed = path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ? new double[3 * nlocal]
-                                                                            : nullptr;
+    const int local_capacity = nlocal > 0 ? nlocal : 1;
+    gatindex = new int[local_capacity];
+    masses = new double[local_capacity];
+    charges = new double[local_capacity];
+    forces_before_plumed = path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY
+        ? new double[nlocal > 0 ? 3 * nlocal : 1]
+        : nullptr;
     update_gatindex = 1;
   } else {
     for (int i = 0; i < nlocal; i++) {

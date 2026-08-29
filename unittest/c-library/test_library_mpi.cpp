@@ -734,6 +734,11 @@ TEST(MPI, plumed_pimd_multirank_bead_mean)
 
         EXPECT_EQ(lammps_extract_setting(lmp, "world_size"), 2);
         create_multirank_two_atom_system(lmp);
+        auto *nlocal = (int *)lammps_extract_global(lmp, "nlocal");
+        EXPECT_NE(nlocal, nullptr);
+        int zero_atom_ranks = nlocal && *nlocal == 0;
+        MPI_Allreduce(MPI_IN_PLACE, &zero_atom_ranks, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+        EXPECT_GT(zero_atom_ranks, 0);
         lammps_command(lmp, "group first id 1");
         lammps_command(lmp, "group second id 2");
         lammps_command(lmp, "compute first_force first reduce sum fx fy fz");
