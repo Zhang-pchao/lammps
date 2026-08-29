@@ -148,12 +148,13 @@ multiple-walker machinery does not make them independent statistical samples.
 Using separate histories, or using an unscaled hill height on every bead,
 does not implement this mode's shared bead-density Hamiltonian.
 LAMMPS does not inspect arbitrary PLUMED inputs to verify field sharing or
-deposition normalization.  The native regressions cover fixed biases and a
-deterministic four-bead ``METAD WALKERS_MPI`` case.  That case validates one
-shared HILLS stream, :math:`1/P` hill heights, partition-zero bias ownership,
-and exact append continuity through PLUMED's file restart.  This is an
-interface contract, not production admission for OPES, multiple ranks per
-bead, binary-restart dynamics, or sampling efficiency.
+deposition normalization.  The native regressions cover fixed biases, a
+four-bead single-rank ``METAD WALKERS_MPI`` case, and a two-bead case with two
+MPI ranks per bead.  They validate one shared HILLS stream, :math:`1/P` hill
+heights, partition-zero bias ownership, zero-local-atom ranks, and exact append
+continuity through PLUMED's file restart.  This is an interface contract, not
+production admission for OPES, binary-restart dynamics, performance, or
+sampling efficiency.
 
 The *bead_density* and *bead_mean* modes are different.  The former evaluates
 :math:`P^{-1}\sum_b B(s_b)`, while the latter evaluates
