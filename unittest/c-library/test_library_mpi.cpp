@@ -845,7 +845,7 @@ TEST(MPI, plumed_pimd_bead_density_shared_metad_restart)
     std::remove((std::string(restart_log) + "." + std::to_string(me)).c_str());
 };
 
-TEST(MPI, plumed_pimd_multirank_bead_mean)
+TEST(MPI, plumed_pimd_multirank_bead_modes)
 {
     int nprocs, me;
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
@@ -856,11 +856,20 @@ TEST(MPI, plumed_pimd_multirank_bead_mean)
     const char *restraint_file         = "test_plumed_pimd_multirank_restraint.dat";
     const char *density_zero_file      = "test_plumed_pimd_multirank_density_zero.dat";
     const char *density_restraint_file = "test_plumed_pimd_multirank_density_restraint.dat";
+    const char *density_metad_file     = "test_plumed_pimd_multirank_density_metad.dat";
+    const char *density_restart_file   = "test_plumed_pimd_multirank_density_metad_restart.dat";
+    const char *density_hills_file     = "test_plumed_pimd_multirank_density_metad_hills";
     const char *zero_log               = "test_plumed_pimd_multirank_zero.log";
     const char *restraint_log          = "test_plumed_pimd_multirank_restraint.log";
     const char *density_zero_log       = "test_plumed_pimd_multirank_density_zero.log";
     const char *density_restraint_log  = "test_plumed_pimd_multirank_density_restraint.log";
+    const char *density_metad_log      = "test_plumed_pimd_multirank_density_metad.log";
+    const char *density_restart_log    = "test_plumed_pimd_multirank_density_metad_restart.log";
     if (me == 0) {
+        std::remove(density_hills_file);
+        for (int bead_index = 0; bead_index < 2; ++bead_index)
+            std::remove(
+                (std::string(density_hills_file) + "." + std::to_string(bead_index)).c_str());
         std::ofstream zero(zero_file);
         zero << "d: DISTANCE ATOMS=1,2 NOPBC\n"
              << "mean: ENSEMBLE ARG=d\n";
@@ -873,13 +882,22 @@ TEST(MPI, plumed_pimd_multirank_bead_mean)
         std::ofstream density_restraint(density_restraint_file);
         density_restraint << "d: DISTANCE ATOMS=1,2 NOPBC\n"
                           << "bias: RESTRAINT ARG=d AT=7.5 KAPPA=4.0\n";
+        std::ofstream density_metad(density_metad_file);
+        density_metad << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                      << "bias: METAD ARG=d SIGMA=0.5 HEIGHT=0.5 PACE=2 FILE=" << density_hills_file
+                      << " WALKERS_MPI RESTART=NO\n";
+        std::ofstream density_restart(density_restart_file);
+        density_restart << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                        << "bias: METAD ARG=d SIGMA=0.5 HEIGHT=0.5 PACE=2 FILE="
+                        << density_hills_file << " WALKERS_MPI RESTART=YES\n";
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
     const int bead = me / 2;
     ASSERT_GE(bead, 0);
     ASSERT_LT(bead, 2);
-    auto run_case = [&](const char *plumed_file, const char *plumed_log, const char *mode) {
+    auto run_case = [&](const char *plumed_file, const char *plumed_log, const char *mode,
+                        int step) {
         std::array<double, 7> result{};
         void *lmp = open_multirank_partition();
         EXPECT_NE(lmp, nullptr);
@@ -896,13 +914,14 @@ TEST(MPI, plumed_pimd_multirank_bead_mean)
         lammps_command(lmp, "group second id 2");
         lammps_command(lmp, "compute first_force first reduce sum fx fy fz");
         lammps_command(lmp, "compute second_force second reduce sum fx fy fz");
+        if (step >= 0) lammps_command(lmp, ("reset_timestep " + std::to_string(step)).c_str());
         lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
                             "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
         const std::string fix_command = "fix bias all plumed plumedfile " +
                                         std::string(plumed_file) + " outfile " + plumed_log +
                                         " path_integral " + mode + " pimd_fix fpimd";
         lammps_command(lmp, fix_command.c_str());
-        lammps_command(lmp, "run 0");
+        lammps_command(lmp, step >= 0 ? "run 1 post no" : "run 0");
 
         auto *first =
             (double *)lammps_extract_compute(lmp, "first_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
@@ -927,8 +946,8 @@ TEST(MPI, plumed_pimd_multirank_bead_mean)
         return result;
     };
 
-    const auto zero_result   = run_case(zero_file, zero_log, "bead_mean");
-    const auto biased_result = run_case(restraint_file, restraint_log, "bead_mean");
+    const auto zero_result   = run_case(zero_file, zero_log, "bead_mean", -1);
+    const auto biased_result = run_case(restraint_file, restraint_log, "bead_mean", -1);
     EXPECT_NEAR(zero_result[6], 0.0, 1.0e-12);
     EXPECT_NEAR(biased_result[6], bead == 0 ? 0.5 : 0.0, 1.0e-12);
 
@@ -937,9 +956,10 @@ TEST(MPI, plumed_pimd_multirank_bead_mean)
     for (std::size_t i = 0; i < expected_force_delta[bead].size(); ++i)
         EXPECT_NEAR(biased_result[i] - zero_result[i], expected_force_delta[bead][i], 1.0e-12);
 
-    const auto density_zero_result = run_case(density_zero_file, density_zero_log, "bead_density");
+    const auto density_zero_result =
+        run_case(density_zero_file, density_zero_log, "bead_density", -1);
     const auto density_biased_result =
-        run_case(density_restraint_file, density_restraint_log, "bead_density");
+        run_case(density_restraint_file, density_restraint_log, "bead_density", -1);
     EXPECT_NEAR(density_zero_result[6], 0.0, 1.0e-12);
     EXPECT_NEAR(density_biased_result[6], bead == 0 ? 2.5 : 0.0, 1.0e-12);
 
@@ -949,18 +969,75 @@ TEST(MPI, plumed_pimd_multirank_bead_mean)
         EXPECT_NEAR(density_biased_result[i] - density_zero_result[i],
                     expected_density_force_delta[bead][i], 1.0e-12);
 
+    auto read_hills = [&]() {
+        std::vector<std::vector<double>> records;
+        std::ifstream input(density_hills_file);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream row(line);
+            std::vector<double> record;
+            double value;
+            while (row >> value)
+                record.push_back(value);
+            if (!record.empty()) records.push_back(record);
+        }
+        return records;
+    };
+
+    const auto initial_metad_result =
+        run_case(density_metad_file, density_metad_log, "bead_density", 1);
+    EXPECT_NEAR(initial_metad_result[6], 0.0, 1.0e-12);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const auto initial_hills = read_hills();
+    ASSERT_EQ(initial_hills.size(), 2);
+    for (const auto &record : initial_hills) {
+        ASSERT_EQ(record.size(), 5);
+        EXPECT_NEAR(record[3], 0.5, 1.0e-12);
+    }
+    for (int bead_index = 0; bead_index < 2; ++bead_index) {
+        std::ifstream split_hills(std::string(density_hills_file) + "." +
+                                  std::to_string(bead_index));
+        EXPECT_FALSE(split_hills.good());
+    }
+
+    const auto restarted_metad_result =
+        run_case(density_restart_file, density_restart_log, "bead_density", 3);
+    if (bead == 0)
+        EXPECT_GT(restarted_metad_result[6], 0.0);
+    else
+        EXPECT_NEAR(restarted_metad_result[6], 0.0, 1.0e-12);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const auto restarted_hills = read_hills();
+    ASSERT_EQ(restarted_hills.size(), 4);
+    for (std::size_t i = 0; i < restarted_hills.size(); ++i) {
+        ASSERT_EQ(restarted_hills[i].size(), 5);
+        EXPECT_NEAR(restarted_hills[i][3], 0.5, 1.0e-12);
+        if (i < initial_hills.size()) EXPECT_EQ(restarted_hills[i], initial_hills[i]);
+    }
+    EXPECT_GT(restarted_hills[2][0], restarted_hills[1][0]);
+
     MPI_Barrier(MPI_COMM_WORLD);
     if (me == 0) {
         std::remove(zero_file);
         std::remove(restraint_file);
         std::remove(density_zero_file);
         std::remove(density_restraint_file);
+        std::remove(density_metad_file);
+        std::remove(density_restart_file);
+        std::remove(density_hills_file);
         for (int bead_index = 0; bead_index < 2; ++bead_index) {
             std::remove((std::string(zero_log) + "." + std::to_string(bead_index)).c_str());
             std::remove((std::string(restraint_log) + "." + std::to_string(bead_index)).c_str());
             std::remove((std::string(density_zero_log) + "." + std::to_string(bead_index)).c_str());
             std::remove(
                 (std::string(density_restraint_log) + "." + std::to_string(bead_index)).c_str());
+            std::remove(
+                (std::string(density_metad_log) + "." + std::to_string(bead_index)).c_str());
+            std::remove(
+                (std::string(density_restart_log) + "." + std::to_string(bead_index)).c_str());
         }
     }
 };
