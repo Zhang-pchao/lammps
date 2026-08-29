@@ -1197,6 +1197,269 @@ TEST(MPI, plumed_pimd_bead_density_shared_history_restart)
     std::remove((std::string("bck.0.") + opes_restart_log + "." + std::to_string(me)).c_str());
 };
 
+TEST(MPI, plumed_pimd_centroid_spread_shared_opes_state_restart)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    const char *initial_file    = "test_plumed_pimd_centroid_spread_opes.dat";
+    const char *restart_file    = "test_plumed_pimd_centroid_spread_opes_restart.dat";
+    const char *kernels_initial = "test_plumed_pimd_centroid_spread_opes_kernels";
+    const char *kernels_restart = "test_plumed_pimd_centroid_spread_opes_kernels_restart";
+    const char *state_initial   = "test_plumed_pimd_centroid_spread_opes_state";
+    const char *state_restart   = "test_plumed_pimd_centroid_spread_opes_state_restart";
+    const char *colvar_initial  = "test_plumed_pimd_centroid_spread_opes_colvar";
+    const char *colvar_restart  = "test_plumed_pimd_centroid_spread_opes_colvar_restart";
+    const char *initial_log     = "test_plumed_pimd_centroid_spread_opes.log";
+    const char *restart_log     = "test_plumed_pimd_centroid_spread_opes_restart.log";
+    const std::string cv_graph =
+        "dvec: DISTANCE ATOMS=1,2 COMPONENTS NOPBC\n"
+        "s: CUSTOM ARG=dvec.x,dvec.y,dvec.z FUNC=sqrt(x*x+y*y+z*z) PERIODIC=NO\n"
+        "s2: CUSTOM ARG=s FUNC=x*x PERIODIC=NO\n"
+        "mean: ENSEMBLE ARG=s\n"
+        "mean2: ENSEMBLE ARG=s2\n"
+        "spread2: CUSTOM ARG=mean.s,mean2.s2 FUNC=y-x*x PERIODIC=NO\n"
+        "centroid: ENSEMBLE ARG=dvec.x,dvec.y,dvec.z\n"
+        "sc: CUSTOM ARG=centroid.dvec.x,centroid.dvec.y,centroid.dvec.z "
+        "FUNC=sqrt(x*x+y*y+z*z) PERIODIC=NO\n";
+
+    if (me == 0) {
+        for (const char *file : {initial_file, restart_file, kernels_initial, kernels_restart,
+                                 state_initial, state_restart})
+            std::remove(file);
+        std::remove((std::string("bck.last.") + state_initial).c_str());
+        std::remove((std::string("bck.last.") + state_restart).c_str());
+        for (int walker = 0; walker < nprocs; ++walker) {
+            for (const char *file :
+                 {kernels_initial, kernels_restart, state_initial, state_restart})
+                std::remove((std::string(file) + "." + std::to_string(walker)).c_str());
+            std::remove((std::string(colvar_initial) + "." + std::to_string(walker)).c_str());
+            std::remove((std::string(colvar_restart) + "." + std::to_string(walker)).c_str());
+        }
+
+        std::ofstream initial(initial_file);
+        initial << cv_graph
+                << "bias: OPES_METAD ARG=sc,spread2 PACE=2 BARRIER=4 TEMP=1 "
+                   "SIGMA=0.5,0.25 FILE="
+                << kernels_initial << " STATE_WFILE=" << state_initial
+                << " STATE_WSTRIDE=2 WALKERS_MPI RESTART=NO\n"
+                << "PRINT ARG=sc,spread2,bias.bias,bias.rct,bias.zed,bias.neff,bias.nker FILE="
+                << colvar_initial << " STRIDE=1\n";
+        std::ofstream restart(restart_file);
+        restart << "RESTART\n"
+                << cv_graph
+                << "bias: OPES_METAD ARG=sc,spread2 PACE=2 BARRIER=4 TEMP=1 "
+                   "SIGMA=0.5,0.25 FILE="
+                << kernels_restart << " STATE_RFILE=" << state_initial
+                << " STATE_WFILE=" << state_restart << " STATE_WSTRIDE=2 WALKERS_MPI RESTART=YES\n"
+                << "PRINT ARG=sc,spread2,bias.bias,bias.rct,bias.zed,bias.neff,bias.nker FILE="
+                << colvar_restart << " STRIDE=1 RESTART=NO\n";
+    }
+    std::remove((std::string(initial_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string(restart_log) + "." + std::to_string(me)).c_str());
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    auto run_case = [&](const char *plumed_file, const char *plumed_log, int step) {
+        const char *args[] = {"LAMMPS_test", "-screen", "none", "-log",    "none", "-partition",
+                              "4x1",         "-in",     "none", "-nocite", nullptr};
+        char **argv        = (char **)args;
+        int argc           = (sizeof(args) / sizeof(char *)) - 1;
+        void *lmp          = lammps_open(argc, argv, MPI_COMM_WORLD, nullptr);
+        EXPECT_NE(lmp, nullptr);
+        if (!lmp) return 0.0;
+        lammps_set_show_error(lmp, 0);
+
+        auto has_error = [&](const char *stage) {
+            if (!lammps_has_error(lmp)) return false;
+            char error_message[512];
+            lammps_get_last_error_message(lmp, error_message, sizeof(error_message));
+            ADD_FAILURE() << stage << ": " << error_message;
+            return true;
+        };
+
+        lammps_command(lmp, "variable x2 world 19.0 18.0 17.0 16.0");
+        lammps_command(lmp, "units lj");
+        lammps_command(lmp, "atom_style atomic");
+        lammps_command(lmp, "atom_modify map array");
+        lammps_command(lmp, "boundary p p p");
+        lammps_command(lmp, "region box block 0.0 20.0 0.0 20.0 0.0 20.0");
+        lammps_command(lmp, "create_box 1 box");
+        lammps_command(lmp, "create_atoms 1 single 10.0 10.0 2.0");
+        lammps_command(lmp, "create_atoms 1 single ${x2} 10.0 2.0");
+        lammps_command(lmp, "mass 1 1.0");
+        lammps_command(lmp, "pair_style lj/cut 2.5");
+        lammps_command(lmp, "pair_coeff * * 0.0 1.0");
+        lammps_command(lmp, "timestep 0.001");
+        lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
+        lammps_command(lmp, ("reset_timestep " + std::to_string(step)).c_str());
+        lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                            "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+        const std::string fix_command = "fix bias all plumed plumedfile " +
+                                        std::string(plumed_file) + " outfile " + plumed_log +
+                                        " path_integral bead_mean pimd_fix fpimd";
+        lammps_command(lmp, fix_command.c_str());
+        if (has_error("fix plumed")) {
+            lammps_close(lmp);
+            return 0.0;
+        }
+        lammps_command(lmp, "run 1 post no");
+        if (has_error("run")) {
+            lammps_close(lmp);
+            return 0.0;
+        }
+
+        double result = 0.0;
+        auto *bias =
+            (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+        EXPECT_NE(bias, nullptr);
+        if (bias) {
+            result = *bias;
+            lammps_free(bias);
+        }
+        lammps_close(lmp);
+        return result;
+    };
+
+    auto read_records = [](const char *file) {
+        std::vector<std::vector<double>> records;
+        std::ifstream input(file);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream row(line);
+            std::vector<double> record;
+            double value;
+            while (row >> value)
+                record.push_back(value);
+            if (!record.empty()) records.push_back(record);
+        }
+        return records;
+    };
+    auto read_fields = [](const char *file) {
+        std::vector<std::string> fields;
+        std::ifstream input(file);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.rfind("#! FIELDS", 0) != 0) continue;
+            std::istringstream row(line);
+            std::string marker, label, field;
+            row >> marker >> label;
+            while (row >> field)
+                fields.push_back(field);
+            break;
+        }
+        return fields;
+    };
+    auto read_state_counter = [](const char *file) {
+        std::ifstream input(file);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.rfind("#! SET counter", 0) != 0) continue;
+            std::istringstream row(line);
+            std::string marker, set, key;
+            int counter = -1;
+            row >> marker >> set >> key >> counter;
+            return counter;
+        }
+        return -1;
+    };
+
+    const double initial_bias = run_case(initial_file, initial_log, 1);
+    EXPECT_TRUE(std::isfinite(initial_bias));
+    if (me == 0)
+        EXPECT_LT(initial_bias, 0.0);
+    else
+        EXPECT_NEAR(initial_bias, 0.0, 1.0e-12);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const auto initial_kernels = read_records(kernels_initial);
+    const auto initial_state   = read_records(state_initial);
+    ASSERT_EQ(initial_kernels.size(), 4);
+    ASSERT_EQ(initial_state.size(), 1);
+    EXPECT_EQ(read_state_counter(state_initial), 5);
+    for (const auto &record : initial_kernels)
+        ASSERT_EQ(record.size(), 7);
+    for (const auto &record : initial_state)
+        ASSERT_EQ(record.size(), 6);
+    const auto kernel_fields = read_fields(kernels_initial);
+    const auto state_fields  = read_fields(state_initial);
+    EXPECT_NE(std::find(kernel_fields.begin(), kernel_fields.end(), "sc"), kernel_fields.end());
+    EXPECT_NE(std::find(kernel_fields.begin(), kernel_fields.end(), "spread2"),
+              kernel_fields.end());
+    EXPECT_NE(std::find(state_fields.begin(), state_fields.end(), "sc"), state_fields.end());
+    EXPECT_NE(std::find(state_fields.begin(), state_fields.end(), "spread2"), state_fields.end());
+    for (int walker = 0; walker < nprocs; ++walker) {
+        for (const char *file : {kernels_initial, state_initial}) {
+            std::ifstream split_file(std::string(file) + "." + std::to_string(walker));
+            EXPECT_FALSE(split_file.good());
+        }
+        const std::string colvar = std::string(colvar_initial) + "." + std::to_string(walker);
+        const auto records       = read_records(colvar.c_str());
+        ASSERT_EQ(records.size(), 2);
+        ASSERT_EQ(records.back().size(), 8);
+        EXPECT_NEAR(records.front()[1], 7.5, 1.0e-12);
+        EXPECT_NEAR(records.front()[2], 1.25, 1.0e-12);
+        EXPECT_NEAR(records.back()[7], 1.0, 1.0e-12);
+    }
+
+    const double restart_bias = run_case(restart_file, restart_log, 3);
+    EXPECT_TRUE(std::isfinite(restart_bias));
+    if (me == 0)
+        EXPECT_NE(restart_bias, 0.0);
+    else
+        EXPECT_NEAR(restart_bias, 0.0, 1.0e-12);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    EXPECT_EQ(read_records(state_initial), initial_state);
+    const auto restarted_kernels = read_records(kernels_restart);
+    const auto restarted_state   = read_records(state_restart);
+    ASSERT_EQ(restarted_kernels.size(), 4);
+    ASSERT_EQ(restarted_state.size(), 1);
+    EXPECT_EQ(read_state_counter(state_restart), 9);
+    for (const auto &record : restarted_kernels)
+        ASSERT_EQ(record.size(), 7);
+    for (const auto &record : restarted_state)
+        ASSERT_EQ(record.size(), 6);
+    for (int walker = 0; walker < nprocs; ++walker) {
+        for (const char *file : {kernels_restart, state_restart}) {
+            std::ifstream split_file(std::string(file) + "." + std::to_string(walker));
+            EXPECT_FALSE(split_file.good());
+        }
+        const std::string initial_colvar =
+            std::string(colvar_initial) + "." + std::to_string(walker);
+        const std::string restart_colvar =
+            std::string(colvar_restart) + "." + std::to_string(walker);
+        const auto initial_records = read_records(initial_colvar.c_str());
+        const auto restart_records = read_records(restart_colvar.c_str());
+        ASSERT_EQ(initial_records.size(), 2);
+        ASSERT_EQ(restart_records.size(), 2);
+        ASSERT_EQ(initial_records.back().size(), 8);
+        ASSERT_EQ(restart_records.front().size(), 8);
+        EXPECT_NEAR(restart_records.front()[4], initial_records.back()[4], 1.0e-12);
+        EXPECT_NEAR(restart_records.front()[5], initial_records.back()[5], 1.0e-12);
+        EXPECT_NEAR(restart_records.front()[6], initial_records.back()[6], 1.0e-12);
+        EXPECT_NEAR(restart_records.front()[7], 1.0, 1.0e-12);
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) {
+        for (const char *file : {initial_file, restart_file, kernels_initial, kernels_restart,
+                                 state_initial, state_restart})
+            std::remove(file);
+        std::remove((std::string("bck.last.") + state_initial).c_str());
+        std::remove((std::string("bck.last.") + state_restart).c_str());
+        for (int walker = 0; walker < nprocs; ++walker) {
+            std::remove((std::string(colvar_initial) + "." + std::to_string(walker)).c_str());
+            std::remove((std::string(colvar_restart) + "." + std::to_string(walker)).c_str());
+        }
+    }
+    std::remove((std::string(initial_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string(restart_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string("bck.0.") + restart_log + "." + std::to_string(me)).c_str());
+};
+
 TEST(MPI, plumed_pimd_multirank_bead_modes)
 {
     int nprocs, me;
