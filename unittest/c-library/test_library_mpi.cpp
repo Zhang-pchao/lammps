@@ -7,6 +7,7 @@
 #include "timer.h"
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -694,18 +695,28 @@ TEST(MPI, plumed_pimd_bias_modes)
     std::remove((std::string(density_restraint_log) + "." + std::to_string(me)).c_str());
 };
 
-TEST(MPI, plumed_pimd_bead_density_shared_metad_restart)
+TEST(MPI, plumed_pimd_bead_density_shared_history_restart)
 {
     int nprocs, me;
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
 
-    const char *initial_file = "test_plumed_pimd_density_metad.dat";
-    const char *restart_file = "test_plumed_pimd_density_metad_restart.dat";
-    const char *hills_file   = "test_plumed_pimd_density_metad_hills";
-    const char *initial_log  = "test_plumed_pimd_density_metad.log";
-    const char *restart_log  = "test_plumed_pimd_density_metad_restart.log";
+    const char *initial_file      = "test_plumed_pimd_density_metad.dat";
+    const char *restart_file      = "test_plumed_pimd_density_metad_restart.dat";
+    const char *hills_file        = "test_plumed_pimd_density_metad_hills";
+    const char *initial_log       = "test_plumed_pimd_density_metad.log";
+    const char *restart_log       = "test_plumed_pimd_density_metad_restart.log";
+    const char *opes_initial_file = "test_plumed_pimd_density_opes.dat";
+    const char *opes_restart_file = "test_plumed_pimd_density_opes_restart.dat";
+    const char *kernels_initial   = "test_plumed_pimd_density_opes_kernels";
+    const char *kernels_restart   = "test_plumed_pimd_density_opes_kernels_restart";
+    const char *state_initial     = "test_plumed_pimd_density_opes_state";
+    const char *state_restart     = "test_plumed_pimd_density_opes_state_restart";
+    const char *colvar_initial    = "test_plumed_pimd_density_opes_colvar";
+    const char *colvar_restart    = "test_plumed_pimd_density_opes_colvar_restart";
+    const char *opes_initial_log  = "test_plumed_pimd_density_opes.log";
+    const char *opes_restart_log  = "test_plumed_pimd_density_opes_restart.log";
 
     if (me == 0) {
         std::remove(initial_file);
@@ -713,6 +724,18 @@ TEST(MPI, plumed_pimd_bead_density_shared_metad_restart)
         std::remove(hills_file);
         for (int walker = 0; walker < nprocs; ++walker)
             std::remove((std::string(hills_file) + "." + std::to_string(walker)).c_str());
+        for (const char *file : {opes_initial_file, opes_restart_file, kernels_initial,
+                                 kernels_restart, state_initial, state_restart})
+            std::remove(file);
+        std::remove((std::string("bck.last.") + state_initial).c_str());
+        std::remove((std::string("bck.last.") + state_restart).c_str());
+        for (int walker = 0; walker < nprocs; ++walker) {
+            for (const char *file :
+                 {kernels_initial, kernels_restart, state_initial, state_restart})
+                std::remove((std::string(file) + "." + std::to_string(walker)).c_str());
+            std::remove((std::string(colvar_initial) + "." + std::to_string(walker)).c_str());
+            std::remove((std::string(colvar_restart) + "." + std::to_string(walker)).c_str());
+        }
 
         std::ofstream initial(initial_file);
         initial << "d: DISTANCE ATOMS=1,2 NOPBC\n"
@@ -722,9 +745,27 @@ TEST(MPI, plumed_pimd_bead_density_shared_metad_restart)
         restart << "d: DISTANCE ATOMS=1,2 NOPBC\n"
                 << "bias: METAD ARG=d SIGMA=0.5 HEIGHT=0.25 PACE=2 FILE=" << hills_file
                 << " WALKERS_MPI RESTART=YES\n";
+        std::ofstream opes_initial(opes_initial_file);
+        opes_initial << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                     << "bias: OPES_METAD ARG=d PACE=2 BARRIER=4 TEMP=1 SIGMA=0.5 FILE="
+                     << kernels_initial << " STATE_WFILE=" << state_initial
+                     << " STATE_WSTRIDE=2 WALKERS_MPI RESTART=NO\n"
+                     << "PRINT ARG=d,bias.bias,bias.rct,bias.zed,bias.neff,bias.nker FILE="
+                     << colvar_initial << " STRIDE=1\n";
+        std::ofstream opes_restart(opes_restart_file);
+        opes_restart << "RESTART\n"
+                     << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                     << "bias: OPES_METAD ARG=d PACE=2 BARRIER=4 TEMP=1 SIGMA=0.5 FILE="
+                     << kernels_restart << " STATE_RFILE=" << state_initial
+                     << " STATE_WFILE=" << state_restart
+                     << " STATE_WSTRIDE=2 WALKERS_MPI RESTART=YES\n"
+                     << "PRINT ARG=d,bias.bias,bias.rct,bias.zed,bias.neff,bias.nker FILE="
+                     << colvar_restart << " STRIDE=1 RESTART=NO\n";
     }
     std::remove((std::string(initial_log) + "." + std::to_string(me)).c_str());
     std::remove((std::string(restart_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string(opes_initial_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string(opes_restart_log) + "." + std::to_string(me)).c_str());
     MPI_Barrier(MPI_COMM_WORLD);
 
     auto run_case = [&](const char *plumed_file, const char *plumed_log, int step) {
@@ -788,9 +829,9 @@ TEST(MPI, plumed_pimd_bead_density_shared_metad_restart)
         return result;
     };
 
-    auto read_hills = [&]() {
+    auto read_records = [](const char *file) {
         std::vector<std::vector<double>> records;
-        std::ifstream input(hills_file);
+        std::ifstream input(file);
         std::string line;
         while (std::getline(input, line)) {
             if (line.empty() || line[0] == '#') continue;
@@ -803,12 +844,25 @@ TEST(MPI, plumed_pimd_bead_density_shared_metad_restart)
         }
         return records;
     };
+    auto read_state_counter = [](const char *file) {
+        std::ifstream input(file);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.rfind("#! SET counter", 0) != 0) continue;
+            std::istringstream row(line);
+            std::string marker, set, key;
+            int counter = -1;
+            row >> marker >> set >> key >> counter;
+            return counter;
+        }
+        return -1;
+    };
 
     const double initial_bias = run_case(initial_file, initial_log, 1);
     EXPECT_NEAR(initial_bias, 0.0, 1.0e-12);
     MPI_Barrier(MPI_COMM_WORLD);
 
-    const auto initial_hills = read_hills();
+    const auto initial_hills = read_records(hills_file);
     ASSERT_EQ(initial_hills.size(), 4);
     for (const auto &record : initial_hills) {
         ASSERT_EQ(record.size(), 5);
@@ -826,7 +880,7 @@ TEST(MPI, plumed_pimd_bead_density_shared_metad_restart)
         EXPECT_NEAR(restart_bias, 0.0, 1.0e-12);
     MPI_Barrier(MPI_COMM_WORLD);
 
-    const auto restarted_hills = read_hills();
+    const auto restarted_hills = read_records(hills_file);
     ASSERT_EQ(restarted_hills.size(), 8);
     for (std::size_t i = 0; i < restarted_hills.size(); ++i) {
         ASSERT_EQ(restarted_hills[i].size(), 5);
@@ -835,14 +889,94 @@ TEST(MPI, plumed_pimd_bead_density_shared_metad_restart)
     }
     EXPECT_GT(restarted_hills[4][0], restarted_hills[3][0]);
 
+    const double initial_opes_bias = run_case(opes_initial_file, opes_initial_log, 1);
+    EXPECT_TRUE(std::isfinite(initial_opes_bias));
+    if (me == 0)
+        EXPECT_LT(initial_opes_bias, 0.0);
+    else
+        EXPECT_NEAR(initial_opes_bias, 0.0, 1.0e-12);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const auto initial_kernels = read_records(kernels_initial);
+    const auto initial_state   = read_records(state_initial);
+    ASSERT_EQ(initial_kernels.size(), 4);
+    ASSERT_EQ(initial_state.size(), 4);
+    EXPECT_EQ(read_state_counter(state_initial), 5);
+    for (const auto &record : initial_kernels)
+        ASSERT_EQ(record.size(), 5);
+    for (const auto &record : initial_state)
+        ASSERT_EQ(record.size(), 4);
+    for (int walker = 0; walker < nprocs; ++walker) {
+        std::ifstream split_kernels(std::string(kernels_initial) + "." + std::to_string(walker));
+        std::ifstream split_state(std::string(state_initial) + "." + std::to_string(walker));
+        EXPECT_FALSE(split_kernels.good());
+        EXPECT_FALSE(split_state.good());
+        const std::string colvar = std::string(colvar_initial) + "." + std::to_string(walker);
+        const auto records       = read_records(colvar.c_str());
+        ASSERT_EQ(records.size(), 2);
+        ASSERT_EQ(records.back().size(), 7);
+        EXPECT_NEAR(records.back()[6], 4.0, 1.0e-12);
+    }
+
+    const double restart_opes_bias = run_case(opes_restart_file, opes_restart_log, 3);
+    EXPECT_TRUE(std::isfinite(restart_opes_bias));
+    if (me == 0)
+        EXPECT_NE(restart_opes_bias, 0.0);
+    else
+        EXPECT_NEAR(restart_opes_bias, 0.0, 1.0e-12);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    EXPECT_EQ(read_records(state_initial), initial_state);
+    const auto restarted_kernels = read_records(kernels_restart);
+    const auto restarted_state   = read_records(state_restart);
+    ASSERT_EQ(restarted_kernels.size(), 4);
+    ASSERT_EQ(restarted_state.size(), 4);
+    EXPECT_EQ(read_state_counter(state_restart), 9);
+    for (const auto &record : restarted_kernels)
+        ASSERT_EQ(record.size(), 5);
+    for (const auto &record : restarted_state)
+        ASSERT_EQ(record.size(), 4);
+    for (int walker = 0; walker < nprocs; ++walker) {
+        for (const char *file : {kernels_restart, state_restart}) {
+            std::ifstream split_file(std::string(file) + "." + std::to_string(walker));
+            EXPECT_FALSE(split_file.good());
+        }
+        const std::string initial_colvar =
+            std::string(colvar_initial) + "." + std::to_string(walker);
+        const std::string restart_colvar =
+            std::string(colvar_restart) + "." + std::to_string(walker);
+        const auto initial_records = read_records(initial_colvar.c_str());
+        const auto restart_records = read_records(restart_colvar.c_str());
+        ASSERT_EQ(initial_records.size(), 2);
+        ASSERT_EQ(restart_records.size(), 2);
+        ASSERT_EQ(initial_records.back().size(), 7);
+        ASSERT_EQ(restart_records.front().size(), 7);
+        EXPECT_NEAR(restart_records.front()[3], initial_records.back()[3], 1.0e-12);
+        EXPECT_NEAR(restart_records.front()[4], initial_records.back()[4], 1.0e-12);
+        EXPECT_NEAR(restart_records.front()[5], initial_records.back()[5], 1.0e-12);
+        EXPECT_NEAR(restart_records.front()[6], 4.0, 1.0e-12);
+    }
+
     MPI_Barrier(MPI_COMM_WORLD);
     if (me == 0) {
         std::remove(initial_file);
         std::remove(restart_file);
         std::remove(hills_file);
+        for (const char *file : {opes_initial_file, opes_restart_file, kernels_initial,
+                                 kernels_restart, state_initial, state_restart})
+            std::remove(file);
+        std::remove((std::string("bck.last.") + state_initial).c_str());
+        std::remove((std::string("bck.last.") + state_restart).c_str());
+        for (int walker = 0; walker < nprocs; ++walker) {
+            std::remove((std::string(colvar_initial) + "." + std::to_string(walker)).c_str());
+            std::remove((std::string(colvar_restart) + "." + std::to_string(walker)).c_str());
+        }
     }
     std::remove((std::string(initial_log) + "." + std::to_string(me)).c_str());
     std::remove((std::string(restart_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string(opes_initial_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string(opes_restart_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string("bck.0.") + opes_restart_log + "." + std::to_string(me)).c_str());
 };
 
 TEST(MPI, plumed_pimd_multirank_bead_modes)
