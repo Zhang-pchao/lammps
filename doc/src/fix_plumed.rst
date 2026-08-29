@@ -148,7 +148,8 @@ multiple-walker machinery does not make them independent statistical samples.
 Using separate histories, or using an unscaled hill height on every bead,
 does not implement this mode's shared bead-density Hamiltonian.
 LAMMPS does not inspect arbitrary PLUMED inputs to verify field sharing or
-deposition normalization.  The native regressions cover fixed biases,
+deposition normalization.  The native regressions cover fixed biases, a
+matched five-step centroid/bead-density linear-bias dynamics limit,
 ``METAD WALKERS_MPI`` with single- and multi-rank bead partitions, and a
 four-bead ``OPES_METAD WALKERS_MPI`` restart.  They validate one shared HILLS
 stream with :math:`1/P` MetaD hill heights, shared OPES KERNELS and STATE files,
