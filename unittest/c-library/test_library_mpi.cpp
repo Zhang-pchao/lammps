@@ -443,9 +443,11 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
 
     const char *centroid_file  = "test_plumed_pimd_cyclic_centroid.dat";
     const char *bead_mean_file = "test_plumed_pimd_cyclic_bead_mean.dat";
+    const char *path_spread_file  = "test_plumed_pimd_cyclic_path_spread.dat";
     const char *bead_density_file = "test_plumed_pimd_cyclic_bead_density.dat";
     const char *centroid_log   = "test_plumed_pimd_cyclic_centroid.log";
     const char *bead_mean_log  = "test_plumed_pimd_cyclic_bead_mean.log";
+    const char *path_spread_log   = "test_plumed_pimd_cyclic_path_spread.log";
     const char *bead_density_log  = "test_plumed_pimd_cyclic_bead_density.log";
     if (me == 0) {
         std::ofstream centroid(centroid_file);
@@ -455,6 +457,13 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
         bead_mean << "d: DISTANCE ATOMS=1,2 NOPBC\n"
                   << "mean: ENSEMBLE ARG=d\n"
                   << "bias: RESTRAINT ARG=mean.d AT=6.5 KAPPA=4.0\n";
+        std::ofstream path_spread(path_spread_file);
+        path_spread << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                    << "d2: CUSTOM ARG=d FUNC=x*x PERIODIC=NO\n"
+                    << "mean: ENSEMBLE ARG=d\n"
+                    << "mean2: ENSEMBLE ARG=d2\n"
+                    << "spread2: CUSTOM ARG=mean.d,mean2.d2 FUNC=y-x*x PERIODIC=NO\n"
+                    << "bias: RESTRAINT ARG=spread2 AT=0.0 KAPPA=4.0\n";
         std::ofstream bead_density(bead_density_file);
         bead_density << "d: DISTANCE ATOMS=1,2 NOPBC\n"
                      << "bias: RESTRAINT ARG=d AT=6.5 KAPPA=4.0\n";
@@ -515,21 +524,26 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
     const double centroid_shifted   = run_case(centroid_file, centroid_log, "centroid", 1);
     const double bead_mean_original = run_case(bead_mean_file, bead_mean_log, "bead_mean", 0);
     const double bead_mean_shifted  = run_case(bead_mean_file, bead_mean_log, "bead_mean", 1);
+    const double path_spread_original = run_case(path_spread_file, path_spread_log, "bead_mean", 0);
+    const double path_spread_shifted  = run_case(path_spread_file, path_spread_log, "bead_mean", 1);
     const double bead_density_original =
         run_case(bead_density_file, bead_density_log, "bead_density", 0);
     const double bead_density_shifted =
         run_case(bead_density_file, bead_density_log, "bead_density", 1);
     EXPECT_NEAR(centroid_original, centroid_shifted, 1.0e-12);
     EXPECT_NEAR(bead_mean_original, bead_mean_shifted, 1.0e-12);
+    EXPECT_NEAR(path_spread_original, path_spread_shifted, 1.0e-12);
     EXPECT_NEAR(bead_density_original, bead_density_shifted, 1.0e-12);
     EXPECT_NEAR(centroid_original, me == 0 ? 1.0 : 0.0, 1.0e-12);
     EXPECT_NEAR(bead_mean_original, me == 0 ? 2.0 : 0.0, 1.0e-12);
+    EXPECT_NEAR(path_spread_original, me == 0 ? 3.125 : 0.0, 1.0e-12);
     EXPECT_NEAR(bead_density_original, me == 0 ? 4.5 : 0.0, 1.0e-12);
 
     MPI_Barrier(MPI_COMM_WORLD);
     if (me == 0) {
         std::remove(centroid_file);
         std::remove(bead_mean_file);
+        std::remove(path_spread_file);
         std::remove(bead_density_file);
         std::remove((std::string(centroid_log) + ".0").c_str());
         std::remove((std::string(centroid_log) + ".1").c_str());
@@ -537,6 +551,10 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
     for (int shift = 0; shift < 2; ++shift)
         std::remove(
             (std::string(bead_mean_log) + "." + std::to_string(shift) + "." + std::to_string(me))
+                .c_str());
+    for (int shift = 0; shift < 2; ++shift)
+        std::remove(
+            (std::string(path_spread_log) + "." + std::to_string(shift) + "." + std::to_string(me))
                 .c_str());
     for (int shift = 0; shift < 2; ++shift)
         std::remove(
@@ -553,12 +571,16 @@ TEST(MPI, plumed_pimd_bias_modes)
 
     const char *bead_zero_file          = "test_plumed_pimd_bead_zero.dat";
     const char *bead_restraint_file     = "test_plumed_pimd_bead_restraint.dat";
+    const char *path_spread_zero_file      = "test_plumed_pimd_path_spread_zero.dat";
+    const char *path_spread_restraint_file = "test_plumed_pimd_path_spread_restraint.dat";
     const char *centroid_zero_file      = "test_plumed_pimd_centroid_zero.dat";
     const char *centroid_restraint_file = "test_plumed_pimd_centroid_restraint.dat";
     const char *density_zero_file       = "test_plumed_pimd_density_zero.dat";
     const char *density_restraint_file  = "test_plumed_pimd_density_restraint.dat";
     const char *bead_zero_log           = "test_plumed_pimd_bead_zero.log";
     const char *bead_restraint_log      = "test_plumed_pimd_bead_restraint.log";
+    const char *path_spread_zero_log       = "test_plumed_pimd_path_spread_zero.log";
+    const char *path_spread_restraint_log  = "test_plumed_pimd_path_spread_restraint.log";
     const char *centroid_zero_log       = "test_plumed_pimd_centroid_zero.log";
     const char *centroid_restraint_log  = "test_plumed_pimd_centroid_restraint.log";
     const char *density_zero_log        = "test_plumed_pimd_density_zero.log";
@@ -571,6 +593,19 @@ TEST(MPI, plumed_pimd_bias_modes)
         bead_restraint << "d: DISTANCE ATOMS=1,2 NOPBC\n"
                        << "mean: ENSEMBLE ARG=d\n"
                        << "bias: RESTRAINT ARG=mean.d AT=6.5 KAPPA=4.0\n";
+        std::ofstream path_spread_zero(path_spread_zero_file);
+        path_spread_zero << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                         << "d2: CUSTOM ARG=d FUNC=x*x PERIODIC=NO\n"
+                         << "mean: ENSEMBLE ARG=d\n"
+                         << "mean2: ENSEMBLE ARG=d2\n"
+                         << "spread2: CUSTOM ARG=mean.d,mean2.d2 FUNC=y-x*x PERIODIC=NO\n";
+        std::ofstream path_spread_restraint(path_spread_restraint_file);
+        path_spread_restraint << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                              << "d2: CUSTOM ARG=d FUNC=x*x PERIODIC=NO\n"
+                              << "mean: ENSEMBLE ARG=d\n"
+                              << "mean2: ENSEMBLE ARG=d2\n"
+                              << "spread2: CUSTOM ARG=mean.d,mean2.d2 FUNC=y-x*x PERIODIC=NO\n"
+                              << "bias: RESTRAINT ARG=spread2 AT=0.0 KAPPA=4.0\n";
         std::ofstream centroid_zero(centroid_zero_file);
         centroid_zero << "d: DISTANCE ATOMS=1,2 NOPBC\n";
         std::ofstream centroid_restraint(centroid_restraint_file);
@@ -613,6 +648,11 @@ TEST(MPI, plumed_pimd_bias_modes)
          {0.0, 1.0, 0.0, 0.0, -1.0, 0.0},
          {-1.0, 0.0, 0.0, 1.0, 0.0, 0.0},
          {0.0, -1.0, 0.0, 0.0, 1.0, 0.0}}};
+    const std::array<std::array<double, 6>, 4> path_spread_force_delta = {
+        {{3.75, 0.0, 0.0, -3.75, 0.0, 0.0},
+         {0.0, 1.25, 0.0, 0.0, -1.25, 0.0},
+         {1.25, 0.0, 0.0, -1.25, 0.0, 0.0},
+         {0.0, 3.75, 0.0, 0.0, -3.75, 0.0}}};
     const std::array<double, 6> centroid_force_delta = {0.5, 0.5, 0.0, -0.5, -0.5, 0.0};
     const std::array<std::array<double, 6>, 4> density_force_delta = {
         {{2.5, 0.0, 0.0, -2.5, 0.0, 0.0},
@@ -662,6 +702,13 @@ TEST(MPI, plumed_pimd_bias_modes)
                "outfile test_plumed_pimd_bead_restraint.log path_integral bead_mean pimd_fix "
                "fpimd",
                2.0, bead_force_delta[me]);
+    check_mode("fix zero all plumed plumedfile test_plumed_pimd_path_spread_zero.dat "
+               "outfile test_plumed_pimd_path_spread_zero.log path_integral bead_mean "
+               "pimd_fix fpimd",
+               "fix bias all plumed plumedfile test_plumed_pimd_path_spread_restraint.dat "
+               "outfile test_plumed_pimd_path_spread_restraint.log path_integral bead_mean "
+               "pimd_fix fpimd",
+               3.125, path_spread_force_delta[me]);
     check_mode("fix zero all plumed plumedfile test_plumed_pimd_centroid_zero.dat "
                "outfile test_plumed_pimd_centroid_zero.log path_integral centroid pimd_fix fpimd",
                "fix bias all plumed plumedfile test_plumed_pimd_centroid_restraint.dat "
@@ -681,6 +728,8 @@ TEST(MPI, plumed_pimd_bias_modes)
     if (me == 0) {
         std::remove(bead_zero_file);
         std::remove(bead_restraint_file);
+        std::remove(path_spread_zero_file);
+        std::remove(path_spread_restraint_file);
         std::remove(centroid_zero_file);
         std::remove(centroid_restraint_file);
         std::remove(density_zero_file);
@@ -688,6 +737,8 @@ TEST(MPI, plumed_pimd_bias_modes)
         for (int i = 0; i < nprocs; ++i) {
             std::remove((std::string(bead_zero_log) + "." + std::to_string(i)).c_str());
             std::remove((std::string(bead_restraint_log) + "." + std::to_string(i)).c_str());
+            std::remove((std::string(path_spread_zero_log) + "." + std::to_string(i)).c_str());
+            std::remove((std::string(path_spread_restraint_log) + "." + std::to_string(i)).c_str());
         }
         std::remove(centroid_zero_log);
         std::remove(centroid_restraint_log);

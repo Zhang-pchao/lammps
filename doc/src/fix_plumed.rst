@@ -122,6 +122,30 @@ the chain-rule force and virial contributions remain local to every bead.
 Do not use a multiple-walker option to combine the PIMD beads: they are parts
 of one ring polymer, not statistically independent walkers.
 
+The same mode can construct the instantaneous path spread without another
+LAMMPS communication backend.  For a bead-local scalar :math:`s_b`, define
+
+.. math::
+
+   \sigma_s^2=\frac{1}{P}\sum_b s_b^2-
+   \left(\frac{1}{P}\sum_b s_b\right)^2.
+
+For example:
+
+.. code-block:: text
+
+   s: DISTANCE ATOMS=1,2
+   s2: CUSTOM ARG=s FUNC=x*x PERIODIC=NO
+   mean: ENSEMBLE ARG=s
+   mean2: ENSEMBLE ARG=s2
+   spread2: CUSTOM ARG=mean.s,mean2.s2 FUNC=y-x*x PERIODIC=NO
+   bias: RESTRAINT ARG=spread2 AT=0.0 KAPPA=10
+
+This evaluates :math:`B(\sigma_s^2)` with PLUMED's existing chain-rule
+derivatives and preserves one partition-zero scalar bias owner.  A coupled
+:math:`B(s_c,\sigma_s)` additionally requires a Cartesian-centroid CV and is
+not implied by this bead-mean example.
+
 The *path_integral bead_density* setting implements a symmetric bias of the
 instantaneous bead density,
 
