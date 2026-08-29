@@ -51,10 +51,11 @@ using namespace FixConst;
 FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     Fix(lmp, narg, arg), p(nullptr), pimd_fix(nullptr), nlocal(0), natoms(0),
     path_integral_mode(PATH_INTEGRAL_OFF), plumed_active(1), centroid_force_scale(0.0),
-    gatindex(nullptr), masses(nullptr), charges(nullptr), centroid_coordinates(nullptr),
-    centroid_positions(nullptr), centroid_forces(nullptr), centroid_forces_all(nullptr),
-    nlevels_respa(0), bias(0.0), c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0),
-    id_pe(nullptr), id_press(nullptr), id_pimd(nullptr)
+    bead_density_force_scale(0.0), gatindex(nullptr), masses(nullptr), charges(nullptr),
+    centroid_coordinates(nullptr), centroid_positions(nullptr), centroid_forces(nullptr),
+    centroid_forces_all(nullptr), forces_before_plumed(nullptr), nlevels_respa(0), bias(0.0),
+    c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0), id_pe(nullptr), id_press(nullptr),
+    id_pimd(nullptr)
 {
 
   if (!atom->tag_enable) error->all(FLERR, "Fix plumed requires atom tags");
@@ -79,6 +80,8 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
         path_integral_mode = PATH_INTEGRAL_CENTROID;
       else if (strcmp(arg[i + 1], "bead_mean") == 0)
         path_integral_mode = PATH_INTEGRAL_BEAD_MEAN;
+      else if (strcmp(arg[i + 1], "bead_density") == 0)
+        path_integral_mode = PATH_INTEGRAL_BEAD_DENSITY;
       else
         error->all(FLERR, "Unknown fix plumed path_integral value: {}", arg[i + 1]);
     } else if (strcmp(arg[i], "pimd_fix") == 0) {
@@ -316,6 +319,7 @@ FixPlumed::~FixPlumed()
   delete[] centroid_positions;
   delete[] centroid_forces;
   delete[] centroid_forces_all;
+  delete[] forces_before_plumed;
 }
 
 int FixPlumed::setmask()
@@ -344,9 +348,11 @@ void FixPlumed::init()
     if (!beads || dim != 0 || *beads != universe->nworlds)
       error->all(FLERR, "Fix plumed could not determine the PIMD bead count");
 
-    if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN) {
+    if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN ||
+        path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
       if (universe->existflag == 0 || universe->nworlds < 2)
-        error->all(FLERR, "Fix plumed path_integral bead_mean requires multiple partitions");
+        error->all(FLERR, "Fix plumed path_integral bead modes require multiple partitions");
+      if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) bead_density_force_scale = *force_scale;
     } else {
       if (comm->nprocs != 1)
         error->all(FLERR,
@@ -436,11 +442,14 @@ void FixPlumed::update_atom_data()
     delete[] charges;
     delete[] masses;
     delete[] gatindex;
+    delete[] forces_before_plumed;
 
     nlocal = atom->nlocal;
     gatindex = new int[nlocal];
     masses = new double[nlocal];
     charges = new double[nlocal];
+    forces_before_plumed = path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ? new double[3 * nlocal]
+                                                                            : nullptr;
     update_gatindex = 1;
   } else {
     for (int i = 0; i < nlocal; i++) {
@@ -485,6 +494,10 @@ void FixPlumed::post_force(int /* vflag */)
   }
 
   update_atom_data();
+
+  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY)
+    for (int i = 0; i < nlocal; i++)
+      for (int d = 0; d < 3; d++) forces_before_plumed[3 * i + d] = atom->f[i][d];
 
   // set up local virial/box. plumed uses full 3x3 matrices
   double plmd_virial[3][3];
@@ -531,12 +544,13 @@ void FixPlumed::post_force(int /* vflag */)
 
   plumedNeedsEnergy = 0;
   p->cmd("isEnergyNeeded", &plumedNeedsEnergy);
-  if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN) {
+  if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN ||
+      path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
     int energy_requests = plumedNeedsEnergy;
     MPI_Allreduce(MPI_IN_PLACE, &energy_requests, 1, MPI_INT, MPI_SUM, universe->uworld);
     if (energy_requests)
       error->universe_all(
-          FLERR, "Fix plumed path_integral bead_mean does not support energy-dependent actions");
+          FLERR, "Fix plumed path_integral bead modes do not support energy-dependent actions");
   }
 
   // Pass potential energy and virial if needed
@@ -592,10 +606,21 @@ void FixPlumed::post_force(int /* vflag */)
   // do the real calculation:
   p->cmd("performCalc");
 
-  if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN) {
+  if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN ||
+      path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
     p->cmd("getBias", &bias);
     MPI_Allreduce(MPI_IN_PLACE, &plumedStopCondition, 1, MPI_INT, MPI_MAX, universe->uworld);
-    if (universe->iworld != 0) bias = 0.0;
+    if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
+      for (int i = 0; i < nlocal; i++)
+        for (int d = 0; d < 3; d++)
+          atom->f[i][d] = forces_before_plumed[3 * i + d] +
+              bead_density_force_scale * (atom->f[i][d] - forces_before_plumed[3 * i + d]);
+      double bead_density_bias = comm->me == 0 ? bias : 0.0;
+      MPI_Allreduce(MPI_IN_PLACE, &bead_density_bias, 1, MPI_DOUBLE, MPI_SUM, universe->uworld);
+      bias = universe->iworld == 0 ? bead_density_force_scale * bead_density_bias : 0.0;
+    } else if (universe->iworld != 0) {
+      bias = 0.0;
+    }
   }
   if (plumedStopCondition) timer->force_timeout();
 
@@ -620,6 +645,8 @@ void FixPlumed::post_force(int /* vflag */)
     virial[4] = -plmd_virial[0][2];
     virial[5] = -plmd_virial[1][2];
   }
+  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY)
+    for (int i = 0; i < 6; i++) virial[i] *= bead_density_force_scale;
 
   // Ask for the computes in the next time step
   // such that the virial and energy are tallied.
@@ -784,6 +811,8 @@ int FixPlumed::modify_param(int narg, char **arg)
 double FixPlumed::memory_usage()
 {
   double bytes = double((8 + 8 + 4) * atom->nlocal);
+  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY)
+    bytes += double(3 * sizeof(double) * atom->nlocal);
   if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
     bytes += double(3 * sizeof(double) * natoms);
     if (plumed_active) bytes += double(6 * sizeof(double) * natoms);

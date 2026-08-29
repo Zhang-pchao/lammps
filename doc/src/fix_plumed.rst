@@ -18,7 +18,7 @@ Syntax
 
        *plumedfile* arg = name of PLUMED input file to use (default: NULL)
        *outfile* arg = name of file on which to write the PLUMED log (default: NULL)
-       *path_integral* arg = *off*, *centroid*, or *bead_mean* (default: off)
+       *path_integral* arg = *off*, *centroid*, *bead_mean*, or *bead_density* (default: off)
        *pimd_fix* arg = ID of the coupled fix pimd/langevin
 
 Examples
@@ -29,6 +29,7 @@ Examples
    fix pl all plumed plumedfile plumed.dat outfile p.log
    fix pl all plumed plumedfile plumed.dat outfile p.log path_integral centroid pimd_fix fpimd
    fix pl all plumed plumedfile plumed.dat outfile p.log path_integral bead_mean pimd_fix fpimd
+   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral bead_density pimd_fix fpimd
 
 Description
 """""""""""
@@ -121,6 +122,41 @@ the chain-rule force and virial contributions remain local to every bead.
 Do not use a multiple-walker option to combine the PIMD beads: they are parts
 of one ring polymer, not statistically independent walkers.
 
+The *path_integral bead_density* setting implements a symmetric bias of the
+instantaneous bead density,
+
+.. math::
+
+   U_B(X,t)=\frac{1}{P}\sum_{b=1}^{P} B(s(\mathbf{R}_b),t).
+
+Each bead evaluates the same PLUMED bias function at its local collective
+variable.  LAMMPS scales the local bias force and virial by :math:`1/P`, and
+reports the mean of the :math:`P` local bias energies on partition zero.  A
+fixed bias therefore needs no replica-averaging action:
+
+.. code-block:: text
+
+   d: DISTANCE ATOMS=1,2
+   bias: RESTRAINT ARG=d AT=0.5 KAPPA=10
+
+For a history-dependent bias, every PLUMED instance must share one field.
+For example, ``METAD`` can use ``WALKERS_MPI`` as the field-communication
+mechanism.  Because all :math:`P` beads deposit at the same physical time, the
+hill height on each bead must be the intended shared height divided by
+:math:`P`.  The beads remain correlated coordinates of one ring polymer; the
+multiple-walker machinery does not make them independent statistical samples.
+Using separate histories, or using an unscaled hill height on every bead,
+does not implement this mode's shared bead-density Hamiltonian.
+LAMMPS does not inspect the PLUMED input to verify field sharing or deposition
+normalization.  The native regression tests cover fixed biases; admit a
+history-dependent input only after separately validating its shared field,
+hill normalization, output ownership, and restart continuity.
+
+The *bead_density* and *bead_mean* modes are different.  The former evaluates
+:math:`P^{-1}\sum_b B(s_b)`, while the latter evaluates
+:math:`B(P^{-1}\sum_b s_b)` through ``ENSEMBLE``.  They are generally unequal
+for nonlinear collective variables or nonlinear biases.
+
 Restart, fix_modify, output, run start/stop, minimize info
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -164,12 +200,15 @@ LAMMPS was built with that package.  See the :doc:`Build package
 
 There can only be one fix plumed command active at a time.
 
-Both path-integral modes require :doc:`fix pimd/langevin <fix_pimd>` with
+All path-integral modes require :doc:`fix pimd/langevin <fix_pimd>` with
 *method pimd* and *ensemble nvt*.  The *centroid* mode additionally requires
 one MPI rank per bead, a fixed atom count, consecutive atom IDs, and an atom
-map.  The *bead_mean* mode requires multiple LAMMPS partitions and a PLUMED
-input that explicitly routes each bias through ``ENSEMBLE``.  Neither
-mode supports energy-dependent PLUMED actions, minimization, or r-RESPA.
+map.  The *bead_mean* and *bead_density* modes require multiple LAMMPS
+partitions.  A *bead_mean* input must explicitly route each bias through
+``ENSEMBLE``.  A history-dependent *bead_density* input must use one shared
+bias field and scale each bead's deposition by :math:`1/P`.  None of the
+path-integral modes supports energy-dependent PLUMED actions, minimization,
+or r-RESPA.
 The default *path_integral off* setting remains incompatible with path-integral
 fixes.
 
