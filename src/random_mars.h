@@ -20,6 +20,8 @@ namespace LAMMPS_NS {
 
 class RanMars : protected Pointers {
  public:
+  static constexpr int FULL_STATE_SIZE = 105;
+
   RanMars(class LAMMPS *, int);
   ~RanMars() override;
   double uniform();
@@ -30,6 +32,8 @@ class RanMars : protected Pointers {
   void select_subset(bigint, int, int *, int *);
   void get_state(double *);
   void set_state(double *);
+  void get_full_state(double *);
+  void set_full_state(double *);
 
  private:
   int save;

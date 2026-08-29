@@ -216,6 +216,24 @@ TEST_F(RNGTest, RanMars_state_save_restore)
     }
 }
 
+TEST_F(RNGTest, RanMars_full_state_save_restore_gaussian_cache)
+{
+    RanMars rng(lmp, 13579);
+
+    // The first call caches the paired Gaussian variate.
+    rng.gaussian();
+    double state[RanMars::FULL_STATE_SIZE];
+    rng.get_full_state(state);
+
+    std::vector<double> sequence(11);
+    for (double &value : sequence)
+        value = rng.gaussian();
+
+    rng.set_full_state(state);
+    for (std::size_t i = 0; i < sequence.size(); ++i)
+        EXPECT_DOUBLE_EQ(rng.gaussian(), sequence[i]) << "Full state mismatch at index " << i;
+}
+
 // =========================================================================
 // RanPark tests
 // =========================================================================

@@ -98,7 +98,7 @@ void create_two_bead_test_system(void *lmp, int world_size, Ownership ownership,
 void add_two_bead_fix(void *lmp, Ownership ownership, int thermostat_seed)
 {
     if (thermostat_seed > 0) {
-        const std::string fix_command = "fix fpimd all pimd/langevin method pimd ensemble nvt "
+        const std::string fix_command = "fix fpimd all pimd/langevin method nmpimd ensemble nvt "
                                         "integrator obabo thermostat PILE_L " +
                                         std::to_string(thermostat_seed) +
                                         " tau 1.0 temp 1.0 fixcom no";
@@ -990,7 +990,7 @@ TEST(PIMD, multirank_nvt_seed_replay)
     EXPECT_GT(max_velocity_difference, 1.0e-6);
 }
 
-TEST(PIMD, multirank_nvt_restart_reinitializes_rng)
+TEST(PIMD, multirank_nvt_restart_restores_rng)
 {
     int nprocs;
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
@@ -1021,14 +1021,8 @@ TEST(PIMD, multirank_nvt_restart_reinitializes_rng)
         EXPECT_NEAR(replay[i], first[i], 1.0e-14);
     }
 
-    double max_velocity_difference = 0.0;
-    for (int bead = 0; bead < 2; ++bead) {
-        const int offset = 18 * bead + 6;
-        for (int i = 0; i < 6; ++i)
-            max_velocity_difference = std::max(
-                max_velocity_difference, std::fabs(first[offset + i] - continuous[offset + i]));
-    }
-    EXPECT_GT(max_velocity_difference, 1.0e-6);
+    for (std::size_t i = 0; i < first.size(); ++i)
+        EXPECT_NEAR(first[i], continuous[i], 1.0e-14);
 }
 
 TEST(PIMD, multirank_pile_l_damping_sentinels)
@@ -1069,7 +1063,7 @@ TEST(PIMD, multirank_pile_l_damping_sentinels)
     EXPECT_GT(max_velocity_difference, 1.0e-6);
 }
 
-TEST(PIMD, multirank_npt_restart_restores_barostat)
+TEST(PIMD, multirank_npt_restart_restores_barostat_and_rng)
 {
     int nprocs;
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
@@ -1120,15 +1114,11 @@ TEST(PIMD, multirank_npt_restart_restores_barostat)
     EXPECT_GT(std::fabs(volume - 8000.0), 1.0e-10);
     EXPECT_GT(std::fabs(first.barostat_velocity), 1.0e-8);
 
-    double max_velocity_difference = 0.0;
-    for (int bead = 0; bead < 2; ++bead) {
-        const int offset = 18 * bead + 6;
-        for (int i = 0; i < 6; ++i)
-            max_velocity_difference =
-                std::max(max_velocity_difference,
-                         std::fabs(first.atoms[offset + i] - continuous.atoms[offset + i]));
-    }
-    EXPECT_GT(max_velocity_difference, 1.0e-6);
+    for (std::size_t i = 0; i < first.atoms.size(); ++i)
+        EXPECT_NEAR(first.atoms[i], continuous.atoms[i], 1.0e-14);
+    for (std::size_t i = 0; i < first.box.size(); ++i)
+        EXPECT_NEAR(first.box[i], continuous.box[i], 1.0e-14);
+    EXPECT_NEAR(first.barostat_velocity, continuous.barostat_velocity, 1.0e-14);
 }
 
 TEST(PIMD, multirank_anisotropic_pressure_targets)

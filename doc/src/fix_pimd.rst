@@ -457,11 +457,13 @@ quasi-beads to :doc:`binary restart files <restart>`.  See the
 a fix in an input script that reads a restart file, so that the
 operation of the fix continues in an uninterrupted fashion.
 
-Fix *pimd/langevin* writes the state of the barostat overall beads to
-:doc:`binary restart files <restart>`. Since it uses a stochastic
-thermostat, the state of the thermostat is not written. However, the
-state of the system can be restored by reading the restart file, except
-that it will re-initialize the random number generator.
+Fix *pimd/langevin* writes the state of the barostat over all beads and
+the complete per-process PILE_L random-number state to :doc:`binary
+restart files <restart>`.  This includes a cached Gaussian variate, so
+the PILE_L random-number sequence is continued exactly when the restart
+uses the same LAMMPS executable and the same number of MPI processes per bead.
+If the process count changes, the barostat is restored but LAMMPS emits
+a warning and retains the newly initialized random-number state.
 
 None of the :doc:`fix_modify <fix_modify>` options are relevant to fix
 pimd/nvt.

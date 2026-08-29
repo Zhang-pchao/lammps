@@ -1883,7 +1883,16 @@ void FixPIMDLangevin::write_restart(FILE *fp)
   double *list;
   memory->create(list, nsize, "FixPIMDLangevin:list");
 
-  pack_restart_data(list);
+  int n = pack_restart_data(list);
+
+  if (tstat_flag) {
+    if (comm->me == 0) list[n] = comm->nprocs;
+
+    double state[RanMars::FULL_STATE_SIZE];
+    random->get_full_state(state);
+    MPI_Gather(state, RanMars::FULL_STATE_SIZE, MPI_DOUBLE, list + n + 1, RanMars::FULL_STATE_SIZE,
+               MPI_DOUBLE, 0, world);
+  }
 
   if (comm->me == 0) {
     int size = nsize * sizeof(double);
@@ -1898,6 +1907,7 @@ void FixPIMDLangevin::write_restart(FILE *fp)
 int FixPIMDLangevin::size_restart_global()
 {
   int nsize = 6;
+  if (tstat_flag) nsize += 1 + comm->nprocs * RanMars::FULL_STATE_SIZE;
 
   return nsize;
 }
@@ -1918,6 +1928,15 @@ void FixPIMDLangevin::restart(char *buf)
   int n = 0;
   auto *list = (double *) buf;
   for (int i = 0; i < 6; i++) vw[i] = list[n++];
+
+  if (tstat_flag) {
+    int restart_nprocs = (int) list[n++];
+    if (restart_nprocs != comm->nprocs) {
+      if (comm->me == 0)
+        error->warning(FLERR, "Different number of procs. Cannot restore PILE_L RNG state.");
+    } else
+      random->set_full_state(list + n + comm->me * RanMars::FULL_STATE_SIZE);
+  }
 }
 
 /* ---------------------------------------------------------------------- */

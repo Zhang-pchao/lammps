@@ -315,3 +315,25 @@ void RanMars::set_state(double *state)
   cd  = state[101];
   cm  = state[102];
 }
+
+/* ----------------------------------------------------------------------
+   store state including a cached Gaussian variate
+------------------------------------------------------------------------- */
+
+void RanMars::get_full_state(double *state)
+{
+  get_state(state);
+  state[103] = save;
+  state[104] = second;
+}
+
+/* ----------------------------------------------------------------------
+   restore state including a cached Gaussian variate
+------------------------------------------------------------------------- */
+
+void RanMars::set_full_state(double *state)
+{
+  set_state(state);
+  save = state[103]; // NOLINT
+  second = state[104];
+}
