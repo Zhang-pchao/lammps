@@ -224,6 +224,21 @@ std::array<double, 3> extract_nvt_global_outputs(void *lmp)
     return result;
 }
 
+std::array<double, 10> extract_langevin_nvt_global_outputs(void *lmp)
+{
+    std::array<double, 10> result{};
+    for (int i = 0; i < 10; ++i) {
+        auto *value =
+            (double *)lammps_extract_fix(lmp, "fpimd", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, i, 0);
+        EXPECT_NE(value, nullptr);
+        if (value) {
+            result[i] = *value;
+            lammps_free(value);
+        }
+    }
+    return result;
+}
+
 void expect_langevin_output_metadata(const char *fix_command, const std::array<int, 17> &expected,
                                      int size)
 {
@@ -253,7 +268,8 @@ void expect_langevin_output_metadata(const char *fix_command, const std::array<i
 
 std::array<double, 18> run_two_bead_case(MPI_Comm communicator, const char *partition,
                                          int world_size, Ownership ownership, int run_steps,
-                                         int thermostat_seed = 0)
+                                         int thermostat_seed                    = 0,
+                                         std::array<double, 10> *global_outputs = nullptr)
 {
     std::array<double, 18> result{};
     void *lmp = open_two_bead_partition(communicator, partition);
@@ -286,6 +302,7 @@ std::array<double, 18> run_two_bead_case(MPI_Comm communicator, const char *part
             if (nlocal) EXPECT_EQ(*nlocal, expected_nlocal[rank]);
         }
         result = extract_two_atom_state(lmp);
+        if (global_outputs) *global_outputs = extract_langevin_nvt_global_outputs(lmp);
         EXPECT_EQ(lammps_has_error(lmp), 0);
     }
     lammps_close(lmp);
@@ -394,17 +411,7 @@ run_two_bead_direct_pimd_segments(int first_steps, int second_steps, bool restar
     }
 
     const auto state = collect_two_bead_state(extract_two_atom_state(lmp));
-    if (global_outputs) {
-        for (int i = 0; i < 10; ++i) {
-            auto *value =
-                (double *)lammps_extract_fix(lmp, "fpimd", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, i, 0);
-            EXPECT_NE(value, nullptr);
-            if (value) {
-                (*global_outputs)[i] = *value;
-                lammps_free(value);
-            }
-        }
-    }
+    if (global_outputs) *global_outputs = extract_langevin_nvt_global_outputs(lmp);
     EXPECT_EQ(lammps_has_error(lmp), 0);
     lammps_close(lmp);
     return state;
@@ -492,7 +499,8 @@ std::array<double, 36> write_two_bead_nvt_restart()
     return state;
 }
 
-std::array<double, 36> run_two_bead_nvt_restart(std::array<double, 36> &restored_state)
+std::array<double, 36> run_two_bead_nvt_restart(std::array<double, 36> &restored_state,
+                                                std::array<double, 10> *global_outputs = nullptr)
 {
     void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
     EXPECT_NE(lmp, nullptr);
@@ -507,6 +515,7 @@ std::array<double, 36> run_two_bead_nvt_restart(std::array<double, 36> &restored
     restored_state = collect_two_bead_state(extract_two_atom_state(lmp));
     lammps_command(lmp, "run 3");
     const auto state = collect_two_bead_state(extract_two_atom_state(lmp));
+    if (global_outputs) *global_outputs = extract_langevin_nvt_global_outputs(lmp);
     EXPECT_EQ(lammps_has_error(lmp), 0);
     lammps_close(lmp);
     return state;
@@ -1078,13 +1087,14 @@ TEST(PIMD, multirank_nvt_restart_restores_rng)
     ASSERT_EQ(nprocs, 4);
 
     remove_nvt_restart_files();
-    const auto continuous = collect_two_bead_state(
-        run_two_bead_case(MPI_COMM_WORLD, "2x2", 2, Ownership::DEFAULT, 6, 2468));
-    const auto boundary = write_two_bead_nvt_restart();
+    std::array<double, 10> continuous_outputs{}, first_outputs{}, replay_outputs{};
+    const auto continuous = collect_two_bead_state(run_two_bead_case(
+        MPI_COMM_WORLD, "2x2", 2, Ownership::DEFAULT, 6, 2468, &continuous_outputs));
+    const auto boundary   = write_two_bead_nvt_restart();
     std::array<double, 36> first_restored{};
-    const auto first = run_two_bead_nvt_restart(first_restored);
+    const auto first = run_two_bead_nvt_restart(first_restored, &first_outputs);
     std::array<double, 36> replay_restored{};
-    const auto replay = run_two_bead_nvt_restart(replay_restored);
+    const auto replay = run_two_bead_nvt_restart(replay_restored, &replay_outputs);
     remove_nvt_restart_files();
 
     for (int bead = 0; bead < 2; ++bead) {
@@ -1104,6 +1114,13 @@ TEST(PIMD, multirank_nvt_restart_restores_rng)
 
     for (std::size_t i = 0; i < first.size(); ++i)
         EXPECT_NEAR(first[i], continuous[i], 1.0e-14);
+    for (std::size_t i = 0; i < continuous_outputs.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(continuous_outputs[i]));
+        EXPECT_DOUBLE_EQ(replay_outputs[i], first_outputs[i]) << i;
+        const double tolerance =
+            1.0e-14 * std::max({1.0, std::abs(first_outputs[i]), std::abs(continuous_outputs[i])});
+        EXPECT_NEAR(first_outputs[i], continuous_outputs[i], tolerance) << i;
+    }
 }
 
 TEST(PIMD, multirank_pile_l_damping_sentinels)
