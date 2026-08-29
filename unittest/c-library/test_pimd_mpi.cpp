@@ -358,9 +358,9 @@ std::array<double, 36> collect_two_bead_state(const std::array<double, 18> &loca
     return state;
 }
 
-std::array<double, 36> run_two_bead_direct_pimd_segments(int first_steps, int second_steps,
-                                                         bool restart               = false,
-                                                         double *primitive_pressure = nullptr)
+std::array<double, 36>
+run_two_bead_direct_pimd_segments(int first_steps, int second_steps, bool restart = false,
+                                  std::array<double, 10> *global_outputs = nullptr)
 {
     void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
     EXPECT_NE(lmp, nullptr);
@@ -394,13 +394,15 @@ std::array<double, 36> run_two_bead_direct_pimd_segments(int first_steps, int se
     }
 
     const auto state = collect_two_bead_state(extract_two_atom_state(lmp));
-    if (primitive_pressure) {
-        auto *value =
-            (double *)lammps_extract_fix(lmp, "fpimd", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, 7, 0);
-        EXPECT_NE(value, nullptr);
-        if (value) {
-            *primitive_pressure = *value;
-            lammps_free(value);
+    if (global_outputs) {
+        for (int i = 0; i < 10; ++i) {
+            auto *value =
+                (double *)lammps_extract_fix(lmp, "fpimd", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, i, 0);
+            EXPECT_NE(value, nullptr);
+            if (value) {
+                (*global_outputs)[i] = *value;
+                lammps_free(value);
+            }
         }
     }
     EXPECT_EQ(lammps_has_error(lmp), 0);
@@ -1053,18 +1055,20 @@ TEST(PIMD, multirank_direct_pimd_run_and_restart_continuity)
     ASSERT_EQ(nprocs, 4);
 
     remove_nvt_restart_files();
-    double continuous_pressure, segmented_pressure, restarted_pressure;
-    const auto continuous = run_two_bead_direct_pimd_segments(6, 0, false, &continuous_pressure);
-    const auto segmented  = run_two_bead_direct_pimd_segments(3, 3, false, &segmented_pressure);
-    const auto restarted  = run_two_bead_direct_pimd_segments(3, 3, true, &restarted_pressure);
+    std::array<double, 10> continuous_outputs{}, segmented_outputs{}, restarted_outputs{};
+    const auto continuous = run_two_bead_direct_pimd_segments(6, 0, false, &continuous_outputs);
+    const auto segmented  = run_two_bead_direct_pimd_segments(3, 3, false, &segmented_outputs);
+    const auto restarted  = run_two_bead_direct_pimd_segments(3, 3, true, &restarted_outputs);
     remove_nvt_restart_files();
     for (std::size_t i = 0; i < continuous.size(); ++i) {
         EXPECT_NEAR(segmented[i], continuous[i], 1.0e-14);
         EXPECT_NEAR(restarted[i], continuous[i], 1.0e-14);
     }
-    EXPECT_TRUE(std::isfinite(continuous_pressure));
-    EXPECT_NEAR(segmented_pressure, continuous_pressure, 1.0e-14);
-    EXPECT_NEAR(restarted_pressure, continuous_pressure, 1.0e-14);
+    for (std::size_t i = 0; i < continuous_outputs.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(continuous_outputs[i]));
+        EXPECT_NEAR(segmented_outputs[i], continuous_outputs[i], 1.0e-14) << i;
+        EXPECT_NEAR(restarted_outputs[i], continuous_outputs[i], 1.0e-14) << i;
+    }
 }
 
 TEST(PIMD, multirank_nvt_restart_restores_rng)
