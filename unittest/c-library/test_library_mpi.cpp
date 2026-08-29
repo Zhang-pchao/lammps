@@ -9,7 +9,9 @@
 #include <array>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -690,6 +692,157 @@ TEST(MPI, plumed_pimd_bias_modes)
     }
     std::remove((std::string(density_zero_log) + "." + std::to_string(me)).c_str());
     std::remove((std::string(density_restraint_log) + "." + std::to_string(me)).c_str());
+};
+
+TEST(MPI, plumed_pimd_bead_density_shared_metad_restart)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    const char *initial_file = "test_plumed_pimd_density_metad.dat";
+    const char *restart_file = "test_plumed_pimd_density_metad_restart.dat";
+    const char *hills_file   = "test_plumed_pimd_density_metad_hills";
+    const char *initial_log  = "test_plumed_pimd_density_metad.log";
+    const char *restart_log  = "test_plumed_pimd_density_metad_restart.log";
+
+    if (me == 0) {
+        std::remove(initial_file);
+        std::remove(restart_file);
+        std::remove(hills_file);
+        for (int walker = 0; walker < nprocs; ++walker)
+            std::remove((std::string(hills_file) + "." + std::to_string(walker)).c_str());
+
+        std::ofstream initial(initial_file);
+        initial << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                << "bias: METAD ARG=d SIGMA=0.5 HEIGHT=0.25 PACE=2 FILE=" << hills_file
+                << " WALKERS_MPI RESTART=NO\n";
+        std::ofstream restart(restart_file);
+        restart << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+                << "bias: METAD ARG=d SIGMA=0.5 HEIGHT=0.25 PACE=2 FILE=" << hills_file
+                << " WALKERS_MPI RESTART=YES\n";
+    }
+    std::remove((std::string(initial_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string(restart_log) + "." + std::to_string(me)).c_str());
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    auto run_case = [&](const char *plumed_file, const char *plumed_log, int step) {
+        const char *args[] = {"LAMMPS_test", "-screen", "none", "-log",    "none", "-partition",
+                              "4x1",         "-in",     "none", "-nocite", nullptr};
+        char **argv        = (char **)args;
+        int argc           = (sizeof(args) / sizeof(char *)) - 1;
+        void *lmp          = lammps_open(argc, argv, MPI_COMM_WORLD, nullptr);
+        EXPECT_NE(lmp, nullptr);
+        if (!lmp) return 0.0;
+        lammps_set_show_error(lmp, 0);
+
+        auto has_error = [&](const char *stage) {
+            if (!lammps_has_error(lmp)) return false;
+            char error_message[512];
+            lammps_get_last_error_message(lmp, error_message, sizeof(error_message));
+            ADD_FAILURE() << stage << ": " << error_message;
+            return true;
+        };
+
+        lammps_command(lmp, "variable x2 world 19.0 18.0 17.0 16.0");
+        lammps_command(lmp, "units lj");
+        lammps_command(lmp, "atom_style atomic");
+        lammps_command(lmp, "atom_modify map array");
+        lammps_command(lmp, "boundary p p p");
+        lammps_command(lmp, "region box block 0.0 20.0 0.0 20.0 0.0 20.0");
+        lammps_command(lmp, "create_box 1 box");
+        lammps_command(lmp, "create_atoms 1 single 10.0 10.0 2.0");
+        lammps_command(lmp, "create_atoms 1 single ${x2} 10.0 2.0");
+        lammps_command(lmp, "mass 1 1.0");
+        lammps_command(lmp, "pair_style lj/cut 2.5");
+        lammps_command(lmp, "pair_coeff * * 0.0 1.0");
+        lammps_command(lmp, "timestep 0.001");
+        lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
+        lammps_command(lmp, ("reset_timestep " + std::to_string(step)).c_str());
+        lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                            "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+        const std::string fix_command = "fix bias all plumed plumedfile " +
+                                        std::string(plumed_file) + " outfile " + plumed_log +
+                                        " path_integral bead_density pimd_fix fpimd";
+        lammps_command(lmp, fix_command.c_str());
+        if (has_error("fix plumed")) {
+            lammps_close(lmp);
+            return 0.0;
+        }
+        lammps_command(lmp, "run 1 post no");
+        if (has_error("run")) {
+            lammps_close(lmp);
+            return 0.0;
+        }
+
+        double result = 0.0;
+        auto *bias =
+            (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+        EXPECT_NE(bias, nullptr);
+        if (bias) {
+            result = *bias;
+            lammps_free(bias);
+        }
+        lammps_close(lmp);
+        return result;
+    };
+
+    auto read_hills = [&]() {
+        std::vector<std::vector<double>> records;
+        std::ifstream input(hills_file);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream row(line);
+            std::vector<double> record;
+            double value;
+            while (row >> value)
+                record.push_back(value);
+            if (!record.empty()) records.push_back(record);
+        }
+        return records;
+    };
+
+    const double initial_bias = run_case(initial_file, initial_log, 1);
+    EXPECT_NEAR(initial_bias, 0.0, 1.0e-12);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const auto initial_hills = read_hills();
+    ASSERT_EQ(initial_hills.size(), 4);
+    for (const auto &record : initial_hills) {
+        ASSERT_EQ(record.size(), 5);
+        EXPECT_NEAR(record[3], 0.25, 1.0e-12);
+    }
+    for (int walker = 0; walker < nprocs; ++walker) {
+        std::ifstream split_hills(std::string(hills_file) + "." + std::to_string(walker));
+        EXPECT_FALSE(split_hills.good());
+    }
+
+    const double restart_bias = run_case(restart_file, restart_log, 3);
+    if (me == 0)
+        EXPECT_GT(restart_bias, 0.0);
+    else
+        EXPECT_NEAR(restart_bias, 0.0, 1.0e-12);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const auto restarted_hills = read_hills();
+    ASSERT_EQ(restarted_hills.size(), 8);
+    for (std::size_t i = 0; i < restarted_hills.size(); ++i) {
+        ASSERT_EQ(restarted_hills[i].size(), 5);
+        EXPECT_NEAR(restarted_hills[i][3], 0.25, 1.0e-12);
+        if (i < initial_hills.size()) EXPECT_EQ(restarted_hills[i], initial_hills[i]);
+    }
+    EXPECT_GT(restarted_hills[4][0], restarted_hills[3][0]);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) {
+        std::remove(initial_file);
+        std::remove(restart_file);
+        std::remove(hills_file);
+    }
+    std::remove((std::string(initial_log) + "." + std::to_string(me)).c_str());
+    std::remove((std::string(restart_log) + "." + std::to_string(me)).c_str());
 };
 
 TEST(MPI, plumed_pimd_multirank_bead_mean)
