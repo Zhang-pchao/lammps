@@ -6,6 +6,7 @@
 #include "lmptype.h"
 #include "timer.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -693,6 +694,106 @@ TEST(MPI, plumed_pimd_bias_modes)
     }
     std::remove((std::string(density_zero_log) + "." + std::to_string(me)).c_str());
     std::remove((std::string(density_restraint_log) + "." + std::to_string(me)).c_str());
+};
+
+TEST(MPI, plumed_pimd_centroid_bead_density_dynamics_equivalence)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    const char *plumed_file  = "test_plumed_pimd_matched_dynamics.dat";
+    const char *centroid_log = "test_plumed_pimd_matched_centroid.log";
+    const char *density_log  = "test_plumed_pimd_matched_density.log";
+    if (me == 0) {
+        std::ofstream input(plumed_file);
+        input << "d: DISTANCE ATOMS=1,2 COMPONENTS NOPBC\n"
+              << "bias: BIASVALUE ARG=d.x\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    auto run_case = [&](const char *mode, const char *plumed_log) {
+        std::array<double, 13> result{};
+        const char *args[] = {"LAMMPS_test", "-screen", "none", "-log",    "none", "-partition",
+                              "4x1",         "-in",     "none", "-nocite", nullptr};
+        char **argv        = (char **)args;
+        int argc           = (sizeof(args) / sizeof(char *)) - 1;
+        void *lmp          = lammps_open(argc, argv, MPI_COMM_WORLD, nullptr);
+        EXPECT_NE(lmp, nullptr);
+        if (!lmp) return result;
+
+        lammps_command(lmp, "variable x2 world 19.0 18.0 17.0 16.0");
+        lammps_command(lmp, "units lj");
+        lammps_command(lmp, "atom_style atomic");
+        lammps_command(lmp, "atom_modify map array");
+        lammps_command(lmp, "boundary p p p");
+        lammps_command(lmp, "region box block 0.0 20.0 0.0 20.0 0.0 20.0");
+        lammps_command(lmp, "create_box 1 box");
+        lammps_command(lmp, "create_atoms 1 single 10.0 10.0 2.0");
+        lammps_command(lmp, "create_atoms 1 single ${x2} 10.0 2.0");
+        lammps_command(lmp, "mass 1 1.0");
+        lammps_command(lmp, "pair_style lj/cut 2.5");
+        lammps_command(lmp, "pair_coeff * * 0.0 1.0");
+        lammps_command(lmp, "timestep 0.001");
+        lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
+        lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                            "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+        const std::string fix_command = "fix bias all plumed plumedfile " +
+                                        std::string(plumed_file) + " outfile " + plumed_log +
+                                        " path_integral " + mode + " pimd_fix fpimd";
+        lammps_command(lmp, fix_command.c_str());
+        lammps_command(lmp, "run 5 post no");
+
+        auto **positions  = (double **)lammps_extract_atom(lmp, "x");
+        auto **velocities = (double **)lammps_extract_atom(lmp, "v");
+        EXPECT_NE(positions, nullptr);
+        EXPECT_NE(velocities, nullptr);
+        if (positions && velocities) {
+            for (int atom = 0; atom < 2; ++atom) {
+                const tagint atom_id = atom + 1;
+                const int index      = lammps_map_atom(lmp, &atom_id);
+                EXPECT_GE(index, 0);
+                if (index < 0) continue;
+                for (int dimension = 0; dimension < 3; ++dimension) {
+                    result[3 * atom + dimension]     = positions[index][dimension];
+                    result[6 + 3 * atom + dimension] = velocities[index][dimension];
+                }
+            }
+        }
+        auto *bias =
+            (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+        EXPECT_NE(bias, nullptr);
+        if (bias) {
+            result[12] = *bias;
+            lammps_free(bias);
+        }
+        lammps_close(lmp);
+        return result;
+    };
+
+    const auto centroid = run_case("centroid", centroid_log);
+    const auto density  = run_case("bead_density", density_log);
+    for (std::size_t i = 0; i < centroid.size(); ++i)
+        EXPECT_NEAR(density[i], centroid[i], 1.0e-12);
+    if (me == 0) {
+        EXPECT_GT(centroid[12], 0.0);
+        EXPECT_GT(density[12], 0.0);
+    } else {
+        EXPECT_NEAR(centroid[12], 0.0, 1.0e-12);
+        EXPECT_NEAR(density[12], 0.0, 1.0e-12);
+    }
+    double max_speed = 0.0;
+    for (std::size_t i = 6; i < 12; ++i)
+        max_speed = std::max(max_speed, std::fabs(centroid[i]));
+    EXPECT_GT(max_speed, 1.0e-8);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) {
+        std::remove(plumed_file);
+        std::remove(centroid_log);
+    }
+    std::remove((std::string(density_log) + "." + std::to_string(me)).c_str());
 };
 
 TEST(MPI, plumed_pimd_bead_density_shared_history_restart)
