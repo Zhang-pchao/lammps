@@ -46,7 +46,12 @@ class FixPlumed : public Fix {
   double memory_usage() override;
 
  private:
-  enum { PATH_INTEGRAL_OFF, PATH_INTEGRAL_CENTROID, PATH_INTEGRAL_BEAD_MEAN };
+  enum {
+    PATH_INTEGRAL_OFF,
+    PATH_INTEGRAL_CENTROID,
+    PATH_INTEGRAL_BEAD_MEAN,
+    PATH_INTEGRAL_BEAD_DENSITY
+  };
 
   PLMD::Plumed *p;           // pointer to plumed object
   class Fix *pimd_fix;       // fix providing the Cartesian PIMD centroid
@@ -55,6 +60,7 @@ class FixPlumed : public Fix {
   int path_integral_mode;    // path-integral coupling mode
   int plumed_active;         // this partition runs a PLUMED instance
   double centroid_force_scale;    // chain-rule force scale supplied by the PIMD fix
+  double bead_density_force_scale;    // 1/P scaling for shared bead-density forces
   int *gatindex;             // array of atom indexes local to this process
   double *masses;            // array of masses for local atoms
   double *charges;           // array of charges for local atoms
@@ -62,6 +68,7 @@ class FixPlumed : public Fix {
   double *centroid_positions;      // local centroid coordinates passed to PLUMED
   double *centroid_forces;         // local centroid forces returned by PLUMED
   double *centroid_forces_all;     // tag-ordered centroid forces shared by all beads
+  double *forces_before_plumed;    // local forces before bead-density bias
   int nlevels_respa;         // this is something to enable respa
   double bias;               // output bias potential
   class Compute *c_pe;       // Compute for the energy
