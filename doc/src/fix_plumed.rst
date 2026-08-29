@@ -142,9 +142,34 @@ For example:
    bias: RESTRAINT ARG=spread2 AT=0.0 KAPPA=10
 
 This evaluates :math:`B(\sigma_s^2)` with PLUMED's existing chain-rule
-derivatives and preserves one partition-zero scalar bias owner.  A coupled
-:math:`B(s_c,\sigma_s)` additionally requires a Cartesian-centroid CV and is
-not implied by this bead-mean example.
+derivatives and preserves one partition-zero scalar bias owner.  For a distance
+CV with consistently unwrapped coordinates, a deterministic coupled graph can
+also form :math:`s_c=s(\overline{\mathbf R})` from the replica-averaged
+Cartesian displacement:
+
+.. code-block:: text
+
+   dvec: DISTANCE ATOMS=1,2 COMPONENTS NOPBC
+   s: CUSTOM ARG=dvec.x,dvec.y,dvec.z FUNC=sqrt(x*x+y*y+z*z) PERIODIC=NO
+   s2: CUSTOM ARG=s FUNC=x*x PERIODIC=NO
+   mean: ENSEMBLE ARG=s
+   mean2: ENSEMBLE ARG=s2
+   spread2: CUSTOM ARG=mean.s,mean2.s2 FUNC=y-x*x PERIODIC=NO
+   centroid: ENSEMBLE ARG=dvec.x,dvec.y,dvec.z
+   sc: CUSTOM ARG=centroid.dvec.x,centroid.dvec.y,centroid.dvec.z \
+       FUNC=sqrt(x*x+y*y+z*z) PERIODIC=NO
+   coupled: CUSTOM ARG=sc,spread2 FUNC=x*y PERIODIC=NO
+   bias: BIASVALUE ARG=coupled
+
+This example evaluates the test bias
+:math:`B(s_c,\sigma_s^2)=s_c\sigma_s^2` and propagates both centroid and
+spread derivatives through the existing ``ENSEMBLE`` graph.  It does not
+replace :math:`s_c` with the generally different bead mean
+:math:`P^{-1}\sum_b s_b`.  General CVs must be evaluated from the Cartesian
+centroid with their own correct periodic-coordinate convention.  A literal
+:math:`\sigma_s` coordinate has a singular derivative at zero spread and
+requires an explicit regularization; this example does not enable automatic
+switching between bias modes.
 
 The *path_integral bead_density* setting implements a symmetric bias of the
 instantaneous bead density,

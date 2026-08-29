@@ -444,10 +444,12 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
     const char *centroid_file  = "test_plumed_pimd_cyclic_centroid.dat";
     const char *bead_mean_file = "test_plumed_pimd_cyclic_bead_mean.dat";
     const char *path_spread_file  = "test_plumed_pimd_cyclic_path_spread.dat";
+    const char *centroid_spread_file = "test_plumed_pimd_cyclic_centroid_spread.dat";
     const char *bead_density_file = "test_plumed_pimd_cyclic_bead_density.dat";
     const char *centroid_log   = "test_plumed_pimd_cyclic_centroid.log";
     const char *bead_mean_log  = "test_plumed_pimd_cyclic_bead_mean.log";
     const char *path_spread_log   = "test_plumed_pimd_cyclic_path_spread.log";
+    const char *centroid_spread_log  = "test_plumed_pimd_cyclic_centroid_spread.log";
     const char *bead_density_log  = "test_plumed_pimd_cyclic_bead_density.log";
     if (me == 0) {
         std::ofstream centroid(centroid_file);
@@ -464,6 +466,18 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
                     << "mean2: ENSEMBLE ARG=d2\n"
                     << "spread2: CUSTOM ARG=mean.d,mean2.d2 FUNC=y-x*x PERIODIC=NO\n"
                     << "bias: RESTRAINT ARG=spread2 AT=0.0 KAPPA=4.0\n";
+        std::ofstream centroid_spread(centroid_spread_file);
+        centroid_spread << "dvec: DISTANCE ATOMS=1,2 COMPONENTS NOPBC\n"
+                        << "s: CUSTOM ARG=dvec.x,dvec.y,dvec.z FUNC=sqrt(x*x+y*y+z*z) PERIODIC=NO\n"
+                        << "s2: CUSTOM ARG=s FUNC=x*x PERIODIC=NO\n"
+                        << "mean: ENSEMBLE ARG=s\n"
+                        << "mean2: ENSEMBLE ARG=s2\n"
+                        << "spread2: CUSTOM ARG=mean.s,mean2.s2 FUNC=y-x*x PERIODIC=NO\n"
+                        << "centroid: ENSEMBLE ARG=dvec.x,dvec.y,dvec.z\n"
+                        << "sc: CUSTOM ARG=centroid.dvec.x,centroid.dvec.y,centroid.dvec.z "
+                           "FUNC=sqrt(x*x+y*y+z*z) PERIODIC=NO\n"
+                        << "coupled: CUSTOM ARG=sc,spread2 FUNC=x*y PERIODIC=NO\n"
+                        << "bias: BIASVALUE ARG=coupled\n";
         std::ofstream bead_density(bead_density_file);
         bead_density << "d: DISTANCE ATOMS=1,2 NOPBC\n"
                      << "bias: RESTRAINT ARG=d AT=6.5 KAPPA=4.0\n";
@@ -526,6 +540,10 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
     const double bead_mean_shifted  = run_case(bead_mean_file, bead_mean_log, "bead_mean", 1);
     const double path_spread_original = run_case(path_spread_file, path_spread_log, "bead_mean", 0);
     const double path_spread_shifted  = run_case(path_spread_file, path_spread_log, "bead_mean", 1);
+    const double centroid_spread_original =
+        run_case(centroid_spread_file, centroid_spread_log, "bead_mean", 0);
+    const double centroid_spread_shifted =
+        run_case(centroid_spread_file, centroid_spread_log, "bead_mean", 1);
     const double bead_density_original =
         run_case(bead_density_file, bead_density_log, "bead_density", 0);
     const double bead_density_shifted =
@@ -533,10 +551,12 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
     EXPECT_NEAR(centroid_original, centroid_shifted, 1.0e-12);
     EXPECT_NEAR(bead_mean_original, bead_mean_shifted, 1.0e-12);
     EXPECT_NEAR(path_spread_original, path_spread_shifted, 1.0e-12);
+    EXPECT_NEAR(centroid_spread_original, centroid_spread_shifted, 1.0e-12);
     EXPECT_NEAR(bead_density_original, bead_density_shifted, 1.0e-12);
     EXPECT_NEAR(centroid_original, me == 0 ? 1.0 : 0.0, 1.0e-12);
     EXPECT_NEAR(bead_mean_original, me == 0 ? 2.0 : 0.0, 1.0e-12);
     EXPECT_NEAR(path_spread_original, me == 0 ? 3.125 : 0.0, 1.0e-12);
+    EXPECT_NEAR(centroid_spread_original, me == 0 ? 1.25 / std::sqrt(2.0) : 0.0, 1.0e-12);
     EXPECT_NEAR(bead_density_original, me == 0 ? 4.5 : 0.0, 1.0e-12);
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -544,6 +564,7 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
         std::remove(centroid_file);
         std::remove(bead_mean_file);
         std::remove(path_spread_file);
+        std::remove(centroid_spread_file);
         std::remove(bead_density_file);
         std::remove((std::string(centroid_log) + ".0").c_str());
         std::remove((std::string(centroid_log) + ".1").c_str());
@@ -556,6 +577,10 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
         std::remove(
             (std::string(path_spread_log) + "." + std::to_string(shift) + "." + std::to_string(me))
                 .c_str());
+    for (int shift = 0; shift < 2; ++shift)
+        std::remove((std::string(centroid_spread_log) + "." + std::to_string(shift) + "." +
+                     std::to_string(me))
+                        .c_str());
     for (int shift = 0; shift < 2; ++shift)
         std::remove(
             (std::string(bead_density_log) + "." + std::to_string(shift) + "." + std::to_string(me))
@@ -573,6 +598,8 @@ TEST(MPI, plumed_pimd_bias_modes)
     const char *bead_restraint_file     = "test_plumed_pimd_bead_restraint.dat";
     const char *path_spread_zero_file      = "test_plumed_pimd_path_spread_zero.dat";
     const char *path_spread_restraint_file = "test_plumed_pimd_path_spread_restraint.dat";
+    const char *centroid_spread_zero_file  = "test_plumed_pimd_centroid_spread_zero.dat";
+    const char *centroid_spread_bias_file  = "test_plumed_pimd_centroid_spread_bias.dat";
     const char *centroid_zero_file      = "test_plumed_pimd_centroid_zero.dat";
     const char *centroid_restraint_file = "test_plumed_pimd_centroid_restraint.dat";
     const char *density_zero_file       = "test_plumed_pimd_density_zero.dat";
@@ -581,6 +608,8 @@ TEST(MPI, plumed_pimd_bias_modes)
     const char *bead_restraint_log      = "test_plumed_pimd_bead_restraint.log";
     const char *path_spread_zero_log       = "test_plumed_pimd_path_spread_zero.log";
     const char *path_spread_restraint_log  = "test_plumed_pimd_path_spread_restraint.log";
+    const char *centroid_spread_zero_log   = "test_plumed_pimd_centroid_spread_zero.log";
+    const char *centroid_spread_bias_log   = "test_plumed_pimd_centroid_spread_bias.log";
     const char *centroid_zero_log       = "test_plumed_pimd_centroid_zero.log";
     const char *centroid_restraint_log  = "test_plumed_pimd_centroid_restraint.log";
     const char *density_zero_log        = "test_plumed_pimd_density_zero.log";
@@ -606,6 +635,21 @@ TEST(MPI, plumed_pimd_bias_modes)
                               << "mean2: ENSEMBLE ARG=d2\n"
                               << "spread2: CUSTOM ARG=mean.d,mean2.d2 FUNC=y-x*x PERIODIC=NO\n"
                               << "bias: RESTRAINT ARG=spread2 AT=0.0 KAPPA=4.0\n";
+        const std::string centroid_spread_graph =
+            "dvec: DISTANCE ATOMS=1,2 COMPONENTS NOPBC\n"
+            "s: CUSTOM ARG=dvec.x,dvec.y,dvec.z FUNC=sqrt(x*x+y*y+z*z) PERIODIC=NO\n"
+            "s2: CUSTOM ARG=s FUNC=x*x PERIODIC=NO\n"
+            "mean: ENSEMBLE ARG=s\n"
+            "mean2: ENSEMBLE ARG=s2\n"
+            "spread2: CUSTOM ARG=mean.s,mean2.s2 FUNC=y-x*x PERIODIC=NO\n"
+            "centroid: ENSEMBLE ARG=dvec.x,dvec.y,dvec.z\n"
+            "sc: CUSTOM ARG=centroid.dvec.x,centroid.dvec.y,centroid.dvec.z "
+            "FUNC=sqrt(x*x+y*y+z*z) PERIODIC=NO\n"
+            "coupled: CUSTOM ARG=sc,spread2 FUNC=x*y PERIODIC=NO\n";
+        std::ofstream centroid_spread_zero(centroid_spread_zero_file);
+        centroid_spread_zero << centroid_spread_graph;
+        std::ofstream centroid_spread_bias(centroid_spread_bias_file);
+        centroid_spread_bias << centroid_spread_graph << "bias: BIASVALUE ARG=coupled\n";
         std::ofstream centroid_zero(centroid_zero_file);
         centroid_zero << "d: DISTANCE ATOMS=1,2 NOPBC\n";
         std::ofstream centroid_restraint(centroid_restraint_file);
@@ -653,6 +697,15 @@ TEST(MPI, plumed_pimd_bias_modes)
          {0.0, 1.25, 0.0, 0.0, -1.25, 0.0},
          {1.25, 0.0, 0.0, -1.25, 0.0, 0.0},
          {0.0, 3.75, 0.0, 0.0, -3.75, 0.0}}};
+    const std::array<std::array<double, 6>, 4> centroid_spread_force_delta = {
+        {{0.7513009550107068, 0.2209708691207961, 0.0, -0.7513009550107068, -0.2209708691207961,
+          0.0},
+         {0.2209708691207961, 0.3977475644174330, 0.0, -0.2209708691207961, -0.3977475644174330,
+          0.0},
+         {0.3977475644174330, 0.2209708691207961, 0.0, -0.3977475644174330, -0.2209708691207961,
+          0.0},
+         {0.2209708691207961, 0.7513009550107068, 0.0, -0.2209708691207961, -0.7513009550107068,
+          0.0}}};
     const std::array<double, 6> centroid_force_delta = {0.5, 0.5, 0.0, -0.5, -0.5, 0.0};
     const std::array<std::array<double, 6>, 4> density_force_delta = {
         {{2.5, 0.0, 0.0, -2.5, 0.0, 0.0},
@@ -676,7 +729,8 @@ TEST(MPI, plumed_pimd_bias_modes)
         return result;
     };
     auto check_mode = [&](const char *zero_command, const char *bias_command, double expected_bias,
-                          const std::array<double, 6> &expected_force_delta) {
+                          const std::array<double, 6> &expected_force_delta,
+                          double force_tolerance = 1.0e-12) {
         lammps_command(lmp, zero_command);
         lammps_command(lmp, "run 0 post no");
         const auto zero_forces = extract_forces();
@@ -692,7 +746,8 @@ TEST(MPI, plumed_pimd_bias_modes)
         lammps_free(bias);
 
         for (std::size_t i = 0; i < expected_force_delta.size(); ++i)
-            EXPECT_NEAR(biased_forces[i] - zero_forces[i], expected_force_delta[i], 1.0e-12);
+            EXPECT_NEAR(biased_forces[i] - zero_forces[i], expected_force_delta[i],
+                        force_tolerance);
         lammps_command(lmp, "unfix bias");
     };
 
@@ -709,6 +764,13 @@ TEST(MPI, plumed_pimd_bias_modes)
                "outfile test_plumed_pimd_path_spread_restraint.log path_integral bead_mean "
                "pimd_fix fpimd",
                3.125, path_spread_force_delta[me]);
+    check_mode("fix zero all plumed plumedfile test_plumed_pimd_centroid_spread_zero.dat "
+               "outfile test_plumed_pimd_centroid_spread_zero.log path_integral bead_mean "
+               "pimd_fix fpimd",
+               "fix bias all plumed plumedfile test_plumed_pimd_centroid_spread_bias.dat "
+               "outfile test_plumed_pimd_centroid_spread_bias.log path_integral bead_mean "
+               "pimd_fix fpimd",
+               1.25 / std::sqrt(2.0), centroid_spread_force_delta[me], 2.0e-12);
     check_mode("fix zero all plumed plumedfile test_plumed_pimd_centroid_zero.dat "
                "outfile test_plumed_pimd_centroid_zero.log path_integral centroid pimd_fix fpimd",
                "fix bias all plumed plumedfile test_plumed_pimd_centroid_restraint.dat "
@@ -730,6 +792,8 @@ TEST(MPI, plumed_pimd_bias_modes)
         std::remove(bead_restraint_file);
         std::remove(path_spread_zero_file);
         std::remove(path_spread_restraint_file);
+        std::remove(centroid_spread_zero_file);
+        std::remove(centroid_spread_bias_file);
         std::remove(centroid_zero_file);
         std::remove(centroid_restraint_file);
         std::remove(density_zero_file);
@@ -739,6 +803,8 @@ TEST(MPI, plumed_pimd_bias_modes)
             std::remove((std::string(bead_restraint_log) + "." + std::to_string(i)).c_str());
             std::remove((std::string(path_spread_zero_log) + "." + std::to_string(i)).c_str());
             std::remove((std::string(path_spread_restraint_log) + "." + std::to_string(i)).c_str());
+            std::remove((std::string(centroid_spread_zero_log) + "." + std::to_string(i)).c_str());
+            std::remove((std::string(centroid_spread_bias_log) + "." + std::to_string(i)).c_str());
         }
         std::remove(centroid_zero_log);
         std::remove(centroid_restraint_log);
