@@ -112,6 +112,12 @@ void add_two_bead_fix(void *lmp, Ownership ownership, int thermostat_seed)
                             "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
 }
 
+void add_two_bead_direct_pimd_fix(void *lmp)
+{
+    lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                        "integrator obabo thermostat PILE_L 2468 tau 1.0 temp 1.0 fixcom no");
+}
+
 void set_two_bead_initial_velocities(void *lmp, Ownership ownership)
 {
     if (ownership == Ownership::MIGRATING) {
@@ -349,6 +355,46 @@ std::array<double, 36> collect_two_bead_state(const std::array<double, 18> &loca
         state[offset + i] = local_state[i];
     MPI_Allreduce(MPI_IN_PLACE, state.data(), static_cast<int>(state.size()), MPI_DOUBLE, MPI_SUM,
                   MPI_COMM_WORLD);
+    return state;
+}
+
+std::array<double, 36> run_two_bead_direct_pimd_segments(int first_steps, int second_steps,
+                                                         bool restart = false)
+{
+    void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+    EXPECT_NE(lmp, nullptr);
+    if (!lmp) return {};
+
+    EXPECT_EQ(lammps_extract_setting(lmp, "world_size"), 2);
+    create_two_bead_test_system(lmp, 2, Ownership::DEFAULT);
+    set_two_bead_initial_velocities(lmp, Ownership::DEFAULT);
+    lammps_command(lmp, "timestep 0.00001");
+    lammps_command(lmp, "thermo 0");
+    add_two_bead_direct_pimd_fix(lmp);
+    const std::string first_run = "run " + std::to_string(first_steps);
+    lammps_command(lmp, first_run.c_str());
+    if (second_steps > 0) {
+        if (restart) {
+            lammps_command(lmp, "variable restart_file world pimd_nvt_restart.0 "
+                                "pimd_nvt_restart.1");
+            lammps_command(lmp, "write_restart ${restart_file}");
+            lammps_close(lmp);
+            lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+            EXPECT_NE(lmp, nullptr);
+            if (!lmp) return {};
+            lammps_command(lmp, "variable restart_file world pimd_nvt_restart.0 "
+                                "pimd_nvt_restart.1");
+            lammps_command(lmp, "read_restart ${restart_file}");
+            lammps_command(lmp, "thermo 0");
+            add_two_bead_direct_pimd_fix(lmp);
+        }
+        const std::string second_run = "run " + std::to_string(second_steps);
+        lammps_command(lmp, second_run.c_str());
+    }
+
+    const auto state = collect_two_bead_state(extract_two_atom_state(lmp));
+    EXPECT_EQ(lammps_has_error(lmp), 0);
+    lammps_close(lmp);
     return state;
 }
 
@@ -988,6 +1034,23 @@ TEST(PIMD, multirank_nvt_seed_replay)
                 max_velocity_difference, std::fabs(different_seed[offset + i] - first[offset + i]));
     }
     EXPECT_GT(max_velocity_difference, 1.0e-6);
+}
+
+TEST(PIMD, multirank_direct_pimd_run_and_restart_continuity)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+
+    remove_nvt_restart_files();
+    const auto continuous = run_two_bead_direct_pimd_segments(6, 0);
+    const auto segmented  = run_two_bead_direct_pimd_segments(3, 3);
+    const auto restarted  = run_two_bead_direct_pimd_segments(3, 3, true);
+    remove_nvt_restart_files();
+    for (std::size_t i = 0; i < continuous.size(); ++i) {
+        EXPECT_NEAR(segmented[i], continuous[i], 1.0e-14);
+        EXPECT_NEAR(restarted[i], continuous[i], 1.0e-14);
+    }
 }
 
 TEST(PIMD, multirank_nvt_restart_restores_rng)

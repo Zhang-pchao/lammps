@@ -594,7 +594,6 @@ void FixPIMDLangevin::setup(int vflag)
       nmpimd_transform(bufbeads, x, M_x2xp[universe->iworld]);
   } else if (method == PIMD) {
     prepare_coordinates();
-    spring_force();
   } else {
     error->universe_all(
         FLERR,
@@ -799,6 +798,7 @@ void FixPIMDLangevin::post_force(int /*flag*/)
     spring_force();
     compute_spring_energy();
     compute_t_prim();
+    compute_p_prim();
     if (mapflag) {
       for (int i = 0; i < nlocal; i++) { domain->unmap_inv(x[i], image[i]); }
     }
