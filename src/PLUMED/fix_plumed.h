@@ -68,9 +68,10 @@ class FixPlumed : public Fix {
   double *centroid_positions;      // local centroid coordinates passed to PLUMED
   double *centroid_forces;         // local centroid forces returned by PLUMED
   double *centroid_forces_all;     // tag-ordered centroid forces shared by all beads
+  int *centroid_virial_pending;    // asks the NMPIMD fix to collect this step's bias virial
   double *forces_before_plumed;    // local forces before bead-density bias
-  int nlevels_respa;         // this is something to enable respa
-  double bias;               // output bias potential
+  int nlevels_respa;               // this is something to enable respa
+  double bias;                     // output bias potential
   class Compute *c_pe;       // Compute for the energy
   class Compute *c_press;    // Compute for the pressure
   int plumedNeedsEnergy;     // Flag to trigger calculation of the

@@ -53,9 +53,9 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     path_integral_mode(PATH_INTEGRAL_OFF), plumed_active(1), centroid_force_scale(0.0),
     bead_density_force_scale(0.0), gatindex(nullptr), masses(nullptr), charges(nullptr),
     centroid_coordinates(nullptr), centroid_positions(nullptr), centroid_forces(nullptr),
-    centroid_forces_all(nullptr), forces_before_plumed(nullptr), nlevels_respa(0), bias(0.0),
-    c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0), id_pe(nullptr), id_press(nullptr),
-    id_pimd(nullptr)
+    centroid_forces_all(nullptr), centroid_virial_pending(nullptr), forces_before_plumed(nullptr),
+    nlevels_respa(0), bias(0.0), c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0),
+    id_pe(nullptr), id_press(nullptr), id_pimd(nullptr)
 {
 
   if (!atom->tag_enable) error->all(FLERR, "Fix plumed requires atom tags");
@@ -342,8 +342,22 @@ void FixPlumed::init()
 
     int dim = -1;
     auto *force_scale = static_cast<double *>(pimd_fix->extract("centroid_bias_force_scale", dim));
-    if (!force_scale || dim != 0)
-      error->all(FLERR, "Fix plumed path_integral modes require method pimd and ensemble nvt");
+    if (!force_scale && path_integral_mode == PATH_INTEGRAL_CENTROID) {
+      force_scale =
+          static_cast<double *>(pimd_fix->extract("normal_mode_centroid_force_scale", dim));
+      centroid_virial_pending =
+          static_cast<int *>(pimd_fix->extract("centroid_bias_virial_pending", dim));
+      if (force_scale && !centroid_virial_pending)
+        error->all(FLERR, "Fix plumed could not access the NMPIMD centroid virial state");
+    }
+    if (!force_scale || dim != 0) {
+      if (path_integral_mode == PATH_INTEGRAL_CENTROID)
+        error->all(FLERR,
+                   "Fix plumed path_integral centroid requires method pimd with ensemble nvt or "
+                   "method nmpimd with ensemble nph or npt");
+      error->all(FLERR,
+                 "Fix plumed path_integral bead modes require method pimd and ensemble nvt");
+    }
     auto *beads = static_cast<int *>(pimd_fix->extract("nbeads", dim));
     if (!beads || dim != 0 || *beads != universe->nworlds)
       error->all(FLERR, "Fix plumed could not determine the PIMD bead count");
@@ -354,9 +368,6 @@ void FixPlumed::init()
         error->all(FLERR, "Fix plumed path_integral bead modes require multiple partitions");
       if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) bead_density_force_scale = *force_scale;
     } else {
-      if (comm->nprocs != 1)
-        error->all(FLERR,
-                   "Fix plumed path_integral centroid currently requires one MPI rank per bead");
       centroid_force_scale = *force_scale;
       centroid_coordinates = static_cast<double *>(pimd_fix->extract("centroid_coordinates", dim));
       if (!centroid_coordinates || dim != 1)
@@ -418,6 +429,7 @@ void FixPlumed::setup(int vflag)
   } else {
     post_force(vflag);
   }
+  if (centroid_virial_pending) pimd_fix->end_of_step();
 }
 
 void FixPlumed::min_setup(int vflag)
@@ -662,7 +674,7 @@ void FixPlumed::post_force(int /* vflag */)
 
 void FixPlumed::post_force_centroid()
 {
-  int invalid_atom_count = natoms != int(atom->natoms) || atom->nlocal != natoms;
+  int invalid_atom_count = natoms != int(atom->natoms);
   MPI_Allreduce(MPI_IN_PLACE, &invalid_atom_count, 1, MPI_INT, MPI_SUM, universe->uworld);
   if (invalid_atom_count)
     error->universe_all(
@@ -728,6 +740,7 @@ void FixPlumed::post_force_centroid()
       const int index = atom->tag[i] - 1;
       for (int d = 0; d < 3; d++) centroid_forces_all[3 * index + d] = centroid_forces[3 * i + d];
     }
+    MPI_Allreduce(MPI_IN_PLACE, centroid_forces_all, 3 * natoms, MPI_DOUBLE, MPI_SUM, world);
     virial[0] = -plmd_virial[0][0];
     virial[1] = -plmd_virial[1][1];
     virial[2] = -plmd_virial[2][2];
@@ -735,6 +748,8 @@ void FixPlumed::post_force_centroid()
     virial[4] = -plmd_virial[0][2];
     virial[5] = -plmd_virial[1][2];
   }
+
+  if (centroid_virial_pending) *centroid_virial_pending = 1;
 
   MPI_Bcast(centroid_forces_all, 3 * natoms, MPI_DOUBLE, 0, universe->uworld);
   for (int i = 0; i < atom->nlocal; i++) {

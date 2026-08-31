@@ -106,6 +106,7 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg, bool allow_e
   fmass = 1.0;
   np = universe->nworlds;
   inverse_np = 1.0 / np;
+  normal_mode_centroid_force_scale = universe->iworld == 0 ? 1.0 / sqrt((double) np) : 0.0;
   sp = 1.0;
   temp = 298.15;
   Lan_temp = 298.15;
@@ -116,6 +117,7 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg, bool allow_e
   pilescale = 1.0;
   tstat_flag = 1;
   pstat_flag = 0;
+  centroid_bias_virial_pending = 0;
   mapflag = 1;
   removecomflag = 1;
   fmmode = PHYSICAL;
@@ -429,6 +431,7 @@ FixPIMDLangevin::~FixPIMDLangevin()
 
   memory->destroy(M_x2xp);
   memory->destroy(M_xp2x);
+  memory->sfree(lam);
   memory->destroy(xc);
   memory->destroy(x_unwrap);
   memory->destroy(bufsend);
@@ -803,7 +806,6 @@ void FixPIMDLangevin::post_force(int /*flag*/)
       for (int i = 0; i < nlocal; i++) { domain->unmap_inv(x[i], image[i]); }
     }
   }
-  compute_pote();
   if (method == NMPIMD) {
     inter_replica_comm(f);
     if (cmode == SINGLE_PROC)
@@ -820,6 +822,7 @@ void FixPIMDLangevin::post_force(int /*flag*/)
 
 void FixPIMDLangevin::end_of_step()
 {
+  compute_pote();
   compute_totke();
   compute_p_cv();
   compute_tote();
@@ -886,6 +889,10 @@ void *FixPIMDLangevin::extract(const char *str, int &dim)
   if (strcmp(str, "nbeads") == 0) return &np;
   if (strcmp(str, "centroid_bias_force_scale") == 0 && method == PIMD && ensemble == NVT)
     return &inverse_np;
+  if (strcmp(str, "normal_mode_centroid_force_scale") == 0 && method == NMPIMD && pstat_flag)
+    return &normal_mode_centroid_force_scale;
+  if (strcmp(str, "centroid_bias_virial_pending") == 0 && method == NMPIMD && pstat_flag)
+    return &centroid_bias_virial_pending;
   return nullptr;
 }
 
@@ -1837,6 +1844,10 @@ void FixPIMDLangevin::compute_p_prim()
 
 void FixPIMDLangevin::compute_p_cv()
 {
+  if (centroid_bias_virial_pending) {
+    compute_vir();
+    centroid_bias_virial_pending = 0;
+  }
   double inv_volume = 1.0 / (domain->xprd * domain->yprd * domain->zprd);
   p_md = THIRD * inv_volume * (totke + vir);
   if (method == NMPIMD) {

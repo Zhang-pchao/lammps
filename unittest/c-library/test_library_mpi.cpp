@@ -282,6 +282,86 @@ TEST(MPI, pimd_multirank_spring_force)
 
 #if LAMMPS_HAS_PLUMED_PIMD
 
+namespace {
+
+double extract_pimd_vector(void *lmp, int index)
+{
+    auto *value =
+        (double *)lammps_extract_fix(lmp, "fpimd", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, index, 0);
+    EXPECT_NE(value, nullptr);
+    if (!value) return 0.0;
+    const double result = *value;
+    lammps_free(value);
+    return result;
+}
+
+struct CentroidNPTState {
+    double p_cv              = 0.0;
+    double pe_bead           = 0.0;
+    double tote              = 0.0;
+    double barostat_velocity = 0.0;
+    double volume            = 0.0;
+    double bias              = 0.0;
+    std::array<double, 6> pressure{};
+};
+
+CentroidNPTState run_centroid_npt_volume_leg(const char *plumed_file, const char *plumed_log,
+                                             double external_pressure)
+{
+    void *lmp = open_multirank_partition();
+    EXPECT_NE(lmp, nullptr);
+    if (!lmp) return {};
+
+    EXPECT_EQ(lammps_extract_setting(lmp, "world_size"), 2);
+    create_multirank_two_atom_system(lmp);
+    lammps_command(lmp, "thermo 0");
+    lammps_command(lmp, "compute plumed_pressure all pressure NULL virial");
+    const std::string pimd_command =
+        "fix fpimd all pimd/langevin method nmpimd ensemble npt integrator obabo "
+        "thermostat PILE_L 2468 tau 1.0 temp 1.0 iso " +
+        std::to_string(external_pressure) + " barostat BZP taup 1.0 fixcom no";
+    lammps_command(lmp, pimd_command.c_str());
+    const std::string plumed_command = "fix bias all plumed plumedfile " +
+                                       std::string(plumed_file) + " outfile " + plumed_log +
+                                       " path_integral centroid pimd_fix fpimd";
+    lammps_command(lmp, plumed_command.c_str());
+    lammps_command(lmp, "run 0 post no");
+
+    CentroidNPTState state;
+    int me;
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    if (me == 0) state.p_cv = extract_pimd_vector(lmp, 9);
+    MPI_Bcast(&state.p_cv, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    state.pe_bead = extract_pimd_vector(lmp, 2);
+    state.tote = extract_pimd_vector(lmp, 3);
+    auto *pressure =
+        (double *)lammps_extract_compute(lmp, "plumed_pressure", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
+    EXPECT_NE(pressure, nullptr);
+    if (pressure)
+        for (int i = 0; i < 6; ++i)
+            state.pressure[i] = pressure[i];
+    auto *bias =
+        (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+    EXPECT_NE(bias, nullptr);
+    if (bias) {
+        state.bias = *bias;
+        lammps_free(bias);
+    }
+
+    lammps_command(lmp, "run 1 post no");
+    state.barostat_velocity = extract_pimd_vector(lmp, 10);
+    double boxlo[3], boxhi[3], xy, yz, xz;
+    int periodicity[3], boxflag;
+    lammps_extract_box(lmp, boxlo, boxhi, &xy, &yz, &xz, periodicity, &boxflag);
+    state.volume = (boxhi[0] - boxlo[0]) * (boxhi[1] - boxlo[1]) * (boxhi[2] - boxlo[2]);
+
+    EXPECT_EQ(lammps_has_error(lmp), 0);
+    lammps_close(lmp);
+    return state;
+}
+
+} // namespace
+
 TEST(MPI, plumed_pimd_input_contract)
 {
     int nprocs;
@@ -341,8 +421,177 @@ TEST(MPI, plumed_pimd_input_contract)
     lammps_command(lmp, "fix guard all plumed path_integral centroid pimd_fix fpimd");
     EXPECT_EQ(lammps_has_error(lmp), 0);
     expect_error(lmp, "run 0 post no",
-                 "Fix plumed path_integral modes require method pimd and ensemble nvt");
+                 "Fix plumed path_integral centroid requires method pimd with ensemble nvt or "
+                 "method nmpimd with ensemble nph or npt");
     lammps_close(lmp);
+
+    lmp = open_lammps();
+    lammps_command(lmp, "fix fpimd all pimd/langevin method nmpimd ensemble nvt "
+                        "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+    lammps_command(lmp, "fix guard all plumed path_integral centroid pimd_fix fpimd");
+    EXPECT_EQ(lammps_has_error(lmp), 0);
+    expect_error(lmp, "run 0 post no",
+                 "Fix plumed path_integral centroid requires method pimd with ensemble nvt or "
+                 "method nmpimd with ensemble nph or npt");
+    lammps_close(lmp);
+
+    for (const char *mode : {"bead_mean", "bead_density"}) {
+        lmp = open_lammps();
+        lammps_command(lmp, "fix fpimd all pimd/langevin method nmpimd ensemble npt "
+                            "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 iso 0.0 "
+                            "barostat BZP taup 1.0 fixcom no");
+        const std::string command =
+            "fix guard all plumed path_integral " + std::string(mode) + " pimd_fix fpimd";
+        lammps_command(lmp, command.c_str());
+        EXPECT_EQ(lammps_has_error(lmp), 0);
+        expect_error(lmp, "run 0 post no",
+                     "Fix plumed path_integral bead modes require method pimd and ensemble nvt");
+        lammps_close(lmp);
+    }
+}
+
+TEST(MPI, plumed_centroid_multirank_force_modes)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    const char *plumed_file = "test_plumed_nmpimd_centroid_force.dat";
+    const char *plumed_log  = "test_plumed_nmpimd_centroid_force.log";
+    const char *direct_log  = "test_plumed_pimd_centroid_multirank_force.log";
+    if (me == 0) {
+        std::ofstream input(plumed_file);
+        input << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+              << "bias: RESTRAINT ARG=d AT=0.0 KAPPA=4.0\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    void *lmp = open_multirank_partition();
+    ASSERT_NE(lmp, nullptr);
+    EXPECT_EQ(lammps_extract_setting(lmp, "world_size"), 2);
+    create_multirank_two_atom_system(lmp);
+    lammps_command(lmp, "group first id 1");
+    lammps_command(lmp, "group second id 2");
+    lammps_command(lmp, "compute first_force first reduce sum fx fy fz");
+    lammps_command(lmp, "compute second_force second reduce sum fx fy fz");
+    lammps_command(lmp, "fix fpimd all pimd/langevin method nmpimd ensemble nph "
+                        "integrator obabo iso 0.0 barostat BZP taup 1.0 fixcom no");
+    const std::string fix_command = "fix bias all plumed plumedfile " + std::string(plumed_file) +
+                                    " outfile " + plumed_log +
+                                    " path_integral centroid pimd_fix fpimd";
+    lammps_command(lmp, fix_command.c_str());
+    lammps_command(lmp, "run 0 post no");
+
+    auto *first =
+        (double *)lammps_extract_compute(lmp, "first_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
+    auto *second =
+        (double *)lammps_extract_compute(lmp, "second_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    const double mode_scale = me / 2 == 0 ? 1.0 / std::sqrt(2.0) : 0.0;
+    EXPECT_NEAR(first[0], 18.0 * mode_scale, 1.0e-12);
+    EXPECT_NEAR(first[1], 14.0 * mode_scale, 1.0e-12);
+    EXPECT_NEAR(first[2], 0.0, 1.0e-12);
+    EXPECT_NEAR(second[0], -18.0 * mode_scale, 1.0e-12);
+    EXPECT_NEAR(second[1], -14.0 * mode_scale, 1.0e-12);
+    EXPECT_NEAR(second[2], 0.0, 1.0e-12);
+
+    auto *bias =
+        (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+    ASSERT_NE(bias, nullptr);
+    EXPECT_NEAR(*bias, me / 2 == 0 ? 65.0 : 0.0, 1.0e-12);
+    lammps_free(bias);
+    EXPECT_EQ(lammps_has_error(lmp), 0);
+    lammps_close(lmp);
+
+    lmp = open_multirank_partition();
+    ASSERT_NE(lmp, nullptr);
+    create_multirank_two_atom_system(lmp);
+    lammps_command(lmp, "set atom 2 x 19.0 y 10.0 z 2.0");
+    lammps_command(lmp, "group first id 1");
+    lammps_command(lmp, "group second id 2");
+    lammps_command(lmp, "compute first_force first reduce sum fx fy fz");
+    lammps_command(lmp, "compute second_force second reduce sum fx fy fz");
+    lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                        "integrator obabo thermostat PILE_L 2468 tau 1.0 temp 1.0 fixcom no");
+    const std::string direct_command = "fix bias all plumed plumedfile " +
+                                       std::string(plumed_file) + " outfile " + direct_log +
+                                       " path_integral centroid pimd_fix fpimd";
+    lammps_command(lmp, direct_command.c_str());
+    lammps_command(lmp, "run 0 post no");
+
+    first =
+        (double *)lammps_extract_compute(lmp, "first_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
+    second =
+        (double *)lammps_extract_compute(lmp, "second_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_NEAR(first[0], 18.0, 1.0e-12);
+    EXPECT_NEAR(first[1], 0.0, 1.0e-12);
+    EXPECT_NEAR(first[2], 0.0, 1.0e-12);
+    EXPECT_NEAR(second[0], -18.0, 1.0e-12);
+    EXPECT_NEAR(second[1], 0.0, 1.0e-12);
+    EXPECT_NEAR(second[2], 0.0, 1.0e-12);
+    bias = (double *)lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, -1, -1);
+    ASSERT_NE(bias, nullptr);
+    EXPECT_NEAR(*bias, me / 2 == 0 ? 162.0 : 0.0, 1.0e-12);
+    lammps_free(bias);
+    EXPECT_EQ(lammps_has_error(lmp), 0);
+    lammps_close(lmp);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) {
+        std::remove(plumed_file);
+        std::remove(plumed_log);
+        std::remove(direct_log);
+    }
+}
+
+TEST(MPI, plumed_nmpimd_centroid_npt_volume)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    const char *zero_file = "test_plumed_nmpimd_volume_zero.dat";
+    const char *bias_file = "test_plumed_nmpimd_volume_bias.dat";
+    const char *zero_log  = "test_plumed_nmpimd_volume_zero.log";
+    const char *bias_log  = "test_plumed_nmpimd_volume_bias.log";
+    if (me == 0) {
+        std::ofstream zero(zero_file);
+        zero << "v: VOLUME\n";
+        std::ofstream biased(bias_file);
+        biased << "v: VOLUME\n"
+               << "bias: RESTRAINT ARG=v AT=0.0 KAPPA=0.0 SLOPE=-2.0\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    const auto zero   = run_centroid_npt_volume_leg(zero_file, zero_log, 0.0);
+    const auto biased = run_centroid_npt_volume_leg(bias_file, bias_log, 1.0);
+
+    EXPECT_NEAR(biased.p_cv - zero.p_cv, 1.0, 1.0e-12);
+    EXPECT_NEAR(biased.pe_bead - zero.pe_bead, me / 2 == 0 ? -16000.0 : 0.0, 1.0e-10);
+    EXPECT_NEAR(biased.tote - zero.tote, -16000.0, 1.0e-10);
+    for (int i = 0; i < 3; ++i)
+        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], me / 2 == 0 ? 2.0 : 0.0, 1.0e-12);
+    for (int i = 3; i < 6; ++i)
+        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], 0.0, 1.0e-12);
+    EXPECT_NEAR(zero.bias, 0.0, 1.0e-12);
+    EXPECT_NEAR(biased.bias, me / 2 == 0 ? -16000.0 : 0.0, 1.0e-10);
+    EXPECT_NEAR(biased.barostat_velocity, zero.barostat_velocity, 1.0e-12);
+    EXPECT_NEAR(biased.volume, zero.volume, 1.0e-10);
+    EXPECT_GT(std::fabs(zero.barostat_velocity), 1.0e-8);
+    EXPECT_GT(std::fabs(zero.volume - 8000.0), 1.0e-10);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) {
+        std::remove(zero_file);
+        std::remove(bias_file);
+        std::remove(zero_log);
+        std::remove(bias_log);
+    }
 }
 
 TEST(MPI, plumed_pimd_single_bead_limit)
