@@ -60,9 +60,10 @@ class FixPIMDLangevin : public Fix {
   int fmmode;                              // physical or normal
   int np;                                  // number of beads
   double inverse_np;                       // 1.0/np
-  double temp;                             // temperature
-  double hbar;                             // Planck's constant
-  double lj_epsilon, lj_sigma, lj_mass;    // LJ unit energy, length, and mass scales
+  double normal_mode_centroid_force_scale;    // F_q0/F_centroid on this normal mode
+  double temp;                                // temperature
+  double hbar;                                // Planck's constant
+  double lj_epsilon, lj_sigma, lj_mass;       // LJ unit energy, length, and mass scales
   double other_planck;
   double other_mvv2e;
   double kt;               // k_B * temp
@@ -140,8 +141,9 @@ class FixPIMDLangevin : public Fix {
 
   /* Bussi-Zykova-Parrinello barostat */
 
-  int pstat_flag;    // pstat_flag = 1 if barostat is used
-  int pstyle;        // pstyle = ISO or ANISO (will support TRICLINIC in the future)
+  int pstat_flag;                      // pstat_flag = 1 if barostat is used
+  int centroid_bias_virial_pending;    // current PLUMED centroid virial needs collecting
+  int pstyle;    // pstyle = ISO or ANISO (will support TRICLINIC in the future)
   double W, tau_p, Pext, p_hydro, totenthalpy, Vcoeff;
   int pdim;
   int p_flag[6];

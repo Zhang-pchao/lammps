@@ -83,13 +83,28 @@ be specified by the user in the PLUMED input file.
 
 .. versionadded:: TBD
 
+.. versionchanged:: TBD
+   The *centroid* mode supports normal-mode PIMD with NPH or NPT and multiple
+   MPI ranks per bead.
+
 The *path_integral centroid* setting couples PLUMED to the Cartesian coordinate
 centroid provided by the :doc:`fix pimd/langevin <fix_pimd>` command selected
 with *pimd_fix*.  The PIMD fix must be defined before fix plumed.  One PLUMED
 state is created on partition zero, so there is one bias history rather than an
-independent history for each bead.  If the centroid bias force is
-:math:`\mathbf{F}_c`, this fix adds :math:`\mathbf{F}_c/P` to every one of the
-:math:`P` Cartesian beads.
+independent history for each bead.  With *method pimd* and *ensemble nvt*, a
+centroid bias force :math:`\mathbf{F}_c` adds :math:`\mathbf{F}_c/P` to every
+one of the :math:`P` Cartesian beads.  With *method nmpimd* and *ensemble nph*
+or *npt*, the centroid coordinate and force obey
+
+.. math::
+
+   \mathbf{q}_0=\frac{1}{\sqrt{P}}\sum_b\mathbf{R}_b,
+   \qquad
+   \mathbf{F}_{q_0}=\frac{\mathbf{F}_c}{\sqrt{P}},
+
+and the non-centroid modes receive no bias force.  The once-owned bias virial
+is included in the current-step centroid-virial pressure used by the
+normal-mode barostat.
 
 This mode biases a collective variable evaluated from the coordinate centroid,
 which is generally different from averaging the collective variable over the
@@ -254,14 +269,15 @@ LAMMPS was built with that package.  See the :doc:`Build package
 
 There can only be one fix plumed command active at a time.
 
-All path-integral modes require :doc:`fix pimd/langevin <fix_pimd>` with
-*method pimd* and *ensemble nvt*.  The *centroid* mode additionally requires
-one MPI rank per bead, a fixed atom count, consecutive atom IDs, and an atom
-map.  The *bead_mean* and *bead_density* modes require multiple LAMMPS
-partitions.  A *bead_mean* input must explicitly route each bias through
-``ENSEMBLE``.  A history-dependent *bead_density* input must use one shared
-bias field and scale each bead's deposition by :math:`1/P`.  None of the
-path-integral modes supports energy-dependent PLUMED actions, minimization,
+The *bead_mean* and *bead_density* modes require
+:doc:`fix pimd/langevin <fix_pimd>` with *method pimd*, *ensemble nvt*, and
+multiple LAMMPS partitions.  The *centroid* mode accepts that combination or
+*method nmpimd* with *ensemble nph* or *npt*.  It requires a fixed atom count,
+consecutive atom IDs, and an atom map, but can distribute each bead over
+multiple MPI ranks.  A *bead_mean* input must explicitly route each bias
+through ``ENSEMBLE``.  A history-dependent *bead_density* input must use one
+shared bias field and scale each bead's deposition by :math:`1/P`.  None of
+the path-integral modes supports energy-dependent PLUMED actions, minimization,
 or r-RESPA.
 The default *path_integral off* setting remains incompatible with path-integral
 fixes.
