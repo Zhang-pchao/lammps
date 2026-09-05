@@ -889,9 +889,11 @@ void *FixPIMDLangevin::extract(const char *str, int &dim)
   if (strcmp(str, "nbeads") == 0) return &np;
   if (strcmp(str, "centroid_bias_force_scale") == 0 && method == PIMD && ensemble == NVT)
     return &inverse_np;
-  if (strcmp(str, "normal_mode_centroid_force_scale") == 0 && method == NMPIMD && pstat_flag)
+  if (strcmp(str, "normal_mode_centroid_force_scale") == 0 && method == NMPIMD &&
+      (ensemble == NVT || ensemble == NPH || ensemble == NPT))
     return &normal_mode_centroid_force_scale;
-  if (strcmp(str, "centroid_bias_virial_pending") == 0 && method == NMPIMD && pstat_flag)
+  if (strcmp(str, "centroid_bias_virial_pending") == 0 && method == NMPIMD &&
+      (ensemble == NVT || ensemble == NPH || ensemble == NPT))
     return &centroid_bias_virial_pending;
   return nullptr;
 }

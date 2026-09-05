@@ -290,6 +290,16 @@ ensemble is it going to sample. The value can be *nve* (microcanonical),
 (isothermal-isobaric).  Fix *pimd/langevin/bosonic* currently does not
 support *ensemble* other than *nve*, *nvt*.
 
+When :doc:`fix plumed <fix_plumed>` uses *path_integral centroid*, normal-mode
+PIMD supports the NVT, NPH, and NPT ensembles.  The Cartesian centroid passed
+to PLUMED is :math:`\mathbf{q}_0/\sqrt{P}` and the returned force on the zero
+mode is :math:`\mathbf{F}_c/\sqrt{P}`; every non-centroid mode receives zero
+bias force.  The scalar bias and virial are owned once on partition zero.  In
+NVT the virial contributes to the reported current-step centroid pressure but
+does not activate a barostat or update the cell.  NPH and NPT additionally use
+that pressure in their BZP barostat path.  Normal-mode NVE centroid coupling is
+not supported.
+
 The keyword *temp* specifies temperature parameter for fix styles
 *pimd/nvt* and *pimd/langevin*. It must be a positive floating-point
 number; zero is rejected before initialization.

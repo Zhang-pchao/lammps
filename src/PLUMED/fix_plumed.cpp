@@ -354,7 +354,7 @@ void FixPlumed::init()
       if (path_integral_mode == PATH_INTEGRAL_CENTROID)
         error->all(FLERR,
                    "Fix plumed path_integral centroid requires method pimd with ensemble nvt or "
-                   "method nmpimd with ensemble nph or npt");
+                   "method nmpimd with ensemble nvt, nph, or npt");
       error->all(FLERR,
                  "Fix plumed path_integral bead modes require method pimd and ensemble nvt");
     }
