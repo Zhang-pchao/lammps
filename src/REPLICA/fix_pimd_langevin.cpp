@@ -553,7 +553,7 @@ void FixPIMDLangevin::init()
 
   comm_init();
 
-  mass = new double[atom->ntypes + 1];
+  if (!mass) mass = new double[atom->ntypes + 1];
 
   nmpimd_init();
 
@@ -1183,9 +1183,9 @@ void FixPIMDLangevin::langevin_init()
   const double _omega_np = np / beta / hbar;
   double _omega_np_dt_half = _omega_np * update->dt * 0.5;
 
-  _omega_k = new double[np];
-  Lan_c = new double[np];
-  Lan_s = new double[np];
+  if (!_omega_k) _omega_k = new double[np];
+  if (!Lan_c) Lan_c = new double[np];
+  if (!Lan_s) Lan_s = new double[np];
   if (method == NMPIMD) {
     if (fmmode == PHYSICAL) {
       for (int i = 0; i < np; i++) {
@@ -1225,9 +1225,9 @@ void FixPIMDLangevin::langevin_init()
     std::string out = "Initializing PI Langevin equation thermostat...\n";
     out += "  Bead ID    |    omega    |    tau    |    c1    |    c2\n";
     if (method == NMPIMD) {
-      tau_k = new double[np];
-      c1_k = new double[np];
-      c2_k = new double[np];
+      if (!tau_k) tau_k = new double[np];
+      if (!c1_k) c1_k = new double[np];
+      if (!c2_k) c2_k = new double[np];
       tau_k[0] = 1.0 / gamma;
       c1_k[0] = c1;
       c2_k[0] = c2;
@@ -1307,10 +1307,10 @@ void FixPIMDLangevin::o_step()
 
 void FixPIMDLangevin::nmpimd_init()
 {
-  memory->create(M_x2xp, np, np, "fix_feynman:M_x2xp");
-  memory->create(M_xp2x, np, np, "fix_feynman:M_xp2x");
+  if (!M_x2xp) memory->create(M_x2xp, np, np, "fix_feynman:M_x2xp");
+  if (!M_xp2x) memory->create(M_xp2x, np, np, "fix_feynman:M_xp2x");
 
-  lam = (double *) memory->smalloc(sizeof(double) * np, "FixPIMDLangevin::lam");
+  if (!lam) lam = (double *) memory->smalloc(sizeof(double) * np, "FixPIMDLangevin::lam");
 
   // Set up  eigenvalues
   for (int i = 0; i < np; i++) {
@@ -1470,21 +1470,17 @@ void FixPIMDLangevin::comm_init()
 
   int nlocal = atom->nlocal;
   if (cmode == SINGLE_PROC) {
-    memory->create(counts, nreplica, "FixPIMDLangevin:counts");
-    memory->create(displacements, nreplica, "FixPIMDLangevin:displacements");
+    if (!counts) memory->create(counts, nreplica, "FixPIMDLangevin:counts");
+    if (!displacements)
+      memory->create(displacements, nreplica, "FixPIMDLangevin:displacements");
     for (int i = 0; i < nreplica; i++) counts[i] = 3*nlocal;
     displacements[0] = 0;
     for (int i = 0; i < nreplica - 1; i++) displacements[i + 1] = displacements[i] + counts[i];
   }
-  if (sizeplan) {
-    delete[] plansend;
-    delete[] planrecv;
-  }
-
   sizeplan = np - 1;
-  plansend = new int[sizeplan];
-  planrecv = new int[sizeplan];
-  modeindex = new int[sizeplan];
+  if (!plansend) plansend = new int[sizeplan];
+  if (!planrecv) planrecv = new int[sizeplan];
+  if (!modeindex) modeindex = new int[sizeplan];
   for (int i = 0; i < sizeplan; i++) {
 
     // send to the (i+1)-th "next" replica, same local rank within that replica
