@@ -67,7 +67,6 @@ if(HAS_PIMD AND PKG_PLUMED)
 else()
   set(HAS_PLUMED_PIMD 0)
 endif()
-list(APPEND TEST_CONFIG_DEFS LAMMPS_HAS_PLUMED_PIMD=${HAS_PLUMED_PIMD})
 
 if(BUILD_OMP)
   set(HAS_OMP 1)
@@ -100,6 +99,13 @@ if(HAS_PIMD)
   target_link_libraries(test_pimd_mpi PRIVATE lammps GTest::GMock)
   target_compile_definitions(test_pimd_mpi PRIVATE "MPICH_SKIP_MPICXX=1;OMPI_SKIP_MPICXX=1")
   add_mpi_test(NAME PIMDMPI NUM_PROCS 4 COMMAND $<TARGET_FILE:test_pimd_mpi>)
+endif()
+
+if(HAS_PLUMED_PIMD)
+  add_executable(test_plumed_pimd_mpi test_plumed_pimd_mpi.cpp)
+  target_link_libraries(test_plumed_pimd_mpi PRIVATE lammps GTest::GMock)
+  target_compile_definitions(test_plumed_pimd_mpi PRIVATE "MPICH_SKIP_MPICXX=1;OMPI_SKIP_MPICXX=1")
+  add_mpi_test(NAME PlumedPIMDMPI NUM_PROCS 4 COMMAND $<TARGET_FILE:test_plumed_pimd_mpi>)
 endif()
 
 # simple run tests for coupling to the LAMMPS library
