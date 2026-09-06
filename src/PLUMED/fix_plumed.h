@@ -69,6 +69,7 @@ class FixPlumed : public Fix {
   double *centroid_forces;         // local centroid forces returned by PLUMED
   double *centroid_forces_all;     // tag-ordered centroid forces shared by all beads
   int *centroid_virial_pending;    // asks the NMPIMD fix to collect this step's bias virial
+  int *bead_bias_virial_pending;    // asks NMPIMD to transform bead forces and refresh virial
   double *forces_before_plumed;    // local forces before bead-density bias
   int nlevels_respa;               // this is something to enable respa
   double bias;                     // output bias potential
@@ -80,6 +81,7 @@ class FixPlumed : public Fix {
   char *id_pimd;             // ID for the coupled fix pimd/langevin
 
   void check_path_integral_compatibility();
+  void check_normal_mode_post_force_order();
   void update_atom_data();
   void post_force_centroid();
 };

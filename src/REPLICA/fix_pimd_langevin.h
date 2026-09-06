@@ -114,10 +114,14 @@ class FixPIMDLangevin : public Fix {
 
   double *lam, **M_x2xp, **M_xp2x, **M_f2fp, **M_fp2f;
   int *modeindex;
+  int defer_normal_mode_force;       // transform forces after all post-force fixes
+  int normal_mode_force_pending;     // Cartesian force still needs transformation
+  int bead_bias_virial_pending;      // bead-mode bias needs current-step estimators
 
   void reallocate();
   void nmpimd_init();
   void nmpimd_transform(double **, double **, double *);
+  void prepare_normal_mode_forces();
 
   /* Langevin integration */
 

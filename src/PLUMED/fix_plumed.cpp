@@ -53,9 +53,10 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     path_integral_mode(PATH_INTEGRAL_OFF), plumed_active(1), centroid_force_scale(0.0),
     bead_density_force_scale(0.0), gatindex(nullptr), masses(nullptr), charges(nullptr),
     centroid_coordinates(nullptr), centroid_positions(nullptr), centroid_forces(nullptr),
-    centroid_forces_all(nullptr), centroid_virial_pending(nullptr), forces_before_plumed(nullptr),
-    nlevels_respa(0), bias(0.0), c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0),
-    id_pe(nullptr), id_press(nullptr), id_pimd(nullptr)
+    centroid_forces_all(nullptr), centroid_virial_pending(nullptr),
+    bead_bias_virial_pending(nullptr), forces_before_plumed(nullptr), nlevels_respa(0), bias(0.0),
+    c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0), id_pe(nullptr), id_press(nullptr),
+    id_pimd(nullptr)
 {
 
   if (!atom->tag_enable) error->all(FLERR, "Fix plumed requires atom tags");
@@ -305,6 +306,29 @@ void FixPlumed::check_path_integral_compatibility()
   }
 }
 
+/* ---------------------------------------------------------------------- */
+
+void FixPlumed::check_normal_mode_post_force_order()
+{
+  if (!centroid_virial_pending && !bead_bias_virial_pending) return;
+
+  int plumed_index = -1;
+  for (int i = 0; i < modify->nfix; ++i) {
+    if (modify->fix[i] == this) {
+      plumed_index = i;
+      break;
+    }
+  }
+
+  for (int i = plumed_index + 1; i < modify->nfix; ++i) {
+    if ((modify->fmask[i] & POST_FORCE) && strcmp(modify->fix[i]->style, "GROUP") != 0)
+      error->all(FLERR,
+                 "Fix plumed with NMPIMD path_integral modes must be defined after fix {} "
+                 "because it has a post-force callback",
+                 modify->fix[i]->style);
+  }
+}
+
 FixPlumed::~FixPlumed()
 {
   delete p;
@@ -341,14 +365,30 @@ void FixPlumed::init()
       error->all(FLERR, "Fix plumed path_integral modes do not support r-RESPA");
 
     int dim = -1;
-    auto *force_scale = static_cast<double *>(pimd_fix->extract("centroid_bias_force_scale", dim));
-    if (!force_scale && path_integral_mode == PATH_INTEGRAL_CENTROID) {
-      force_scale =
-          static_cast<double *>(pimd_fix->extract("normal_mode_centroid_force_scale", dim));
-      centroid_virial_pending =
-          static_cast<int *>(pimd_fix->extract("centroid_bias_virial_pending", dim));
-      if (force_scale && !centroid_virial_pending)
-        error->all(FLERR, "Fix plumed could not access the NMPIMD centroid virial state");
+    double *force_scale = nullptr;
+    if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+      force_scale = static_cast<double *>(pimd_fix->extract("centroid_bias_force_scale", dim));
+      if (!force_scale) {
+        force_scale =
+            static_cast<double *>(pimd_fix->extract("normal_mode_centroid_force_scale", dim));
+        centroid_virial_pending =
+            static_cast<int *>(pimd_fix->extract("centroid_bias_virial_pending", dim));
+        if (force_scale && !centroid_virial_pending)
+          error->all(FLERR, "Fix plumed could not access the NMPIMD centroid virial state");
+      }
+    } else {
+      force_scale = static_cast<double *>(pimd_fix->extract("bead_bias_force_scale", dim));
+      int deferred_dim = -1;
+      auto *defer_normal_mode_force =
+          static_cast<int *>(pimd_fix->extract("defer_normal_mode_force", deferred_dim));
+      if (defer_normal_mode_force) {
+        int pending_dim = -1;
+        bead_bias_virial_pending =
+            static_cast<int *>(pimd_fix->extract("bead_bias_virial_pending", pending_dim));
+        if (deferred_dim != 0 || !bead_bias_virial_pending || pending_dim != 0)
+          error->all(FLERR, "Fix plumed could not access the NMPIMD bead-force state");
+        *defer_normal_mode_force = 1;
+      }
     }
     if (!force_scale || dim != 0) {
       if (path_integral_mode == PATH_INTEGRAL_CENTROID)
@@ -356,11 +396,13 @@ void FixPlumed::init()
                    "Fix plumed path_integral centroid requires method pimd with ensemble nvt or "
                    "method nmpimd with ensemble nvt, nph, or npt");
       error->all(FLERR,
-                 "Fix plumed path_integral bead modes require method pimd and ensemble nvt");
+                 "Fix plumed path_integral bead modes require method pimd with ensemble nvt or "
+                 "method nmpimd with ensemble nvt, nph, or npt");
     }
     auto *beads = static_cast<int *>(pimd_fix->extract("nbeads", dim));
     if (!beads || dim != 0 || *beads != universe->nworlds)
       error->all(FLERR, "Fix plumed could not determine the PIMD bead count");
+    check_normal_mode_post_force_order();
 
     if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN ||
         path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
@@ -429,7 +471,7 @@ void FixPlumed::setup(int vflag)
   } else {
     post_force(vflag);
   }
-  if (centroid_virial_pending) pimd_fix->end_of_step();
+  if (centroid_virial_pending || bead_bias_virial_pending) pimd_fix->end_of_step();
 }
 
 void FixPlumed::min_setup(int vflag)
@@ -661,6 +703,7 @@ void FixPlumed::post_force(int /* vflag */)
   }
   if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY)
     for (int i = 0; i < 6; i++) virial[i] *= bead_density_force_scale;
+  if (bead_bias_virial_pending) *bead_bias_virial_pending = 1;
 
   // Ask for the computes in the next time step
   // such that the virial and energy are tallied.

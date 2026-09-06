@@ -118,6 +118,9 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg, bool allow_e
   tstat_flag = 1;
   pstat_flag = 0;
   centroid_bias_virial_pending = 0;
+  defer_normal_mode_force = 0;
+  normal_mode_force_pending = 0;
+  bead_bias_virial_pending = 0;
   mapflag = 1;
   removecomflag = 1;
   fmmode = PHYSICAL;
@@ -458,6 +461,10 @@ int FixPIMDLangevin::setmask()
 
 void FixPIMDLangevin::init()
 {
+  defer_normal_mode_force = 0;
+  normal_mode_force_pending = 0;
+  bead_bias_virial_pending = 0;
+
   bigint min_natoms, max_natoms;
   MPI_Allreduce(&atom->natoms, &min_natoms, 1, MPI_LMP_BIGINT, MPI_MIN, universe->uworld);
   MPI_Allreduce(&atom->natoms, &max_natoms, 1, MPI_LMP_BIGINT, MPI_MAX, universe->uworld);
@@ -629,6 +636,8 @@ void FixPIMDLangevin::setup(int vflag)
 
 void FixPIMDLangevin::initial_integrate(int /*vflag*/)
 {
+  prepare_normal_mode_forces();
+
   int nlocal = atom->nlocal;
   double **x = atom->x;
   imageint *image = atom->image;
@@ -736,6 +745,8 @@ void FixPIMDLangevin::initial_integrate(int /*vflag*/)
 
 void FixPIMDLangevin::final_integrate()
 {
+  prepare_normal_mode_forces();
+
   if (pstat_flag) {
     compute_totke();
     compute_p_cv();
@@ -807,11 +818,15 @@ void FixPIMDLangevin::post_force(int /*flag*/)
     }
   }
   if (method == NMPIMD) {
-    inter_replica_comm(f);
-    if (cmode == SINGLE_PROC)
-      nmpimd_transform(bufsortedall, f, M_x2xp[universe->iworld]);
-    else if (cmode == MULTI_PROC)
-      nmpimd_transform(bufbeads, f, M_x2xp[universe->iworld]);
+    if (defer_normal_mode_force) {
+      normal_mode_force_pending = 1;
+    } else {
+      inter_replica_comm(f);
+      if (cmode == SINGLE_PROC)
+        nmpimd_transform(bufsortedall, f, M_x2xp[universe->iworld]);
+      else if (cmode == MULTI_PROC)
+        nmpimd_transform(bufbeads, f, M_x2xp[universe->iworld]);
+    }
   }
 
   c_pe->addstep(update->ntimestep + 1);
@@ -822,6 +837,7 @@ void FixPIMDLangevin::post_force(int /*flag*/)
 
 void FixPIMDLangevin::end_of_step()
 {
+  if (bead_bias_virial_pending) prepare_normal_mode_forces();
   compute_pote();
   compute_totke();
   compute_p_cv();
@@ -889,12 +905,22 @@ void *FixPIMDLangevin::extract(const char *str, int &dim)
   if (strcmp(str, "nbeads") == 0) return &np;
   if (strcmp(str, "centroid_bias_force_scale") == 0 && method == PIMD && ensemble == NVT)
     return &inverse_np;
+  if (strcmp(str, "bead_bias_force_scale") == 0 &&
+      ((method == PIMD && ensemble == NVT) ||
+       (method == NMPIMD && (ensemble == NVT || ensemble == NPH || ensemble == NPT))))
+    return &inverse_np;
   if (strcmp(str, "normal_mode_centroid_force_scale") == 0 && method == NMPIMD &&
       (ensemble == NVT || ensemble == NPH || ensemble == NPT))
     return &normal_mode_centroid_force_scale;
   if (strcmp(str, "centroid_bias_virial_pending") == 0 && method == NMPIMD &&
       (ensemble == NVT || ensemble == NPH || ensemble == NPT))
     return &centroid_bias_virial_pending;
+  if (strcmp(str, "defer_normal_mode_force") == 0 && method == NMPIMD &&
+      (ensemble == NVT || ensemble == NPH || ensemble == NPT))
+    return &defer_normal_mode_force;
+  if (strcmp(str, "bead_bias_virial_pending") == 0 && method == NMPIMD &&
+      (ensemble == NVT || ensemble == NPH || ensemble == NPT))
+    return &bead_bias_virial_pending;
   return nullptr;
 }
 
@@ -1357,6 +1383,29 @@ void FixPIMDLangevin::nmpimd_transform(double **src, double **des, double *vecto
       }
     }
   }
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPIMDLangevin::prepare_normal_mode_forces()
+{
+  if (method != NMPIMD || !normal_mode_force_pending) return;
+
+  if (bead_bias_virial_pending) {
+    compute_vir();
+    compute_xf_vir();
+    compute_cvir();
+    compute_t_vir();
+    bead_bias_virial_pending = 0;
+  }
+
+  double **f = atom->f;
+  inter_replica_comm(f);
+  if (cmode == SINGLE_PROC)
+    nmpimd_transform(bufsortedall, f, M_x2xp[universe->iworld]);
+  else if (cmode == MULTI_PROC)
+    nmpimd_transform(bufbeads, f, M_x2xp[universe->iworld]);
+  normal_mode_force_pending = 0;
 }
 
 /* ---------------------------------------------------------------------- */

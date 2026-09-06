@@ -84,8 +84,8 @@ be specified by the user in the PLUMED input file.
 .. versionadded:: TBD
 
 .. versionchanged:: TBD
-   The *centroid* mode supports normal-mode PIMD with NVT, NPH, or NPT and
-   multiple MPI ranks per bead.
+   The *centroid*, *bead_mean*, and *bead_density* modes support normal-mode
+   PIMD with NVT, NPH, or NPT and multiple MPI ranks per bead.
 
 The *path_integral centroid* setting couples PLUMED to the Cartesian coordinate
 centroid provided by the :doc:`fix pimd/langevin <fix_pimd>` command selected
@@ -137,6 +137,20 @@ bias energy is reported only on partition zero so that it is counted once;
 the chain-rule force and virial contributions remain local to every bead.
 Do not use a multiple-walker option to combine the PIMD beads: they are parts
 of one ring polymer, not statistically independent walkers.
+
+With *method nmpimd*, the same Cartesian bead coordinates are passed to
+PLUMED, and the complete Cartesian force after the PLUMED contribution is
+transformed to normal modes.  A nonlinear collective variable can therefore
+generate nonzero forces on internal modes; replacing this transformation by a
+centroid-only force would be incorrect.  NVT keeps the cell fixed.  NPH and
+NPT include the current-step bead-bias virial in the centroid pressure used by
+the BZP barostat.
+
+For every *path_integral* mode used with *method nmpimd*, define ``fix
+plumed`` after all other fixes that have a post-force callback.  This keeps
+Cartesian force contributions ahead of the normal-mode force transformation.
+LAMMPS stops with an error if a post-force fix is defined after ``fix
+plumed``; fixes without a post-force callback may still follow it.
 
 The same mode can construct the instantaneous path spread without another
 LAMMPS communication backend.  For a bead-local scalar :math:`s_b`, define
@@ -204,6 +218,11 @@ fixed bias therefore needs no replica-averaging action:
    d: DISTANCE ATOMS=1,2
    bias: RESTRAINT ARG=d AT=0.5 KAPPA=10
 
+For *method nmpimd*, only the PLUMED force increment and virial are scaled by
+:math:`1/P`; the physical Cartesian force is left unchanged before the full
+force is transformed to normal modes.  NVT keeps the cell fixed, while NPH and
+NPT pass the refreshed current-step virial to the BZP pressure path.
+
 For a history-dependent bias, every PLUMED instance must share one field.
 For example, ``METAD`` can use ``WALKERS_MPI`` as the field-communication
 mechanism.  Because all :math:`P` beads deposit at the same physical time, the
@@ -270,16 +289,18 @@ LAMMPS was built with that package.  See the :doc:`Build package
 
 There can only be one fix plumed command active at a time.
 
-The *bead_mean* and *bead_density* modes require
-:doc:`fix pimd/langevin <fix_pimd>` with *method pimd*, *ensemble nvt*, and
-multiple LAMMPS partitions.  The *centroid* mode accepts that combination or
-*method nmpimd* with *ensemble nvt*, *nph*, or *npt*.  It requires a fixed atom count,
-consecutive atom IDs, and an atom map, but can distribute each bead over
-multiple MPI ranks.  A *bead_mean* input must explicitly route each bias
-through ``ENSEMBLE``.  A history-dependent *bead_density* input must use one
-shared bias field and scale each bead's deposition by :math:`1/P`.  None of
-the path-integral modes supports energy-dependent PLUMED actions, minimization,
-or r-RESPA.
+The *centroid*, *bead_mean*, and *bead_density* modes require
+:doc:`fix pimd/langevin <fix_pimd>` with either *method pimd* and *ensemble
+nvt*, or *method nmpimd* and *ensemble nvt*, *nph*, or *npt*.  Normal-mode
+pressure ensembles use the BZP barostat supported by fix pimd/langevin;
+normal-mode NVE and Cartesian-PIMD pressure coupling are not supported.  All
+three modes require a fixed atom count, consecutive atom IDs, and an atom map,
+and can distribute each bead over multiple MPI ranks.  The *bead_mean* and
+*bead_density* modes additionally require multiple LAMMPS partitions.  A
+*bead_mean* input must explicitly route each bias through ``ENSEMBLE``.  A
+history-dependent *bead_density* input must use one shared bias field and scale
+each bead's deposition by :math:`1/P`.  None of the path-integral modes
+supports energy-dependent PLUMED actions, minimization, or r-RESPA.
 The default *path_integral off* setting remains incompatible with path-integral
 fixes.
 

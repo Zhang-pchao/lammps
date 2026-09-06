@@ -290,15 +290,24 @@ ensemble is it going to sample. The value can be *nve* (microcanonical),
 (isothermal-isobaric).  Fix *pimd/langevin/bosonic* currently does not
 support *ensemble* other than *nve*, *nvt*.
 
-When :doc:`fix plumed <fix_plumed>` uses *path_integral centroid*, normal-mode
-PIMD supports the NVT, NPH, and NPT ensembles.  The Cartesian centroid passed
-to PLUMED is :math:`\mathbf{q}_0/\sqrt{P}` and the returned force on the zero
-mode is :math:`\mathbf{F}_c/\sqrt{P}`; every non-centroid mode receives zero
-bias force.  The scalar bias and virial are owned once on partition zero.  In
-NVT the virial contributes to the reported current-step centroid pressure but
-does not activate a barostat or update the cell.  NPH and NPT additionally use
-that pressure in their BZP barostat path.  Normal-mode NVE centroid coupling is
-not supported.
+When :doc:`fix plumed <fix_plumed>` uses a *path_integral* mode, normal-mode
+PIMD supports the NVT, NPH, and NPT ensembles.  For *centroid*, the Cartesian
+centroid passed to PLUMED is :math:`\mathbf{q}_0/\sqrt{P}` and the returned
+force on the zero mode is :math:`\mathbf{F}_c/\sqrt{P}`; every non-centroid
+mode receives zero bias force.  For *bead_mean* and *bead_density*, PLUMED
+evaluates Cartesian bead coordinates and the complete Cartesian force is
+transformed, so nonlinear collective variables can exert nonzero forces on
+internal modes.  The bead-density factor :math:`1/P` applies only to the
+PLUMED force increment and virial, not to the physical force.  Scalar bias
+energy is owned once on partition zero.  In NVT the current-step bias virial
+contributes to the reported centroid pressure but does not activate a
+barostat or update the cell.  NPH and NPT additionally use that pressure in
+their BZP barostat path.  Normal-mode NVE path-integral coupling is not
+supported.
+
+For these NMPIMD path-integral modes, ``fix plumed`` must be the last fix with
+a post-force callback.  Define any other such fixes before it so their
+Cartesian force contributions are included in the complete transformation.
 
 The keyword *temp* specifies temperature parameter for fix styles
 *pimd/nvt* and *pimd/langevin*. It must be a positive floating-point
