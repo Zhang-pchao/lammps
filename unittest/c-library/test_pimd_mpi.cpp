@@ -112,10 +112,13 @@ void add_two_bead_fix(void *lmp, Ownership ownership, int thermostat_seed)
                             "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
 }
 
-void add_two_bead_direct_pimd_fix(void *lmp)
+void add_two_bead_integrator_fix(void *lmp, const std::string &method,
+                                 const std::string &integrator)
 {
-    lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
-                        "integrator obabo thermostat PILE_L 2468 tau 1.0 temp 1.0 fixcom no");
+    const std::string command = "fix fpimd all pimd/langevin method " + method +
+                                " ensemble nvt integrator " + integrator +
+                                " thermostat PILE_L 2468 tau 1.0 temp 1.0 fixcom no";
+    lammps_command(lmp, command.c_str());
 }
 
 void set_two_bead_initial_velocities(void *lmp, Ownership ownership)
@@ -376,8 +379,10 @@ std::array<double, 36> collect_two_bead_state(const std::array<double, 18> &loca
 }
 
 std::array<double, 36>
-run_two_bead_direct_pimd_segments(int first_steps, int second_steps, bool restart = false,
-                                  std::array<double, 10> *global_outputs = nullptr)
+run_two_bead_integrator_segments(int first_steps, int second_steps, bool restart = false,
+                                 std::array<double, 10> *global_outputs = nullptr,
+                                 const std::string &method              = "pimd",
+                                 const std::string &integrator = "obabo", bool interacting = false)
 {
     void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
     EXPECT_NE(lmp, nullptr);
@@ -385,10 +390,15 @@ run_two_bead_direct_pimd_segments(int first_steps, int second_steps, bool restar
 
     EXPECT_EQ(lammps_extract_setting(lmp, "world_size"), 2);
     create_two_bead_test_system(lmp, 2, Ownership::DEFAULT);
+    if (interacting) {
+        // Both bead geometries have nonzero LJ forces (separations 7 and 9).
+        lammps_command(lmp, "pair_style lj/cut 9.5");
+        lammps_command(lmp, "pair_coeff * * 0.1 6.0");
+    }
     set_two_bead_initial_velocities(lmp, Ownership::DEFAULT);
     lammps_command(lmp, "timestep 0.00001");
     lammps_command(lmp, "thermo 0");
-    add_two_bead_direct_pimd_fix(lmp);
+    add_two_bead_integrator_fix(lmp, method, integrator);
     const std::string first_run = "run " + std::to_string(first_steps);
     lammps_command(lmp, first_run.c_str());
     if (second_steps > 0) {
@@ -404,7 +414,7 @@ run_two_bead_direct_pimd_segments(int first_steps, int second_steps, bool restar
                                 "pimd_nvt_restart.1");
             lammps_command(lmp, "read_restart ${restart_file}");
             lammps_command(lmp, "thermo 0");
-            add_two_bead_direct_pimd_fix(lmp);
+            add_two_bead_integrator_fix(lmp, method, integrator);
         }
         const std::string second_run = "run " + std::to_string(second_steps);
         lammps_command(lmp, second_run.c_str());
@@ -1065,9 +1075,9 @@ TEST(PIMD, multirank_direct_pimd_run_and_restart_continuity)
 
     remove_nvt_restart_files();
     std::array<double, 10> continuous_outputs{}, segmented_outputs{}, restarted_outputs{};
-    const auto continuous = run_two_bead_direct_pimd_segments(6, 0, false, &continuous_outputs);
-    const auto segmented  = run_two_bead_direct_pimd_segments(3, 3, false, &segmented_outputs);
-    const auto restarted  = run_two_bead_direct_pimd_segments(3, 3, true, &restarted_outputs);
+    const auto continuous = run_two_bead_integrator_segments(6, 0, false, &continuous_outputs);
+    const auto segmented  = run_two_bead_integrator_segments(3, 3, false, &segmented_outputs);
+    const auto restarted  = run_two_bead_integrator_segments(3, 3, true, &restarted_outputs);
     remove_nvt_restart_files();
     for (std::size_t i = 0; i < continuous.size(); ++i) {
         EXPECT_NEAR(segmented[i], continuous[i], 1.0e-14);
@@ -1077,6 +1087,45 @@ TEST(PIMD, multirank_direct_pimd_run_and_restart_continuity)
         EXPECT_TRUE(std::isfinite(continuous_outputs[i]));
         EXPECT_NEAR(segmented_outputs[i], continuous_outputs[i], 1.0e-14) << i;
         EXPECT_NEAR(restarted_outputs[i], continuous_outputs[i], 1.0e-14) << i;
+    }
+}
+
+TEST(PIMD, multirank_interacting_integrator_restart_seams)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+
+    for (const auto &method : {"pimd", "nmpimd"}) {
+        for (const auto &integrator : {"obabo", "baoab"}) {
+            SCOPED_TRACE(std::string(method) + "/" + integrator);
+            std::array<double, 10> reference_outputs{};
+            const auto reference = run_two_bead_integrator_segments(8, 0, false, &reference_outputs,
+                                                                    method, integrator, true);
+            EXPECT_GT(std::abs(reference_outputs[2]), 1.0e-6);
+            for (int seam : {1, 3, 4}) {
+                SCOPED_TRACE(seam);
+                for (bool restart : {false, true}) {
+                    SCOPED_TRACE(restart);
+                    remove_nvt_restart_files();
+                    std::array<double, 10> outputs{};
+                    const auto state = run_two_bead_integrator_segments(
+                        seam, 8 - seam, restart, &outputs, method, integrator, true);
+                    remove_nvt_restart_files();
+                    for (std::size_t i = 0; i < state.size(); ++i) {
+                        EXPECT_TRUE(std::isfinite(state[i]));
+                        EXPECT_NEAR(state[i], reference[i], 1.0e-14) << i;
+                    }
+                    for (std::size_t i = 0; i < outputs.size(); ++i) {
+                        EXPECT_TRUE(std::isfinite(outputs[i]));
+                        const double tolerance =
+                            1.0e-14 *
+                            std::max({1.0, std::abs(outputs[i]), std::abs(reference_outputs[i])});
+                        EXPECT_NEAR(outputs[i], reference_outputs[i], tolerance) << i;
+                    }
+                }
+            }
+        }
     }
 }
 
