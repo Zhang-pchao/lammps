@@ -1851,6 +1851,14 @@ void FixPIMDLangevin::compute_pote()
   pote = 0.0;
   c_pe->compute_scalar();
   pe_bead = c_pe->scalar;
+  // PLUMED reports the physical bias B, while this beta/P integrator evolves
+  // H_ring + P*B. Complete the energy tally without changing f_plumed or COLVAR.
+  for (const auto &fix : modify->get_fix_list()) {
+    int dim = -1;
+    auto *physical_bias = static_cast<double *>(fix->extract("pimd_physical_bias_energy", dim));
+    if (physical_bias && dim == 0)
+      pe_bead += (np - (fix->thermo_energy ? 1 : 0)) * (*physical_bias);
+  }
   double pot_energy_partition = pe_bead / universe->procs_per_world[universe->iworld];
   MPI_Allreduce(&pot_energy_partition, &pote, 1, MPI_DOUBLE, MPI_SUM, universe->uworld);
 }

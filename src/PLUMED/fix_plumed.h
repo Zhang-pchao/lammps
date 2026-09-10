@@ -41,6 +41,7 @@ class FixPlumed : public Fix {
   void post_force_respa(int, int, int) override;
   void min_post_force(int) override;
   double compute_scalar() override;
+  void *extract(const char *, int &) override;
   void reset_dt() override;
   int modify_param(int narg, char **arg) override;
   double memory_usage() override;

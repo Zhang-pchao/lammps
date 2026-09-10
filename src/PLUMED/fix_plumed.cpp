@@ -410,7 +410,9 @@ void FixPlumed::init()
         error->all(FLERR, "Fix plumed path_integral bead modes require multiple partitions");
       if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) bead_density_force_scale = *force_scale;
     } else {
-      centroid_force_scale = *force_scale;
+      // The integrator samples H_ring at beta/P. A physical bias B therefore
+      // enters the dynamical Hamiltonian as P*B; retain B as the reported bias.
+      centroid_force_scale = *force_scale * (*beads);
       centroid_coordinates = static_cast<double *>(pimd_fix->extract("centroid_coordinates", dim));
       if (!centroid_coordinates || dim != 1)
         error->all(FLERR, "Fix plumed could not access the PIMD centroid coordinates");
@@ -503,7 +505,8 @@ void FixPlumed::update_atom_data()
     gatindex = new int[local_capacity];
     masses = new double[local_capacity];
     charges = new double[local_capacity];
-    forces_before_plumed = path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY
+    forces_before_plumed = (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ||
+                            path_integral_mode == PATH_INTEGRAL_BEAD_MEAN)
         ? new double[nlocal > 0 ? 3 * nlocal : 1]
         : nullptr;
     update_gatindex = 1;
@@ -551,7 +554,8 @@ void FixPlumed::post_force(int /* vflag */)
 
   update_atom_data();
 
-  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY)
+  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ||
+      path_integral_mode == PATH_INTEGRAL_BEAD_MEAN)
     for (int i = 0; i < nlocal; i++)
       for (int d = 0; d < 3; d++) forces_before_plumed[3 * i + d] = atom->f[i][d];
 
@@ -666,11 +670,13 @@ void FixPlumed::post_force(int /* vflag */)
       path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
     p->cmd("getBias", &bias);
     MPI_Allreduce(MPI_IN_PLACE, &plumedStopCondition, 1, MPI_INT, MPI_MAX, universe->uworld);
+    const double dynamical_scale = universe->nworlds *
+        (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ? bead_density_force_scale : 1.0);
+    for (int i = 0; i < nlocal; i++)
+      for (int d = 0; d < 3; d++)
+        atom->f[i][d] = forces_before_plumed[3 * i + d] +
+            dynamical_scale * (atom->f[i][d] - forces_before_plumed[3 * i + d]);
     if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
-      for (int i = 0; i < nlocal; i++)
-        for (int d = 0; d < 3; d++)
-          atom->f[i][d] = forces_before_plumed[3 * i + d] +
-              bead_density_force_scale * (atom->f[i][d] - forces_before_plumed[3 * i + d]);
       double bead_density_bias = comm->me == 0 ? bias : 0.0;
       MPI_Allreduce(MPI_IN_PLACE, &bead_density_bias, 1, MPI_DOUBLE, MPI_SUM, universe->uworld);
       bias = universe->iworld == 0 ? bead_density_force_scale * bead_density_bias : 0.0;
@@ -702,7 +708,9 @@ void FixPlumed::post_force(int /* vflag */)
     virial[5] = -plmd_virial[1][2];
   }
   if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY)
-    for (int i = 0; i < 6; i++) virial[i] *= bead_density_force_scale;
+    for (int i = 0; i < 6; i++) virial[i] *= bead_density_force_scale * universe->nworlds;
+  else if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN)
+    for (int i = 0; i < 6; i++) virial[i] *= universe->nworlds;
   if (bead_bias_virial_pending) *bead_bias_virial_pending = 1;
 
   // Ask for the computes in the next time step
@@ -792,6 +800,7 @@ void FixPlumed::post_force_centroid()
     virial[5] = -plmd_virial[1][2];
   }
 
+  for (int i = 0; i < 6; i++) virial[i] *= universe->nworlds;
   if (centroid_virial_pending) *centroid_virial_pending = 1;
 
   MPI_Bcast(centroid_forces_all, 3 * natoms, MPI_DOUBLE, 0, universe->uworld);
@@ -823,6 +832,15 @@ void FixPlumed::reset_dt()
 double FixPlumed::compute_scalar()
 {
   return bias;
+}
+
+void *FixPlumed::extract(const char *name, int &dim)
+{
+  dim = 0;
+  if (strcmp(name, "pimd_physical_bias_energy") == 0 &&
+      path_integral_mode != PATH_INTEGRAL_OFF)
+    return &bias;
+  return nullptr;
 }
 
 int FixPlumed::modify_param(int narg, char **arg)
@@ -871,7 +889,8 @@ int FixPlumed::modify_param(int narg, char **arg)
 double FixPlumed::memory_usage()
 {
   double bytes = double((8 + 8 + 4) * atom->nlocal);
-  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY)
+  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ||
+      path_integral_mode == PATH_INTEGRAL_BEAD_MEAN)
     bytes += double(3 * sizeof(double) * atom->nlocal);
   if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
     bytes += double(3 * sizeof(double) * natoms);
