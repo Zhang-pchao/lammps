@@ -575,6 +575,8 @@ TEST(MPI, plumed_nmpimd_bead_modes_force)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
+    // Tables contain -grad(B); the beta/P Hamiltonian requires -P*grad(B).
+    constexpr int beads = 4;
 
     const char *mean_zero_file    = "test_plumed_nmpimd_mean_zero.dat";
     const char *mean_bias_file    = "test_plumed_nmpimd_mean_bias.dat";
@@ -669,7 +671,7 @@ TEST(MPI, plumed_nmpimd_bead_modes_force)
         EXPECT_NEAR(*bias, me == 0 ? expected_bias : 0.0, 1.0e-12);
         lammps_free(bias);
         for (std::size_t i = 0; i < expected_force_delta.size(); ++i)
-            EXPECT_NEAR(biased_forces[i] - zero_forces[i], expected_force_delta[i], 1.0e-12)
+            EXPECT_NEAR(biased_forces[i] - zero_forces[i], beads * expected_force_delta[i], 1.0e-12)
                 << i;
         lammps_command(lmp, "unfix bias");
     };
@@ -706,6 +708,8 @@ TEST(MPI, plumed_nmpimd_multirank_bead_modes)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
+    // Tables contain -grad(B); the beta/P Hamiltonian requires -P*grad(B).
+    constexpr int beads = 2;
 
     const char *mean_zero_file    = "test_plumed_nmpimd_multirank_mean_zero.dat";
     const char *mean_bias_file    = "test_plumed_nmpimd_multirank_mean_bias.dat";
@@ -795,14 +799,14 @@ TEST(MPI, plumed_nmpimd_multirank_bead_modes)
     EXPECT_NEAR(mean_zero[6], 0.0, 1.0e-12);
     EXPECT_NEAR(mean_bias[6], bead == 0 ? 0.5 : 0.0, 1.0e-12);
     for (std::size_t i = 0; i < mean_force_delta[bead].size(); ++i)
-        EXPECT_NEAR(mean_bias[i] - mean_zero[i], mean_force_delta[bead][i], 1.0e-12) << i;
+        EXPECT_NEAR(mean_bias[i] - mean_zero[i], beads * mean_force_delta[bead][i], 1.0e-12) << i;
 
     const auto density_zero = run_case(density_zero_file, density_zero_log, "bead_density");
     const auto density_bias = run_case(density_bias_file, density_bias_log, "bead_density");
     EXPECT_NEAR(density_zero[6], 0.0, 1.0e-12);
     EXPECT_NEAR(density_bias[6], bead == 0 ? 2.5 : 0.0, 1.0e-12);
     for (std::size_t i = 0; i < density_force_delta[bead].size(); ++i)
-        EXPECT_NEAR(density_bias[i] - density_zero[i], density_force_delta[bead][i], 1.0e-12) << i;
+        EXPECT_NEAR(density_bias[i] - density_zero[i], beads * density_force_delta[bead][i], 1.0e-12) << i;
 
     MPI_Barrier(MPI_COMM_WORLD);
     if (me == 0) {
@@ -823,6 +827,8 @@ TEST(MPI, plumed_nmpimd_bead_modes_pbc)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
+    // Tables contain -grad(B); the beta/P Hamiltonian requires -P*grad(B).
+    constexpr int beads = 2;
 
     const char *mean_zero_file    = "test_plumed_nmpimd_pbc_mean_zero.dat";
     const char *mean_bias_file    = "test_plumed_nmpimd_pbc_mean_bias.dat";
@@ -904,7 +910,7 @@ TEST(MPI, plumed_nmpimd_bead_modes_pbc)
         EXPECT_NEAR(zero[6], 0.0, 1.0e-12);
         EXPECT_NEAR(biased[6], bead == 0 ? 2.0 : 0.0, 1.0e-12);
         for (std::size_t i = 0; i < expected_force_delta[bead].size(); ++i)
-            EXPECT_NEAR(biased[i] - zero[i], expected_force_delta[bead][i], 1.0e-12) << i;
+            EXPECT_NEAR(biased[i] - zero[i], beads * expected_force_delta[bead][i], 1.0e-12) << i;
 
         MPI_Barrier(MPI_COMM_WORLD);
         if (me == 0) {
@@ -968,7 +974,7 @@ TEST(MPI, plumed_centroid_multirank_force_modes)
                                                         LMP_TYPE_VECTOR);
         ASSERT_NE(first, nullptr);
         ASSERT_NE(second, nullptr);
-        const double mode_scale = me / 2 == 0 ? 1.0 / std::sqrt(2.0) : 0.0;
+        const double mode_scale = me / 2 == 0 ? std::sqrt(2.0) : 0.0;
         EXPECT_NEAR(first[0], 18.0 * mode_scale, 1.0e-12);
         EXPECT_NEAR(first[1], 14.0 * mode_scale, 1.0e-12);
         EXPECT_NEAR(first[2], 0.0, 1.0e-12);
@@ -1007,10 +1013,10 @@ TEST(MPI, plumed_centroid_multirank_force_modes)
         (double *)lammps_extract_compute(lmp, "second_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);
-    EXPECT_NEAR(first[0], 18.0, 1.0e-12);
+    EXPECT_NEAR(first[0], 36.0, 1.0e-12);
     EXPECT_NEAR(first[1], 0.0, 1.0e-12);
     EXPECT_NEAR(first[2], 0.0, 1.0e-12);
-    EXPECT_NEAR(second[0], -18.0, 1.0e-12);
+    EXPECT_NEAR(second[0], -36.0, 1.0e-12);
     EXPECT_NEAR(second[1], 0.0, 1.0e-12);
     EXPECT_NEAR(second[2], 0.0, 1.0e-12);
     auto *bias =
@@ -1036,6 +1042,8 @@ TEST(MPI, plumed_nmpimd_centroid_npt_volume)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
+    // B(V)=-2V gives physical pressure +2 and dynamical energy P*B.
+    constexpr double bias_pressure = 2.0;
 
     const char *zero_file = "test_plumed_nmpimd_volume_zero.dat";
     const char *bias_file = "test_plumed_nmpimd_volume_bias.dat";
@@ -1051,13 +1059,13 @@ TEST(MPI, plumed_nmpimd_centroid_npt_volume)
     MPI_Barrier(MPI_COMM_WORLD);
 
     const auto zero   = run_centroid_npt_volume_leg(zero_file, zero_log, 0.0);
-    const auto biased = run_centroid_npt_volume_leg(bias_file, bias_log, 1.0);
+    const auto biased = run_centroid_npt_volume_leg(bias_file, bias_log, bias_pressure);
 
-    EXPECT_NEAR(biased.p_cv - zero.p_cv, 1.0, 1.0e-12);
-    EXPECT_NEAR(biased.pe_bead - zero.pe_bead, me / 2 == 0 ? -16000.0 : 0.0, 1.0e-10);
-    EXPECT_NEAR(biased.tote - zero.tote, -16000.0, 1.0e-10);
+    EXPECT_NEAR(biased.p_cv - zero.p_cv, bias_pressure, 1.0e-12);
+    EXPECT_NEAR(biased.pe_bead - zero.pe_bead, me / 2 == 0 ? -32000.0 : 0.0, 1.0e-10);
+    EXPECT_NEAR(biased.tote - zero.tote, -32000.0, 1.0e-10);
     for (int i = 0; i < 3; ++i)
-        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], me / 2 == 0 ? 2.0 : 0.0, 1.0e-12);
+        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], me / 2 == 0 ? 2.0 * bias_pressure : 0.0, 1.0e-12);
     for (int i = 3; i < 6; ++i)
         EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], 0.0, 1.0e-12);
     EXPECT_NEAR(zero.bias, 0.0, 1.0e-12);
@@ -1082,6 +1090,8 @@ TEST(MPI, plumed_nmpimd_bead_modes_bzp_volume)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
+    // B(V)=-2V gives physical pressure +2 and dynamical energy P*B.
+    constexpr double bias_pressure = 2.0;
 
     const char *mean_zero_file    = "test_plumed_nmpimd_bzp_mean_zero.dat";
     const char *mean_bias_file    = "test_plumed_nmpimd_bzp_mean_bias.dat";
@@ -1113,14 +1123,14 @@ TEST(MPI, plumed_nmpimd_bead_modes_bzp_volume)
             const auto zero = run_nmpimd_bead_mode_volume_leg(
                 zero_file, (prefix + "_zero.log").c_str(), mode, ensemble, 0.0);
             const auto biased = run_nmpimd_bead_mode_volume_leg(
-                bias_file, (prefix + "_bias.log").c_str(), mode, ensemble, 1.0);
+                bias_file, (prefix + "_bias.log").c_str(), mode, ensemble, bias_pressure);
 
-            EXPECT_NEAR(biased.p_cv - zero.p_cv, 1.0, 1.0e-12);
-            EXPECT_NEAR(biased.pe_bead - zero.pe_bead, bead == 0 ? -16000.0 : 0.0,
+            EXPECT_NEAR(biased.p_cv - zero.p_cv, bias_pressure, 1.0e-12);
+            EXPECT_NEAR(biased.pe_bead - zero.pe_bead, bead == 0 ? -32000.0 : 0.0,
                         1.0e-10);
-            EXPECT_NEAR(biased.tote - zero.tote, -16000.0, 1.0e-10);
+            EXPECT_NEAR(biased.tote - zero.tote, -32000.0, 1.0e-10);
             for (int i = 0; i < 3; ++i)
-                EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], 1.0, 1.0e-12);
+                EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], bias_pressure, 1.0e-12);
             for (int i = 3; i < 6; ++i)
                 EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], 0.0, 1.0e-12);
             EXPECT_NEAR(zero.bias, 0.0, 1.0e-12);
@@ -1154,6 +1164,8 @@ TEST(MPI, plumed_nmpimd_centroid_nvt_virial)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
+    // B(V)=-2V gives physical pressure +2 and dynamical energy P*B.
+    constexpr double bias_pressure = 2.0;
 
     const char *zero_file = "test_plumed_nmpimd_nvt_volume_zero.dat";
     const char *bias_file = "test_plumed_nmpimd_nvt_volume_bias.dat";
@@ -1171,9 +1183,9 @@ TEST(MPI, plumed_nmpimd_centroid_nvt_virial)
     const auto zero   = run_centroid_nvt_volume_leg(zero_file, zero_log);
     const auto biased = run_centroid_nvt_volume_leg(bias_file, bias_log);
 
-    EXPECT_NEAR(biased.p_cv - zero.p_cv, 1.0, 1.0e-12);
+    EXPECT_NEAR(biased.p_cv - zero.p_cv, bias_pressure, 1.0e-12);
     for (int i = 0; i < 3; ++i)
-        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], me / 2 == 0 ? 2.0 : 0.0, 1.0e-12);
+        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], me / 2 == 0 ? 2.0 * bias_pressure : 0.0, 1.0e-12);
     for (int i = 3; i < 6; ++i)
         EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], 0.0, 1.0e-12);
     EXPECT_NEAR(zero.bias, 0.0, 1.0e-12);
@@ -1248,7 +1260,7 @@ TEST(MPI, plumed_nmpimd_centroid_nvt_wrapped_four_bead)
         (double *)lammps_extract_compute(lmp, "second_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);
-    const double mode_scale = me == 0 ? 0.5 : 0.0;
+    const double mode_scale = me == 0 ? std::sqrt(4.0) : 0.0;
     EXPECT_NEAR(first[0], 12.0 * mode_scale, 1.0e-12);
     EXPECT_NEAR(first[1], 0.0, 1.0e-12);
     EXPECT_NEAR(first[2], 0.0, 1.0e-12);
@@ -1687,6 +1699,8 @@ TEST(MPI, plumed_pimd_bias_modes)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
+    // Tables contain -grad(B); the beta/P Hamiltonian requires -P*grad(B).
+    constexpr int beads = 4;
 
     const char *bead_zero_file          = "test_plumed_pimd_bead_zero.dat";
     const char *bead_restraint_file     = "test_plumed_pimd_bead_restraint.dat";
@@ -1779,8 +1793,9 @@ TEST(MPI, plumed_pimd_bias_modes)
     lammps_command(lmp, "pair_coeff * * 0.0 1.0");
     lammps_command(lmp, "timestep 0.001");
     lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
+    // Keep nonzero springs modest so force differences do not lose precision.
     lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
-                        "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+                        "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 sp 10.0 fixcom no");
     const std::array<std::array<double, 6>, 4> bead_force_delta = {
         {{1.0, 0.0, 0.0, -1.0, 0.0, 0.0},
          {0.0, 1.0, 0.0, 0.0, -1.0, 0.0},
@@ -1840,7 +1855,7 @@ TEST(MPI, plumed_pimd_bias_modes)
         lammps_free(bias);
 
         for (std::size_t i = 0; i < expected_force_delta.size(); ++i)
-            EXPECT_NEAR(biased_forces[i] - zero_forces[i], expected_force_delta[i],
+            EXPECT_NEAR(biased_forces[i] - zero_forces[i], beads * expected_force_delta[i],
                         force_tolerance);
         lammps_command(lmp, "unfix bias");
     };
@@ -2560,6 +2575,8 @@ TEST(MPI, plumed_pimd_multirank_bead_modes)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
+    // Tables contain -grad(B); the beta/P Hamiltonian requires -P*grad(B).
+    constexpr int beads = 2;
 
     const char *zero_file              = "test_plumed_pimd_multirank_zero.dat";
     const char *restraint_file         = "test_plumed_pimd_multirank_restraint.dat";
@@ -2663,7 +2680,7 @@ TEST(MPI, plumed_pimd_multirank_bead_modes)
     const std::array<std::array<double, 6>, 2> expected_force_delta = {
         {{1.0, 0.0, 0.0, -1.0, 0.0, 0.0}, {0.0, 1.0, 0.0, 0.0, -1.0, 0.0}}};
     for (std::size_t i = 0; i < expected_force_delta[bead].size(); ++i)
-        EXPECT_NEAR(biased_result[i] - zero_result[i], expected_force_delta[bead][i], 1.0e-12);
+        EXPECT_NEAR(biased_result[i] - zero_result[i], beads * expected_force_delta[bead][i], 1.0e-12);
 
     const auto density_zero_result =
         run_case(density_zero_file, density_zero_log, "bead_density", -1);
@@ -2676,7 +2693,7 @@ TEST(MPI, plumed_pimd_multirank_bead_modes)
         {{3.0, 0.0, 0.0, -3.0, 0.0, 0.0}, {0.0, -1.0, 0.0, 0.0, 1.0, 0.0}}};
     for (std::size_t i = 0; i < expected_density_force_delta[bead].size(); ++i)
         EXPECT_NEAR(density_biased_result[i] - density_zero_result[i],
-                    expected_density_force_delta[bead][i], 1.0e-12);
+                    beads * expected_density_force_delta[bead][i], 1.0e-12);
 
     auto read_hills = [&]() {
         std::vector<std::vector<double>> records;

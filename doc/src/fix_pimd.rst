@@ -293,13 +293,17 @@ support *ensemble* other than *nve*, *nvt*.
 When :doc:`fix plumed <fix_plumed>` uses a *path_integral* mode, normal-mode
 PIMD supports the NVT, NPH, and NPT ensembles.  For *centroid*, the Cartesian
 centroid passed to PLUMED is :math:`\mathbf{q}_0/\sqrt{P}` and the returned
-force on the zero mode is :math:`\mathbf{F}_c/\sqrt{P}`; every non-centroid
+force on the zero mode is :math:`\sqrt{P}\mathbf{F}_c`; every non-centroid
 mode receives zero bias force.  For *bead_mean* and *bead_density*, PLUMED
 evaluates Cartesian bead coordinates and the complete Cartesian force is
 transformed, so nonlinear collective variables can exert nonzero forces on
-internal modes.  The bead-density factor :math:`1/P` applies only to the
-PLUMED force increment and virial, not to the physical force.  Scalar bias
-energy is owned once on partition zero.  In NVT the current-step bias virial
+internal modes.  The physical bias :math:`U_B` enters the dynamical
+Hamiltonian as :math:`P U_B` because this integrator uses inverse temperature
+:math:`\beta/P`.  Bead-mean force increments and virials therefore include
+a factor :math:`P` relative to PLUMED's averaged-CV derivatives.  Bead-density
+uses unscaled local bias forces and virials, while reporting their mean
+physical bias energy once on partition zero.  Physical forces are unchanged.
+In NVT the current-step bias virial
 contributes to the reported centroid pressure but does not activate a
 barostat or update the cell.  NPH and NPT additionally use that pressure in
 their BZP barostat path.  Normal-mode NVE path-integral coupling is not

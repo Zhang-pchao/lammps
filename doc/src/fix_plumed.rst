@@ -87,12 +87,26 @@ be specified by the user in the PLUMED input file.
    The *centroid*, *bead_mean*, and *bead_density* modes support normal-mode
    PIMD with NVT, NPH, or NPT and multiple MPI ranks per bead.
 
+For these path-integral modes, :doc:`fix pimd/langevin <fix_pimd>` uses
+the ring-polymer inverse temperature :math:`\beta/P` with unscaled physical
+forces.  For a fixed physical bias :math:`U_B` reported by this fix, the
+stationary configurational density is
+
+.. math::
+
+   \rho_B(X)\propto\exp[-(\beta/P)(H_{\mathrm{ring}}(X)+P U_B(X))].
+
+Thus the dynamical bias force is :math:`-P\nabla_b U_B`, while the
+reported scalar remains :math:`U_B`.  The PIMD energy estimator accounts
+for this distinction whether or not ``fix_modify energy yes`` includes
+the scalar in the potential energy.
+
 The *path_integral centroid* setting couples PLUMED to the Cartesian coordinate
 centroid provided by the :doc:`fix pimd/langevin <fix_pimd>` command selected
 with *pimd_fix*.  The PIMD fix must be defined before fix plumed.  One PLUMED
 state is created on partition zero, so there is one bias history rather than an
 independent history for each bead.  With *method pimd* and *ensemble nvt*, a
-centroid bias force :math:`\mathbf{F}_c` adds :math:`\mathbf{F}_c/P` to every
+centroid bias force :math:`\mathbf{F}_c` adds :math:`\mathbf{F}_c` to every
 one of the :math:`P` Cartesian beads.  With *method nmpimd* and *ensemble nvt*,
 *nph*, or *npt*, the centroid coordinate and force obey
 
@@ -100,7 +114,7 @@ one of the :math:`P` Cartesian beads.  With *method nmpimd* and *ensemble nvt*,
 
    \mathbf{q}_0=\frac{1}{\sqrt{P}}\sum_b\mathbf{R}_b,
    \qquad
-   \mathbf{F}_{q_0}=\frac{\mathbf{F}_c}{\sqrt{P}},
+   \mathbf{F}_{q_0}=\sqrt{P}\mathbf{F}_c,
 
 and the non-centroid modes receive no bias force.  The once-owned bias virial
 is included in the current-step centroid-virial pressure.  NPH and NPT use
@@ -110,7 +124,8 @@ a barostat or the simulation cell.
 This mode biases a collective variable evaluated from the coordinate centroid,
 which is generally different from averaging the collective variable over the
 beads.  The scalar bias energy and bias virial are nonzero only on partition
-zero so they are counted once in the ring-polymer Hamiltonian.  Bead-resolved
+zero.  The virial uses the dynamical bias normalization, while the scalar
+reports the physical bias before the PIMD energy correction.  Bead-resolved
 trajectories are still required to reconstruct a bead-defined quantum free
 energy.
 
@@ -126,8 +141,11 @@ collective variable and apply biases only to that mean.  For example:
    bias: RESTRAINT ARG=mean.d AT=0.5 KAPPA=10
 
 If :math:`S=P^{-1}\sum_b s(\mathbf{R}_b)`, PLUMED propagates the bias force
-with the chain-rule factor :math:`1/P`, so bead :math:`b` receives
-:math:`-(\partial V/\partial S)\nabla_b s/P`.  Applying a bias directly to
+with the chain-rule factor :math:`1/P`.  LAMMPS multiplies only the bias
+force increment and its virial by :math:`P` to match the dynamical bias
+potential, so bead :math:`b` receives
+:math:`-(\partial U_B/\partial S)\nabla_b s`.  Physical forces are unchanged.
+Applying a bias directly to
 ``d`` instead of ``mean.d`` creates independent per-bead biases and is not a
 bead-mean calculation.
 
@@ -209,7 +227,8 @@ instantaneous bead density,
    U_B(X,t)=\frac{1}{P}\sum_{b=1}^{P} B(s(\mathbf{R}_b),t).
 
 Each bead evaluates the same PLUMED bias function at its local collective
-variable.  LAMMPS scales the local bias force and virial by :math:`1/P`, and
+variable.  LAMMPS retains the local bias force and virial without an
+additional :math:`1/P` factor, and
 reports the mean of the :math:`P` local bias energies on partition zero.  A
 fixed bias therefore needs no replica-averaging action:
 
@@ -218,8 +237,8 @@ fixed bias therefore needs no replica-averaging action:
    d: DISTANCE ATOMS=1,2
    bias: RESTRAINT ARG=d AT=0.5 KAPPA=10
 
-For *method nmpimd*, only the PLUMED force increment and virial are scaled by
-:math:`1/P`; the physical Cartesian force is left unchanged before the full
+For *method nmpimd*, the local bias force and virial retain this dynamical
+normalization; the physical Cartesian force is left unchanged before the full
 force is transformed to normal modes.  NVT keeps the cell fixed, while NPH and
 NPT pass the refreshed current-step virial to the BZP pressure path.
 
