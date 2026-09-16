@@ -79,12 +79,15 @@ class FixPlumed : public Fix {
   int plumedNeedsEnergy;     // Flag to trigger calculation of the
                              // energy and virial
   char *id_pe, *id_press;    // ID for potential energy and pressure compute
+  char *nonfinite_trace_prefix;    // opt-in diagnostic output prefix
   char *id_pimd;             // ID for the coupled fix pimd/langevin
 
   void check_path_integral_compatibility();
   void check_normal_mode_post_force_order();
   void update_atom_data();
   void post_force_centroid();
+  void trace_nonfinite_state(const char *, const double *, bool);
+  void trace_centroid_nonfinite(const char *);
 };
 
 };    // namespace LAMMPS_NS

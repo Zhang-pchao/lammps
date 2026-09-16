@@ -120,6 +120,18 @@ class FixPIMDLangevin : public Fix {
 
   void reallocate();
   void nmpimd_init();
+
+  /* opt-in non-finite stage tracing */
+
+  char *nonfinite_trace_prefix;
+  int nonfinite_trace_nmax;
+  double **nonfinite_trace_last_x;
+  double **nonfinite_trace_last_v;
+  double **nonfinite_trace_last_f;
+  tagint *nonfinite_trace_last_tag;
+  char nonfinite_trace_last_stage[96];
+  void trace_nonfinite_state(const char *, const char *);
+
   void nmpimd_transform(double **, double **, double *);
   void prepare_normal_mode_forces();
 

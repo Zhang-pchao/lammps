@@ -13,6 +13,9 @@
 #include <array>
 #include <cfenv>
 #include <cmath>
+#include <fstream>
+#include <limits>
+#include <sstream>
 #include <string>
 
 #include "gtest/gtest.h"
@@ -113,11 +116,14 @@ void add_two_bead_fix(void *lmp, Ownership ownership, int thermostat_seed)
 }
 
 void add_two_bead_integrator_fix(void *lmp, const std::string &method,
-                                 const std::string &integrator)
+                                 const std::string &integrator,
+                                 const std::string &nonfinite_trace_prefix = {})
 {
-    const std::string command = "fix fpimd all pimd/langevin method " + method +
-                                " ensemble nvt integrator " + integrator +
-                                " thermostat PILE_L 2468 tau 1.0 temp 1.0 fixcom no";
+    std::string command = "fix fpimd all pimd/langevin method " + method +
+                          " ensemble nvt integrator " + integrator +
+                          " thermostat PILE_L 2468 tau 1.0 temp 1.0 fixcom no";
+    if (!nonfinite_trace_prefix.empty())
+        command += " nonfinite_trace " + nonfinite_trace_prefix;
     lammps_command(lmp, command.c_str());
 }
 
@@ -382,7 +388,8 @@ std::array<double, 36>
 run_two_bead_integrator_segments(int first_steps, int second_steps, bool restart = false,
                                  std::array<double, 10> *global_outputs = nullptr,
                                  const std::string &method              = "pimd",
-                                 const std::string &integrator = "obabo", bool interacting = false)
+                                 const std::string &integrator = "obabo", bool interacting = false,
+                                 const std::string &nonfinite_trace_prefix = {})
 {
     void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
     EXPECT_NE(lmp, nullptr);
@@ -398,7 +405,7 @@ run_two_bead_integrator_segments(int first_steps, int second_steps, bool restart
     set_two_bead_initial_velocities(lmp, Ownership::DEFAULT);
     lammps_command(lmp, "timestep 0.00001");
     lammps_command(lmp, "thermo 0");
-    add_two_bead_integrator_fix(lmp, method, integrator);
+    add_two_bead_integrator_fix(lmp, method, integrator, nonfinite_trace_prefix);
     const std::string first_run = "run " + std::to_string(first_steps);
     lammps_command(lmp, first_run.c_str());
     if (second_steps > 0) {
@@ -414,7 +421,7 @@ run_two_bead_integrator_segments(int first_steps, int second_steps, bool restart
                                 "pimd_nvt_restart.1");
             lammps_command(lmp, "read_restart ${restart_file}");
             lammps_command(lmp, "thermo 0");
-            add_two_bead_integrator_fix(lmp, method, integrator);
+            add_two_bead_integrator_fix(lmp, method, integrator, nonfinite_trace_prefix);
         }
         const std::string second_run = "run " + std::to_string(second_steps);
         lammps_command(lmp, second_run.c_str());
@@ -980,6 +987,95 @@ void check_nvt_global_output_equivalence(Ownership ownership)
     }
 }
 
+
+void expect_nonfinite_trace(const std::string &prefix, bool inject_position_nan)
+{
+    void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+    ASSERT_NE(lmp, nullptr);
+    create_two_bead_test_system(lmp, 2, Ownership::DEFAULT);
+    set_two_bead_initial_velocities(lmp, Ownership::DEFAULT);
+    lammps_command(lmp, "timestep 0.00001");
+    lammps_command(lmp, "thermo 0");
+    const std::string fix_command =
+        "fix fpimd all pimd/langevin method nmpimd ensemble nvt integrator baoab "
+        "thermostat PILE_L 2468 tau 1.0 temp 1.0 fixcom no nonfinite_trace " +
+        prefix;
+    lammps_command(lmp, fix_command.c_str());
+    lammps_command(lmp, "run 0 post no");
+    ASSERT_EQ(lammps_has_error(lmp), 0);
+
+    int me;
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    auto *nlocal = (int *)lammps_extract_global(lmp, "nlocal");
+    auto *tags = (tagint *)lammps_extract_atom(lmp, "id");
+    ASSERT_NE(nlocal, nullptr);
+    ASSERT_NE(tags, nullptr);
+
+    tagint local_tag = std::numeric_limits<tagint>::max();
+    int local_index = -1;
+    const int target_world = inject_position_nan ? 1 : 0;
+    if (me / 2 == target_world) {
+        for (int i = 0; i < *nlocal; ++i) {
+            if (tags[i] < local_tag) {
+                local_tag = tags[i];
+                local_index = i;
+            }
+        }
+    }
+    std::array<tagint, 4> candidate_tags{};
+    MPI_Allgather(&local_tag, 1, MPI_LMP_TAGINT, candidate_tags.data(), 1, MPI_LMP_TAGINT,
+                  MPI_COMM_WORLD);
+    int owner = 2 * target_world;
+    for (int rank = 2 * target_world; rank < 2 * target_world + 2; ++rank)
+        if (candidate_tags[rank] < candidate_tags[owner]) owner = rank;
+    const tagint expected_tag = candidate_tags[owner];
+    ASSERT_NE(expected_tag, std::numeric_limits<tagint>::max());
+
+    if (me == owner) {
+        ASSERT_GE(local_index, 0);
+        if (inject_position_nan) {
+            auto **positions = (double **)lammps_extract_atom(lmp, "x");
+            ASSERT_NE(positions, nullptr);
+            positions[local_index][1] = std::numeric_limits<double>::quiet_NaN();
+        } else {
+            auto **velocities = (double **)lammps_extract_atom(lmp, "v");
+            ASSERT_NE(velocities, nullptr);
+            velocities[local_index][2] = std::numeric_limits<double>::infinity();
+        }
+    }
+
+    lammps_set_show_error(lmp, 0);
+    lammps_command(lmp, "run 1 pre no post no");
+    ASSERT_EQ(lammps_has_error(lmp), 1);
+    char error_message[1024];
+    ASSERT_NE(lammps_get_last_error_message(lmp, error_message, sizeof(error_message)), 0);
+    EXPECT_NE(std::string(error_message).find("nonfinite trace detected"), std::string::npos);
+    EXPECT_NE(std::string(error_message).find("stage initial-entry"), std::string::npos);
+    lammps_close(lmp);
+
+    const int world_rank = owner - 2 * target_world;
+    const std::string path = prefix + ".pimd.step1.u" + std::to_string(owner) + ".w" +
+        std::to_string(target_world) + ".r" + std::to_string(world_rank) + ".txt";
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (me == 0) {
+        std::ifstream input(path);
+        ASSERT_TRUE(input.good()) << path;
+        std::ostringstream buffer;
+        buffer << input.rdbuf();
+        const std::string report = buffer.str();
+        EXPECT_NE(report.find("schema=pimd-nonfinite-trace-v1"), std::string::npos);
+        EXPECT_NE(report.find("stage=initial-entry"), std::string::npos);
+        EXPECT_NE(report.find("atom_tag=" + std::to_string(expected_tag)), std::string::npos);
+        EXPECT_NE(report.find(inject_position_nan ? "field=position" : "field=velocity"),
+                  std::string::npos);
+        EXPECT_NE(report.find(inject_position_nan ? "component=1" : "component=2"),
+                  std::string::npos);
+        EXPECT_NE(report.find("previous_available=1"), std::string::npos);
+        LAMMPS_NS::platform::unlink(path);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+}
+
 } // namespace
 
 TEST(PIMD, multirank_dynamics_equivalence)
@@ -1127,6 +1223,36 @@ TEST(PIMD, multirank_interacting_integrator_restart_seams)
             }
         }
     }
+}
+
+TEST(PIMD, multirank_nonfinite_trace_finite_parity)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+
+    const auto baseline =
+        run_two_bead_integrator_segments(4, 0, false, nullptr, "nmpimd", "baoab", true);
+    const auto traced = run_two_bead_integrator_segments(
+        4, 0, false, nullptr, "nmpimd", "baoab", true, "test_pimd_finite_trace");
+    for (std::size_t i = 0; i < baseline.size(); ++i)
+        EXPECT_DOUBLE_EQ(traced[i], baseline[i]) << i;
+}
+
+TEST(PIMD, multirank_nonfinite_trace_reports_nan_position)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+    expect_nonfinite_trace("test_pimd_trace_nan_position", true);
+}
+
+TEST(PIMD, multirank_nonfinite_trace_reports_infinite_velocity)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+    expect_nonfinite_trace("test_pimd_trace_infinite_velocity", false);
 }
 
 TEST(PIMD, multirank_nvt_restart_restores_rng)

@@ -32,8 +32,11 @@
 #include "update.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <exception>
+#include <string>
+#include <vector>
 
 #include "plumed/wrapper/Plumed.h"
 
@@ -48,6 +51,50 @@ static const char plumed_default_kernel[] = "PLUMED_KERNEL=" PLUMED_QUOTE(__PLUM
 using namespace LAMMPS_NS;
 using namespace FixConst;
 
+namespace {
+enum PlumedTraceField {
+  PLUMED_TRACE_NONE,
+  PLUMED_TRACE_BOX,
+  PLUMED_TRACE_POSITION,
+  PLUMED_TRACE_VELOCITY,
+  PLUMED_TRACE_PHYSICAL_FORCE,
+  PLUMED_TRACE_FORCE_DELTA,
+  PLUMED_TRACE_TOTAL_FORCE,
+  PLUMED_TRACE_CENTROID_POSITION,
+  PLUMED_TRACE_CENTROID_FORCE
+};
+
+struct PlumedTraceRecord {
+  int found;
+  int field;
+  int component;
+  int universe_rank;
+  int bead_world;
+  int world_rank;
+  tagint tag;
+  double value;
+  double position[3];
+  double velocity[3];
+  double physical_force[3];
+  double force_delta[3];
+  double total_force[3];
+  double box[9];
+};
+
+const char *plumed_trace_field_name(int field)
+{
+  if (field == PLUMED_TRACE_BOX) return "box";
+  if (field == PLUMED_TRACE_POSITION) return "position";
+  if (field == PLUMED_TRACE_VELOCITY) return "velocity";
+  if (field == PLUMED_TRACE_PHYSICAL_FORCE) return "physical-force";
+  if (field == PLUMED_TRACE_FORCE_DELTA) return "plumed-force-delta";
+  if (field == PLUMED_TRACE_TOTAL_FORCE) return "total-force";
+  if (field == PLUMED_TRACE_CENTROID_POSITION) return "centroid-position";
+  if (field == PLUMED_TRACE_CENTROID_FORCE) return "centroid-force";
+  return "unknown";
+}
+}    // namespace
+
 FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     Fix(lmp, narg, arg), p(nullptr), pimd_fix(nullptr), nlocal(-1), natoms(0),
     path_integral_mode(PATH_INTEGRAL_OFF), plumed_active(1), centroid_force_scale(0.0),
@@ -56,7 +103,7 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     centroid_forces_all(nullptr), centroid_virial_pending(nullptr),
     bead_bias_virial_pending(nullptr), forces_before_plumed(nullptr), nlevels_respa(0), bias(0.0),
     c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0), id_pe(nullptr), id_press(nullptr),
-    id_pimd(nullptr)
+    nonfinite_trace_prefix(nullptr), id_pimd(nullptr)
 {
 
   if (!atom->tag_enable) error->all(FLERR, "Fix plumed requires atom tags");
@@ -88,6 +135,9 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     } else if (strcmp(arg[i], "pimd_fix") == 0) {
       delete[] id_pimd;
       id_pimd = utils::strdup(arg[i + 1]);
+    } else if (strcmp(arg[i], "nonfinite_trace") == 0) {
+      delete[] nonfinite_trace_prefix;
+      nonfinite_trace_prefix = utils::strdup(arg[i + 1]);
     } else {
       error->all(FLERR, "Unknown fix plumed keyword: {}", arg[i]);
     }
@@ -337,6 +387,7 @@ FixPlumed::~FixPlumed()
   delete[] id_pe;
   delete[] id_press;
   delete[] id_pimd;
+  delete[] nonfinite_trace_prefix;
   delete[] masses;
   delete[] charges;
   delete[] gatindex;
@@ -544,8 +595,265 @@ void FixPlumed::update_atom_data()
 
 /* ---------------------------------------------------------------------- */
 
+void FixPlumed::trace_nonfinite_state(const char *stage, const double *force_before,
+                                      bool current_force_is_physical)
+{
+  if (!nonfinite_trace_prefix) return;
+
+  PlumedTraceRecord local{};
+  local.universe_rank = universe->me;
+  local.bead_world = universe->iworld;
+  local.world_rank = comm->me;
+  local.tag = -1;
+
+  const double box[9] = {domain->boxlo[0], domain->boxlo[1], domain->boxlo[2],
+                         domain->boxhi[0], domain->boxhi[1], domain->boxhi[2],
+                         domain->xy,       domain->xz,       domain->yz};
+  for (int i = 0; i < 9; ++i) {
+    local.box[i] = box[i];
+    if (!local.found && !std::isfinite(box[i])) {
+      local.found = 1;
+      local.field = PLUMED_TRACE_BOX;
+      local.component = i;
+      local.value = box[i];
+    }
+  }
+  if (!local.found && (!(domain->xprd > 0.0) || !(domain->yprd > 0.0) ||
+                       !(domain->zprd > 0.0))) {
+    local.found = 1;
+    local.field = PLUMED_TRACE_BOX;
+    if (!(domain->xprd > 0.0)) {
+      local.component = 0;
+      local.value = domain->xprd;
+    } else if (!(domain->yprd > 0.0)) {
+      local.component = 1;
+      local.value = domain->yprd;
+    } else {
+      local.component = 2;
+      local.value = domain->zprd;
+    }
+  }
+
+  int local_index = -1;
+  auto select_atom_field = [&](int index, int field, int component, double value) {
+    const tagint tag = atom->tag[index];
+    if (!local.found || local.field == PLUMED_TRACE_BOX || tag < local.tag ||
+        (tag == local.tag &&
+         (field < local.field || (field == local.field && component < local.component)))) {
+      if (local.field == PLUMED_TRACE_BOX) return;
+      local.found = 1;
+      local.field = field;
+      local.component = component;
+      local.tag = tag;
+      local.value = value;
+      local_index = index;
+    }
+  };
+
+  if (!local.found) {
+    for (int i = 0; i < atom->nlocal; ++i) {
+      for (int d = 0; d < 3; ++d) {
+        const double physical = force_before ? force_before[3 * i + d] : atom->f[i][d];
+        const double delta = force_before ? atom->f[i][d] - physical : 0.0;
+        if (!std::isfinite(atom->x[i][d]))
+          select_atom_field(i, PLUMED_TRACE_POSITION, d, atom->x[i][d]);
+        if (!std::isfinite(atom->v[i][d]))
+          select_atom_field(i, PLUMED_TRACE_VELOCITY, d, atom->v[i][d]);
+        if (force_before && !std::isfinite(physical))
+          select_atom_field(i, PLUMED_TRACE_PHYSICAL_FORCE, d, physical);
+        if (force_before && !std::isfinite(delta))
+          select_atom_field(i, PLUMED_TRACE_FORCE_DELTA, d, delta);
+        if (!std::isfinite(atom->f[i][d]))
+          select_atom_field(i,
+                            current_force_is_physical ? PLUMED_TRACE_PHYSICAL_FORCE
+                                                      : PLUMED_TRACE_TOTAL_FORCE,
+                            d, atom->f[i][d]);
+      }
+    }
+  }
+
+  if (local_index >= 0) {
+    for (int d = 0; d < 3; ++d) {
+      local.position[d] = atom->x[local_index][d];
+      local.velocity[d] = atom->v[local_index][d];
+      local.physical_force[d] = force_before ? force_before[3 * local_index + d]
+                                              : atom->f[local_index][d];
+      local.force_delta[d] = force_before
+          ? atom->f[local_index][d] - force_before[3 * local_index + d]
+          : 0.0;
+      local.total_force[d] = atom->f[local_index][d];
+    }
+  }
+
+  int any_nonfinite = local.found;
+  MPI_Allreduce(MPI_IN_PLACE, &any_nonfinite, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (!any_nonfinite) return;
+
+  std::vector<PlumedTraceRecord> records(universe->nprocs);
+  MPI_Allgather(&local, sizeof(PlumedTraceRecord), MPI_BYTE, records.data(),
+                sizeof(PlumedTraceRecord), MPI_BYTE, universe->uworld);
+  const PlumedTraceRecord *winner = nullptr;
+  for (const auto &record : records) {
+    if (!record.found) continue;
+    if (!winner) {
+      winner = &record;
+      continue;
+    }
+    const int record_box = record.field == PLUMED_TRACE_BOX;
+    const int winner_box = winner->field == PLUMED_TRACE_BOX;
+    if (record_box != winner_box) {
+      if (record_box) winner = &record;
+      continue;
+    }
+    if (record.bead_world != winner->bead_world) {
+      if (record.bead_world < winner->bead_world) winner = &record;
+      continue;
+    }
+    if (record.tag != winner->tag) {
+      if (record.tag < winner->tag) winner = &record;
+      continue;
+    }
+    if (record.field != winner->field) {
+      if (record.field < winner->field) winner = &record;
+      continue;
+    }
+    if (record.component != winner->component) {
+      if (record.component < winner->component) winner = &record;
+      continue;
+    }
+    if (record.universe_rank < winner->universe_rank) winner = &record;
+  }
+
+  if (!winner) return;
+  const std::string path = fmt::format("{}.plumed.step{}.u{}.w{}.r{}.txt",
+                                       nonfinite_trace_prefix, update->ntimestep,
+                                       winner->universe_rank, winner->bead_world,
+                                       winner->world_rank);
+  if (universe->me == winner->universe_rank) {
+    const std::string report = fmt::format(
+        "schema=plumed-nonfinite-trace-v1\nstep={}\nstage={}\nuniverse_rank={}\n"
+        "bead_world={}\nworld_rank={}\natom_tag={}\nfield={}\ncomponent={}\n"
+        "value={:.17g}\nposition={:.17g} {:.17g} {:.17g}\n"
+        "velocity={:.17g} {:.17g} {:.17g}\nphysical_force={:.17g} {:.17g} {:.17g}\n"
+        "plumed_force_delta={:.17g} {:.17g} {:.17g}\ntotal_force={:.17g} {:.17g} {:.17g}\n"
+        "boxlo={:.17g} {:.17g} {:.17g}\nboxhi={:.17g} {:.17g} {:.17g}\n"
+        "tilt_xy_xz_yz={:.17g} {:.17g} {:.17g}\n",
+        update->ntimestep, stage, winner->universe_rank, winner->bead_world,
+        winner->world_rank, winner->tag, plumed_trace_field_name(winner->field),
+        winner->component, winner->value, winner->position[0], winner->position[1],
+        winner->position[2], winner->velocity[0], winner->velocity[1], winner->velocity[2],
+        winner->physical_force[0], winner->physical_force[1], winner->physical_force[2],
+        winner->force_delta[0], winner->force_delta[1], winner->force_delta[2],
+        winner->total_force[0], winner->total_force[1], winner->total_force[2], winner->box[0],
+        winner->box[1], winner->box[2], winner->box[3], winner->box[4], winner->box[5],
+        winner->box[6], winner->box[7], winner->box[8]);
+    if (FILE *file = std::fopen(path.c_str(), "w")) {
+      std::fwrite(report.data(), 1, report.size(), file);
+      std::fclose(file);
+    }
+  }
+  error->all(
+      FLERR,
+      fmt::format("Fix plumed nonfinite trace detected a {} at step {} stage {} on bead {} "
+                  "atom {} component {}; diagnostic {}",
+                  plumed_trace_field_name(winner->field), update->ntimestep, stage,
+                  winner->bead_world, winner->tag, winner->component, path));
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPlumed::trace_centroid_nonfinite(const char *stage)
+{
+  if (!nonfinite_trace_prefix) return;
+
+  PlumedTraceRecord local{};
+  local.universe_rank = universe->me;
+  local.bead_world = universe->iworld;
+  local.world_rank = comm->me;
+  local.tag = -1;
+  int local_index = -1;
+  if (plumed_active) {
+    for (int i = 0; i < nlocal; ++i) {
+      const tagint tag = atom->tag[i];
+      for (int d = 0; d < 3; ++d) {
+        const double position = centroid_positions[3 * i + d];
+        const double force = centroid_forces[3 * i + d];
+        const int field = !std::isfinite(position) ? PLUMED_TRACE_CENTROID_POSITION
+                                                    : PLUMED_TRACE_CENTROID_FORCE;
+        const double value = field == PLUMED_TRACE_CENTROID_POSITION ? position : force;
+        if ((std::isfinite(position) && std::isfinite(force)) ||
+            (local.found && (tag > local.tag ||
+                             (tag == local.tag &&
+                              (field > local.field ||
+                               (field == local.field && d >= local.component))))))
+          continue;
+        local.found = 1;
+        local.field = field;
+        local.component = d;
+        local.tag = tag;
+        local.value = value;
+        local_index = i;
+      }
+    }
+  }
+  if (local_index >= 0) {
+    for (int d = 0; d < 3; ++d) {
+      local.position[d] = centroid_positions[3 * local_index + d];
+      local.total_force[d] = centroid_forces[3 * local_index + d];
+    }
+  }
+
+  int any_nonfinite = local.found;
+  MPI_Allreduce(MPI_IN_PLACE, &any_nonfinite, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (!any_nonfinite) return;
+
+  std::vector<PlumedTraceRecord> records(universe->nprocs);
+  MPI_Allgather(&local, sizeof(PlumedTraceRecord), MPI_BYTE, records.data(),
+                sizeof(PlumedTraceRecord), MPI_BYTE, universe->uworld);
+  const PlumedTraceRecord *winner = nullptr;
+  for (const auto &record : records) {
+    if (!record.found) continue;
+    if (!winner || record.tag < winner->tag ||
+        (record.tag == winner->tag &&
+         (record.field < winner->field ||
+          (record.field == winner->field && record.component < winner->component))))
+      winner = &record;
+  }
+  if (!winner) return;
+
+  const std::string path = fmt::format("{}.plumed.step{}.u{}.w{}.r{}.txt",
+                                       nonfinite_trace_prefix, update->ntimestep,
+                                       winner->universe_rank, winner->bead_world,
+                                       winner->world_rank);
+  if (universe->me == winner->universe_rank) {
+    const std::string report = fmt::format(
+        "schema=plumed-nonfinite-trace-v1\nstep={}\nstage={}\nuniverse_rank={}\n"
+        "bead_world={}\nworld_rank={}\natom_tag={}\nfield={}\ncomponent={}\n"
+        "value={:.17g}\ncentroid_position={:.17g} {:.17g} {:.17g}\n"
+        "centroid_force={:.17g} {:.17g} {:.17g}\n",
+        update->ntimestep, stage, winner->universe_rank, winner->bead_world,
+        winner->world_rank, winner->tag, plumed_trace_field_name(winner->field),
+        winner->component, winner->value, winner->position[0], winner->position[1],
+        winner->position[2], winner->total_force[0], winner->total_force[1],
+        winner->total_force[2]);
+    if (FILE *file = std::fopen(path.c_str(), "w")) {
+      std::fwrite(report.data(), 1, report.size(), file);
+      std::fclose(file);
+    }
+  }
+  error->all(
+      FLERR,
+      fmt::format("Fix plumed nonfinite trace detected a {} at step {} stage {} on atom {} "
+                  "component {}; diagnostic {}",
+                  plumed_trace_field_name(winner->field), update->ntimestep, stage, winner->tag,
+                  winner->component, path));
+}
+
+/* ---------------------------------------------------------------------- */
+
 void FixPlumed::post_force(int /* vflag */)
 {
+  trace_nonfinite_state("pre-plumed", nullptr, true);
 
   if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
     post_force_centroid();
@@ -665,6 +973,7 @@ void FixPlumed::post_force(int /* vflag */)
   }
   // do the real calculation:
   p->cmd("performCalc");
+  trace_nonfinite_state("post-perform-pre-scale", forces_before_plumed, false);
 
   if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN ||
       path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
@@ -684,6 +993,7 @@ void FixPlumed::post_force(int /* vflag */)
       bias = 0.0;
     }
   }
+  trace_nonfinite_state("post-scale", forces_before_plumed, false);
   if (plumedStopCondition) timer->force_timeout();
 
   // retransform virial to lammps representation and assign it to this
@@ -773,6 +1083,7 @@ void FixPlumed::post_force_centroid()
       error->universe_one(FLERR, fmt::format("Could not prepare PLUMED: {}", exception.what()));
     }
   }
+  trace_centroid_nonfinite("pre-perform-centroid");
 
   MPI_Bcast(&needs_energy, 1, MPI_INT, 0, universe->uworld);
   if (needs_energy)
@@ -799,6 +1110,7 @@ void FixPlumed::post_force_centroid()
     virial[4] = -plmd_virial[0][2];
     virial[5] = -plmd_virial[1][2];
   }
+  trace_centroid_nonfinite("post-perform-centroid");
 
   for (int i = 0; i < 6; i++) virial[i] *= universe->nworlds;
   if (centroid_virial_pending) *centroid_virial_pending = 1;
@@ -809,6 +1121,7 @@ void FixPlumed::post_force_centroid()
     for (int d = 0; d < 3; d++)
       atom->f[i][d] += centroid_forces_all[3 * index + d] * centroid_force_scale;
   }
+  trace_nonfinite_state("post-scale-centroid", nullptr, false);
 
   MPI_Bcast(&plumed_stop_condition, 1, MPI_INT, 0, universe->uworld);
   if (plumed_stop_condition) timer->force_timeout();

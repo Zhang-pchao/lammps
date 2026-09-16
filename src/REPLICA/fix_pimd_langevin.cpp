@@ -45,9 +45,12 @@
 #include "update.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <map>
+#include <string>
+#include <vector>
 
 using namespace LAMMPS_NS;
 using namespace FixConst;
@@ -67,10 +70,45 @@ std::map<int, std::string> Ensembles{{FixPIMDLangevin::NVE, "NVE"},
 }    // namespace
 
 namespace {
+enum NonfiniteTraceField {
+  TRACE_NONE,
+  TRACE_BOX,
+  TRACE_POSITION,
+  TRACE_VELOCITY,
+  TRACE_FORCE
+};
+
+struct NonfiniteTraceRecord {
+  int found;
+  int reason;
+  int field;
+  int component;
+  int universe_rank;
+  int bead_world;
+  int world_rank;
+  int previous_available;
+  tagint tag;
+  double value;
+  double current[9];
+  double previous[9];
+  double box[9];
+};
+
+const char *trace_field_name(int field)
+{
+  if (field == TRACE_BOX) return "box";
+  if (field == TRACE_POSITION) return "position";
+  if (field == TRACE_VELOCITY) return "velocity";
+  if (field == TRACE_FORCE) return "force";
+  return "unknown";
+}
+}    // namespace
+
+namespace {
 constexpr int TAG_INTER_REPLICA_COUNT = 10;
 constexpr int TAG_INTER_REPLICA_TAGS  = 11;
-constexpr int TAG_INTER_REPLICA_VALS = 12;
-} // namespace
+constexpr int TAG_INTER_REPLICA_VALS  = 12;
+}    // namespace
 
 /* ---------------------------------------------------------------------- */
 
@@ -88,8 +126,11 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg, bool allow_e
     M_xp2x(nullptr), M_f2fp(nullptr), M_fp2f(nullptr), modeindex(nullptr), tau_k(nullptr),
     c1_k(nullptr), c2_k(nullptr), _omega_k(nullptr), Lan_s(nullptr), Lan_c(nullptr),
     random(nullptr), xc(nullptr), xcall(nullptr), x_unwrap(nullptr), id_pe(nullptr),
-    id_press(nullptr), c_pe(nullptr), c_press(nullptr)
+    id_press(nullptr), c_pe(nullptr), c_press(nullptr), nonfinite_trace_prefix(nullptr),
+    nonfinite_trace_nmax(0), nonfinite_trace_last_x(nullptr), nonfinite_trace_last_v(nullptr),
+    nonfinite_trace_last_f(nullptr), nonfinite_trace_last_tag(nullptr)
 {
+  nonfinite_trace_last_stage[0] = '\0';
   restart_global = 1;
   time_integrate = 1;
 
@@ -289,6 +330,11 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg, bool allow_e
         removecomflag = 0;
       else
         error->all(FLERR, fmt::format("Unknown fixcom value {} for fix {}", arg[i + 1], style));
+    } else if (strcmp(arg[i], "nonfinite_trace") == 0) {
+      if (i + 2 > narg)
+        utils::missing_cmd_args(FLERR, fmt::format("fix {} nonfinite_trace", style), error);
+      delete[] nonfinite_trace_prefix;
+      nonfinite_trace_prefix = utils::strdup(arg[i + 1]);
     } else if (strcmp(arg[i], "esynch") == 0) {
       if (!allow_esynch)
         error->all(FLERR, fmt::format("Unknown keyword {} for fix {}", arg[i], style));
@@ -411,6 +457,11 @@ FixPIMDLangevin::~FixPIMDLangevin()
   modify->delete_compute(id_pe);
   modify->delete_compute(id_press);
   delete[] id_pe;
+  delete[] nonfinite_trace_prefix;
+  memory->destroy(nonfinite_trace_last_x);
+  memory->destroy(nonfinite_trace_last_v);
+  memory->destroy(nonfinite_trace_last_f);
+  memory->destroy(nonfinite_trace_last_tag);
   delete[] id_press;
   delete[] extlist;
   delete random;
@@ -455,6 +506,202 @@ int FixPIMDLangevin::setmask()
   mask |= FINAL_INTEGRATE;
   mask |= END_OF_STEP;
   return mask;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPIMDLangevin::trace_nonfinite_state(const char *stage, const char *basis)
+{
+  if (!nonfinite_trace_prefix) return;
+
+  NonfiniteTraceRecord local{};
+  local.universe_rank = universe->me;
+  local.bead_world = universe->iworld;
+  local.world_rank = comm->me;
+  local.tag = -1;
+
+  const double box[9] = {domain->boxlo[0], domain->boxlo[1], domain->boxlo[2],
+                         domain->boxhi[0], domain->boxhi[1], domain->boxhi[2],
+                         domain->xy,       domain->xz,       domain->yz};
+  for (int i = 0; i < 9; ++i) local.box[i] = box[i];
+
+  for (int i = 0; i < 9; ++i) {
+    if (!std::isfinite(box[i])) {
+      local.found = 1;
+      local.reason = 1;
+      local.field = TRACE_BOX;
+      local.component = i;
+      local.value = box[i];
+      break;
+    }
+  }
+  if (!local.found && (!(domain->xprd > 0.0) || !(domain->yprd > 0.0) ||
+                       !(domain->zprd > 0.0))) {
+    local.found = 1;
+    local.reason = 2;
+    local.field = TRACE_BOX;
+    if (!(domain->xprd > 0.0)) {
+      local.component = 0;
+      local.value = domain->xprd;
+    } else if (!(domain->yprd > 0.0)) {
+      local.component = 1;
+      local.value = domain->yprd;
+    } else {
+      local.component = 2;
+      local.value = domain->zprd;
+    }
+  }
+
+  int local_index = -1;
+  auto select_atom_field = [&](int index, int field, int component, double value) {
+    const tagint tag = atom->tag[index];
+    if (!local.found || local.field == TRACE_BOX || tag < local.tag ||
+        (tag == local.tag &&
+         (field < local.field || (field == local.field && component < local.component)))) {
+      if (local.field == TRACE_BOX) return;
+      local.found = 1;
+      local.reason = 1;
+      local.field = field;
+      local.component = component;
+      local.tag = tag;
+      local.value = value;
+      local_index = index;
+    }
+  };
+
+  if (!local.found) {
+    for (int i = 0; i < atom->nlocal; ++i) {
+      for (int d = 0; d < 3; ++d) {
+        if (!std::isfinite(atom->x[i][d]))
+          select_atom_field(i, TRACE_POSITION, d, atom->x[i][d]);
+        if (!std::isfinite(atom->v[i][d]))
+          select_atom_field(i, TRACE_VELOCITY, d, atom->v[i][d]);
+        if (!std::isfinite(atom->f[i][d]))
+          select_atom_field(i, TRACE_FORCE, d, atom->f[i][d]);
+      }
+    }
+  }
+
+  if (local_index >= 0) {
+    for (int d = 0; d < 3; ++d) {
+      local.current[d] = atom->x[local_index][d];
+      local.current[3 + d] = atom->v[local_index][d];
+      local.current[6 + d] = atom->f[local_index][d];
+    }
+    if (local_index < nonfinite_trace_nmax && nonfinite_trace_last_tag[local_index] == local.tag) {
+      local.previous_available = 1;
+      for (int d = 0; d < 3; ++d) {
+        local.previous[d] = nonfinite_trace_last_x[local_index][d];
+        local.previous[3 + d] = nonfinite_trace_last_v[local_index][d];
+        local.previous[6 + d] = nonfinite_trace_last_f[local_index][d];
+      }
+    }
+  }
+
+  int any_nonfinite = local.found;
+  MPI_Allreduce(MPI_IN_PLACE, &any_nonfinite, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (any_nonfinite) {
+
+    std::vector<NonfiniteTraceRecord> records(universe->nprocs);
+    MPI_Allgather(&local, sizeof(NonfiniteTraceRecord), MPI_BYTE, records.data(),
+                  sizeof(NonfiniteTraceRecord), MPI_BYTE, universe->uworld);
+
+    const NonfiniteTraceRecord *winner = nullptr;
+    for (const auto &record : records) {
+      if (!record.found) continue;
+      if (!winner) {
+        winner = &record;
+        continue;
+      }
+      const int record_box = record.field == TRACE_BOX;
+      const int winner_box = winner->field == TRACE_BOX;
+      if (record_box != winner_box) {
+        if (record_box) winner = &record;
+        continue;
+      }
+      if (record.bead_world != winner->bead_world) {
+        if (record.bead_world < winner->bead_world) winner = &record;
+        continue;
+      }
+      if (record.tag != winner->tag) {
+        if (record.tag < winner->tag) winner = &record;
+        continue;
+      }
+      if (record.field != winner->field) {
+        if (record.field < winner->field) winner = &record;
+        continue;
+      }
+      if (record.component != winner->component) {
+        if (record.component < winner->component) winner = &record;
+        continue;
+      }
+      if (record.universe_rank < winner->universe_rank) winner = &record;
+    }
+
+    if (winner) {
+      const std::string path = fmt::format("{}.pimd.step{}.u{}.w{}.r{}.txt", nonfinite_trace_prefix,
+                                           update->ntimestep, winner->universe_rank,
+                                           winner->bead_world, winner->world_rank);
+      if (universe->me == winner->universe_rank) {
+        const std::string report = fmt::format(
+            "schema=pimd-nonfinite-trace-v1\nstep={}\nstage={}\nbasis={}\n"
+            "universe_rank={}\nbead_world={}\nworld_rank={}\natom_tag={}\nfield={}\n"
+            "component={}\nreason={}\nvalue={:.17g}\n"
+            "current_x={:.17g} {:.17g} {:.17g}\ncurrent_v={:.17g} {:.17g} {:.17g}\n"
+            "current_f={:.17g} {:.17g} {:.17g}\nprevious_available={}\n"
+            "previous_finite_stage={}\nprevious_x={:.17g} {:.17g} {:.17g}\n"
+            "previous_v={:.17g} {:.17g} {:.17g}\nprevious_f={:.17g} {:.17g} {:.17g}\n"
+            "boxlo={:.17g} {:.17g} {:.17g}\nboxhi={:.17g} {:.17g} {:.17g}\n"
+            "tilt_xy_xz_yz={:.17g} {:.17g} {:.17g}\n",
+            update->ntimestep, stage, basis, winner->universe_rank, winner->bead_world,
+            winner->world_rank, winner->tag, trace_field_name(winner->field), winner->component,
+            winner->reason == 2 ? "degenerate-box" : "non-finite", winner->value,
+            winner->current[0], winner->current[1], winner->current[2], winner->current[3],
+            winner->current[4], winner->current[5], winner->current[6], winner->current[7],
+            winner->current[8], winner->previous_available, nonfinite_trace_last_stage,
+            winner->previous[0], winner->previous[1], winner->previous[2], winner->previous[3],
+            winner->previous[4], winner->previous[5], winner->previous[6], winner->previous[7],
+            winner->previous[8], winner->box[0], winner->box[1], winner->box[2], winner->box[3],
+            winner->box[4], winner->box[5], winner->box[6], winner->box[7], winner->box[8]);
+        if (FILE *file = std::fopen(path.c_str(), "w")) {
+          std::fwrite(report.data(), 1, report.size(), file);
+          std::fclose(file);
+        }
+      }
+      error->all(
+          FLERR,
+          fmt::format("Fix pimd/langevin nonfinite trace detected a {} at step {} stage {} "
+                      "on bead {} atom {} component {}; diagnostic {}",
+                      trace_field_name(winner->field), update->ntimestep, stage,
+                      winner->bead_world, winner->tag, winner->component, path));
+    }
+
+  }
+  if (atom->nmax > nonfinite_trace_nmax) {
+    memory->destroy(nonfinite_trace_last_x);
+    memory->destroy(nonfinite_trace_last_v);
+    memory->destroy(nonfinite_trace_last_f);
+    memory->destroy(nonfinite_trace_last_tag);
+    nonfinite_trace_nmax = atom->nmax;
+    memory->create(nonfinite_trace_last_x, nonfinite_trace_nmax, 3,
+                   "FixPIMDLangevin:nonfinite_trace_last_x");
+    memory->create(nonfinite_trace_last_v, nonfinite_trace_nmax, 3,
+                   "FixPIMDLangevin:nonfinite_trace_last_v");
+    memory->create(nonfinite_trace_last_f, nonfinite_trace_nmax, 3,
+                   "FixPIMDLangevin:nonfinite_trace_last_f");
+    memory->create(nonfinite_trace_last_tag, nonfinite_trace_nmax,
+                   "FixPIMDLangevin:nonfinite_trace_last_tag");
+    for (int i = 0; i < nonfinite_trace_nmax; ++i) nonfinite_trace_last_tag[i] = -1;
+  }
+  for (int i = 0; i < atom->nlocal; ++i) {
+    nonfinite_trace_last_tag[i] = atom->tag[i];
+    for (int d = 0; d < 3; ++d) {
+      nonfinite_trace_last_x[i][d] = atom->x[i][d];
+      nonfinite_trace_last_v[i][d] = atom->v[i][d];
+      nonfinite_trace_last_f[i][d] = atom->f[i][d];
+    }
+  }
+  std::snprintf(nonfinite_trace_last_stage, sizeof(nonfinite_trace_last_stage), "%s", stage);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -589,6 +836,8 @@ void FixPIMDLangevin::init()
 
 void FixPIMDLangevin::setup(int vflag)
 {
+  trace_nonfinite_state("setup-entry", "bead-x-v-physical-f");
+
   int nlocal = atom->nlocal;
   double **x = atom->x;
   imageint *image = atom->image;
@@ -602,6 +851,7 @@ void FixPIMDLangevin::setup(int vflag)
       nmpimd_transform(bufsortedall, x, M_x2xp[universe->iworld]);
     else if (cmode == MULTI_PROC)
       nmpimd_transform(bufbeads, x, M_x2xp[universe->iworld]);
+    trace_nonfinite_state("setup-bead-to-normal-post", "normal-mode");
   } else if (method == PIMD) {
     prepare_coordinates();
   } else {
@@ -620,6 +870,7 @@ void FixPIMDLangevin::setup(int vflag)
       nmpimd_transform(bufsortedall, x, M_xp2x[universe->iworld]);
     else if (cmode == MULTI_PROC)
       nmpimd_transform(bufbeads, x, M_xp2x[universe->iworld]);
+    trace_nonfinite_state("setup-normal-to-bead-post", "bead-x-normal-vf");
   }
   if (mapflag) {
     for (int i = 0; i < nlocal; i++) domain->unmap_inv(x[i], image[i]);
@@ -636,7 +887,9 @@ void FixPIMDLangevin::setup(int vflag)
 
 void FixPIMDLangevin::initial_integrate(int /*vflag*/)
 {
+  trace_nonfinite_state("initial-entry", "bead-x-normal-vf");
   prepare_normal_mode_forces();
+  trace_nonfinite_state("initial-force-ready", "bead-x-normal-vf");
 
   int nlocal = atom->nlocal;
   double **x = atom->x;
@@ -650,22 +903,26 @@ void FixPIMDLangevin::initial_integrate(int /*vflag*/)
       if (removecomflag) remove_com_motion();
       if (pstat_flag) press_o_step();
     }
+    trace_nonfinite_state("initial-obabo-o1-post", "bead-x-normal-vf");
     if (pstat_flag) {
       compute_totke();
       compute_p_cv();
       press_v_step();
     }
     b_step();
+    trace_nonfinite_state("initial-obabo-b-post", "bead-x-normal-vf");
     if (method == NMPIMD) {
       inter_replica_comm(x);
       if (cmode == SINGLE_PROC)
         nmpimd_transform(bufsortedall, x, M_x2xp[universe->iworld]);
       else if (cmode == MULTI_PROC)
         nmpimd_transform(bufbeads, x, M_x2xp[universe->iworld]);
+      trace_nonfinite_state("initial-obabo-bead-to-normal-post", "normal-mode");
       qc_step();
       a_step();
       qc_step();
       a_step();
+      trace_nonfinite_state("initial-obabo-a-post", "normal-mode");
     } else if (method == PIMD) {
       q_step();
       q_step();
@@ -682,14 +939,17 @@ void FixPIMDLangevin::initial_integrate(int /*vflag*/)
       press_v_step();
     }
     b_step();
+    trace_nonfinite_state("initial-baoab-b-post", "bead-x-normal-vf");
     if (method == NMPIMD) {
       inter_replica_comm(x);
       if (cmode == SINGLE_PROC)
         nmpimd_transform(bufsortedall, x, M_x2xp[universe->iworld]);
       else if (cmode == MULTI_PROC)
         nmpimd_transform(bufbeads, x, M_x2xp[universe->iworld]);
+      trace_nonfinite_state("initial-baoab-bead-to-normal-post", "normal-mode");
       qc_step();
       a_step();
+      trace_nonfinite_state("initial-baoab-a1-post", "normal-mode");
     } else if (method == PIMD) {
       q_step();
     } else {
@@ -703,11 +963,14 @@ void FixPIMDLangevin::initial_integrate(int /*vflag*/)
       if (removecomflag) remove_com_motion();
       if (pstat_flag) press_o_step();
     }
+    trace_nonfinite_state("initial-baoab-o-post", "normal-mode");
     if (method == NMPIMD) {
       qc_step();
       a_step();
+      trace_nonfinite_state("initial-baoab-a2-post", "normal-mode");
     } else if (method == PIMD) {
       q_step();
+      trace_nonfinite_state("initial-baoab-q2-post", "bead");
     } else {
       error->universe_all(
           FLERR,
@@ -734,6 +997,7 @@ void FixPIMDLangevin::initial_integrate(int /*vflag*/)
       nmpimd_transform(bufsortedall, x, M_xp2x[universe->iworld]);
     else if (cmode == MULTI_PROC)
       nmpimd_transform(bufbeads, x, M_xp2x[universe->iworld]);
+    trace_nonfinite_state("initial-normal-to-bead-post", "bead-x-normal-vf");
   }
 
   if (mapflag) {
@@ -745,7 +1009,9 @@ void FixPIMDLangevin::initial_integrate(int /*vflag*/)
 
 void FixPIMDLangevin::final_integrate()
 {
+  trace_nonfinite_state("final-entry", "bead-x-normal-v-physical-f");
   prepare_normal_mode_forces();
+  trace_nonfinite_state("final-force-ready", "bead-x-normal-vf");
 
   if (pstat_flag) {
     compute_totke();
@@ -753,12 +1019,14 @@ void FixPIMDLangevin::final_integrate()
     press_v_step();
   }
   b_step();
+  trace_nonfinite_state("final-b-post", "bead-x-normal-vf");
   if (integrator == OBABO) {
     if (tstat_flag) {
       o_step();
       if (removecomflag) remove_com_motion();
       if (pstat_flag) press_o_step();
     }
+    trace_nonfinite_state("final-obabo-o-post", "bead-x-normal-vf");
   } else if (integrator == BAOAB) {
 
   } else {
@@ -777,6 +1045,8 @@ void FixPIMDLangevin::prepare_coordinates()
 
 void FixPIMDLangevin::post_force(int /*flag*/)
 {
+  trace_nonfinite_state("post-physical-force", "bead-x-normal-v-physical-f");
+
   int nlocal = atom->nlocal;
   double **x = atom->x;
   double **f = atom->f;
@@ -826,6 +1096,7 @@ void FixPIMDLangevin::post_force(int /*flag*/)
         nmpimd_transform(bufsortedall, f, M_x2xp[universe->iworld]);
       else if (cmode == MULTI_PROC)
         nmpimd_transform(bufbeads, f, M_x2xp[universe->iworld]);
+      trace_nonfinite_state("post-force-transform-post", "bead-x-normal-vf");
     }
   }
 
@@ -1390,6 +1661,7 @@ void FixPIMDLangevin::nmpimd_transform(double **src, double **des, double *vecto
 void FixPIMDLangevin::prepare_normal_mode_forces()
 {
   if (method != NMPIMD || !normal_mode_force_pending) return;
+  trace_nonfinite_state("deferred-force-transform-pre", "bead-x-normal-v-physical-f");
 
   if (bead_bias_virial_pending) {
     compute_vir();
@@ -1405,6 +1677,7 @@ void FixPIMDLangevin::prepare_normal_mode_forces()
     nmpimd_transform(bufsortedall, f, M_x2xp[universe->iworld]);
   else if (cmode == MULTI_PROC)
     nmpimd_transform(bufbeads, f, M_x2xp[universe->iworld]);
+  trace_nonfinite_state("deferred-force-transform-post", "bead-x-normal-vf");
   normal_mode_force_pending = 0;
 }
 
