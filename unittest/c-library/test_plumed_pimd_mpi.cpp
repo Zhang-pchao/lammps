@@ -437,7 +437,9 @@ run_nmpimd_bead_mode_segments(const char *mode, const char *restart_prefix, int 
             lammps_command(lmp, "thermo 0");
             add_fixes(lmp, restart_plumed_file, restart_log);
         }
-        lammps_command(lmp, ("run " + std::to_string(second_steps)).c_str());
+        std::string second_run = "run " + std::to_string(second_steps);
+        if (!restart) second_run += " pre no";
+        lammps_command(lmp, second_run.c_str());
     }
 
     const auto state = extract_centroid_nvt_continuation_state(lmp);
@@ -1624,6 +1626,130 @@ TEST(MPI, plumed_nmpimd_centroid_nvt_restart_continuity)
                                 "test_plumed_nmpimd_nvt_restart_first.log",
                                 "test_plumed_nmpimd_nvt_restart_second.log"})
             std::remove(log);
+    }
+}
+
+TEST(MPI, plumed_nmpimd_opes_langevin_restart_continuity)
+{
+    int nprocs, me;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    ASSERT_EQ(nprocs, 4);
+
+    auto counter = [](const std::string &file) {
+        std::ifstream input(file);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.rfind("#! SET counter", 0) != 0) continue;
+            std::istringstream row(line);
+            std::string marker, set, key;
+            int value = -1;
+            row >> marker >> set >> key >> value;
+            return value;
+        }
+        return -1;
+    };
+    for (const char *mode : {"centroid", "bead_mean", "bead_density"}) {
+        SCOPED_TRACE(mode);
+        for (int seam : {3, 4}) {
+            SCOPED_TRACE(seam);
+            const std::string prefix =
+                "test_nmpimd_opes_rng_" + std::string(mode) + "_" + std::to_string(seam);
+            const bool mean          = std::string(mode) == "bead_mean";
+            const bool density       = std::string(mode) == "bead_density";
+            const std::string binary = prefix + "_binary";
+            auto write_input         = [&](const std::string &leg, bool restart) {
+                const std::string stem = prefix + "_" + leg;
+                std::ofstream input(stem + ".dat");
+                if (restart) input << "RESTART\n";
+                input << "d: DISTANCE ATOMS=1,2 NOPBC\n";
+                if (mean) input << "mean: ENSEMBLE ARG=d\n";
+                input << "bias: OPES_METAD ARG=" << (mean ? "mean.d" : "d")
+                      << " PACE=2 BARRIER=4 TEMP=1 SIGMA=0.5 FIXED_SIGMA FILE=" << stem
+                      << ".kernels FMT=%24.17g STATE_WFILE=" << stem
+                      << ".state STATE_WSTRIDE=" << seam;
+                if (density) input << " WALKERS_MPI";
+                if (restart) input << " STATE_RFILE=" << prefix << "_i.state";
+                input << (restart ? " RESTART=YES\n" : " RESTART=NO\n");
+            };
+            if (me == 0) {
+                write_input("c", false);
+                write_input("s", false);
+                write_input("i", false);
+                write_input("r", true);
+            }
+            MPI_Barrier(MPI_COMM_WORLD);
+            const auto continuous = run_nmpimd_bead_mode_segments(
+                mode, binary.c_str(), 2 * seam, 0, false, (prefix + "_c.dat").c_str(), "",
+                (prefix + "_c.log").c_str(), "");
+            const auto segmented = run_nmpimd_bead_mode_segments(
+                mode, binary.c_str(), seam, seam, false, (prefix + "_s.dat").c_str(), "",
+                (prefix + "_s.log").c_str(), "");
+            const auto restarted = run_nmpimd_bead_mode_segments(
+                mode, binary.c_str(), seam, seam, true, (prefix + "_i.dat").c_str(),
+                (prefix + "_r.dat").c_str(), (prefix + "_i.log").c_str(),
+                (prefix + "_r.log").c_str());
+            // OPES deposits at end_of_step.  At a deposition-aligned restart seam, the
+            // restarted run recomputes the current force from the updated state, while an
+            // uninterrupted run retains the pre-deposition force until the next force step.
+            // Non-deposition seams remain near-bitwise; the aligned-seam limit is still four
+            // orders tighter than the duplicated-update error this test is designed to catch.
+            const double restart_tolerance = seam % 2 == 0 ? 1.0e-10 : 1.0e-13;
+            for (std::size_t i = 0; i < continuous.atoms.size(); ++i) {
+                EXPECT_TRUE(std::isfinite(continuous.atoms[i]));
+                EXPECT_TRUE(std::isfinite(segmented.atoms[i]));
+                EXPECT_TRUE(std::isfinite(restarted.atoms[i]));
+                EXPECT_NEAR(segmented.atoms[i], continuous.atoms[i], 1.0e-14) << i;
+                EXPECT_NEAR(restarted.atoms[i], segmented.atoms[i], restart_tolerance) << i;
+            }
+            for (std::size_t i = 0; i < continuous.pimd.size(); ++i) {
+                EXPECT_TRUE(std::isfinite(continuous.pimd[i]));
+                EXPECT_TRUE(std::isfinite(segmented.pimd[i]));
+                EXPECT_TRUE(std::isfinite(restarted.pimd[i]));
+                const double scale = std::max({1.0, std::abs(continuous.pimd[i]),
+                                               std::abs(segmented.pimd[i]),
+                                               std::abs(restarted.pimd[i])});
+                EXPECT_NEAR(segmented.pimd[i], continuous.pimd[i], 1.0e-14 * scale) << i;
+                EXPECT_NEAR(restarted.pimd[i], segmented.pimd[i], restart_tolerance * scale)
+                    << i;
+            }
+            for (std::size_t i = 0; i < continuous.bias.size(); ++i) {
+                EXPECT_TRUE(std::isfinite(continuous.bias[i]));
+                EXPECT_TRUE(std::isfinite(segmented.bias[i]));
+                EXPECT_TRUE(std::isfinite(restarted.bias[i]));
+                EXPECT_NEAR(segmented.bias[i], continuous.bias[i], 1.0e-14) << i;
+                EXPECT_NEAR(restarted.bias[i], segmented.bias[i], 1.0e-14) << i;
+            }
+            EXPECT_GT(std::abs(continuous.bias[0]), 0.0);
+            MPI_Barrier(MPI_COMM_WORLD);
+            if (me == 0) {
+                // Every two steps, with two walkers only for shared density.
+                const int walkers = density ? 2 : 1;
+                for (int replica = 0; replica < (mean ? 2 : 1); ++replica) {
+                    const std::string suffix = mean ? "." + std::to_string(replica) : "";
+                    EXPECT_EQ(counter(prefix + "_c.state" + suffix), 1 + seam * walkers);
+                    EXPECT_EQ(counter(prefix + "_s.state" + suffix), 1 + seam * walkers);
+                    EXPECT_EQ(counter(prefix + "_i.state" + suffix), 1 + (seam / 2) * walkers);
+                    EXPECT_EQ(counter(prefix + "_r.state" + suffix), 1 + seam * walkers);
+                }
+                if (!::testing::Test::HasFailure()) {
+                    for (const char *leg : {"c", "s", "i", "r"}) {
+                        for (const char *extension : {".dat", ".log", ".state", ".kernels"}) {
+                            const std::string file = prefix + "_" + leg + extension;
+                            for (const std::string &backup : {"", "bck.last."}) {
+                                std::remove((backup + file).c_str());
+                                for (int replica = 0; replica < 4; ++replica)
+                                    std::remove(
+                                        (backup + file + "." + std::to_string(replica)).c_str());
+                            }
+                        }
+                    }
+                    std::remove((binary + ".0").c_str());
+                    std::remove((binary + ".1").c_str());
+                }
+            }
+            MPI_Barrier(MPI_COMM_WORLD);
+        }
     }
 }
 
