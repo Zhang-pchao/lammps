@@ -67,6 +67,8 @@ FixPIMDNVT::FixPIMDNVT(LAMMPS *lmp, int narg, char **arg) :
 
   if (igroup != 0) error->all(FLERR, "Fix {} only supports group all", style);
   if (domain->dimension != 3) error->all(FLERR, fmt::format("Fix {} requires a 3d system", style));
+  if (!atom->mass || atom->rmass_flag)
+    error->all(FLERR, fmt::format("Fix {} requires per-type atom masses", style));
 
   for (int i = 1; i < universe->nworlds; i++)
     if (universe->procs_per_world[i] != universe->procs_per_world[0])

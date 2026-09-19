@@ -191,6 +191,8 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
         p->cmd("GREX setMPIIntercomm", &inter_comm);
       }
       p->cmd("GREX init", nullptr);
+      // PLUMED duplicates the communicator passed to setMPIIntercomm.
+      MPI_Comm_free(&inter_comm);
     }
 
     // The general communicator is independent of the existence of partitions,

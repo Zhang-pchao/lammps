@@ -630,7 +630,8 @@ All four fix styles documented on this page require a three-dimensional
 system.  All bead partitions must contain the same number of MPI
 processes and atoms. They must also assign the same atom type to every
 atom ID and use the same per-type atom masses, simulation cell geometry,
-and boundary settings.
+and boundary settings.  Atom styles with per-atom masses, such as
+:doc:`sphere <atom_style>`, are not supported.
 
 Only some combinations of fix styles and their options support
 partitions with multiple processors.  LAMMPS will stop with an error if

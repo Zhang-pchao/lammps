@@ -136,9 +136,10 @@ void check_physical_bias(bool normal_modes)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     ASSERT_EQ(size, 4);
     constexpr double delta = 1.0e-5;
-    for (int beads : {2, 4}) {
+    for (int beads : {1, 2, 4}) {
         const int bead = rank / (size / beads);
         for (const char *mode : {"centroid", "bead_mean", "bead_density"}) {
+            if (beads == 1 && std::string(mode) != "centroid") continue;
             SCOPED_TRACE(std::string(mode) + " P=" + std::to_string(beads));
             const auto zero      = evaluate(mode, beads, -1, 0.0, false, normal_modes);
             const auto state     = evaluate(mode, beads, -1, 0.0, true, normal_modes);

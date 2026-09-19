@@ -174,6 +174,8 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg, bool allow_e
   int scale_flag = 0;
 
   if (domain->dimension != 3) error->all(FLERR, fmt::format("Fix {} requires a 3d system", style));
+  if (!atom->mass || atom->rmass_flag)
+    error->all(FLERR, fmt::format("Fix {} requires per-type atom masses", style));
 
   for (int i = 1; i < universe->nworlds; i++)
     if (universe->procs_per_world[i] != universe->procs_per_world[0])
@@ -182,6 +184,7 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg, bool allow_e
           fmt::format("Fix {} requires the same number of processors in every partition", style));
 
   for (int i = 0; i < 6; i++) {
+    vw[i] = 0.0;
     p_flag[i] = 0;
     p_target[i] = 0.0;
   }

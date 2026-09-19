@@ -13,6 +13,7 @@
 #include <array>
 #include <cfenv>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -2057,5 +2058,81 @@ TEST(PIMD, multirank_nvt_singular_parameter_rejection)
             "fix fpimd all pimd/nvt method pimd temp 1.0 fmass 1.0 sp 1.0 nhc 2 " +
             std::string(parameter.setting);
         expect_pimd_fix_error(fix_command, parameter.message, "real");
+    }
+}
+
+
+TEST(PIMD, multirank_per_atom_mass_rejection)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+
+    for (const char *style : {"pimd/langevin", "pimd/langevin/bosonic", "pimd/nvt",
+                              "pimd/nvt/bosonic"}) {
+        SCOPED_TRACE(style);
+        auto *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+        lammps_command(lmp, "units real");
+        lammps_command(lmp, "atom_style sphere");
+        lammps_command(lmp, "atom_modify map array");
+        lammps_command(lmp, "region box block 0 8 0 8 0 8");
+        lammps_command(lmp, "create_box 1 box");
+        lammps_command(lmp, "create_atoms 1 single 4 4 4 units box");
+        lammps_set_show_error(lmp, 0);
+        std::string command = "fix fpimd all " + std::string(style);
+        if (std::string(style).find("langevin") != std::string::npos)
+            command += " ensemble nve";
+        lammps_command(lmp, command.c_str());
+        const int has_error = lammps_has_error(lmp);
+        EXPECT_EQ(has_error, 1);
+        if (has_error) {
+            char message[512];
+            lammps_get_last_error_message(lmp, message, sizeof(message));
+            EXPECT_NE(std::string(message).find("requires per-type atom masses"), std::string::npos);
+        }
+        lammps_close(lmp);
+    }
+}
+
+TEST(PIMD, multirank_inactive_barostat_restart_state)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+
+    for (const char *ensemble : {"nve", "nvt"}) {
+        SCOPED_TRACE(ensemble);
+        auto *handle = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+        create_two_bead_test_system(handle, 2, Ownership::DEFAULT);
+        const std::string command = "fix fpimd all pimd/langevin ensemble " +
+            std::string(ensemble) + " thermostat PILE_L 2468 temp 1.0 fixcom no";
+        lammps_command(handle, command.c_str());
+        lammps_command(handle, "run 0 post no");
+        ASSERT_EQ(lammps_has_error(handle), 0);
+        auto *lmp = static_cast<LAMMPS_NS::LAMMPS *>(handle);
+        auto *fix = lmp->modify->get_fix_by_id("fpimd");
+        ASSERT_NE(fix, nullptr);
+        const int root = lammps_extract_setting(handle, "world_rank") == 0;
+        FILE *file = root ? std::tmpfile() : nullptr;
+        int file_ok = !root || file != nullptr;
+        MPI_Allreduce(MPI_IN_PLACE, &file_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+        if (!file_ok) {
+            if (file) std::fclose(file);
+            lammps_close(handle);
+        }
+        ASSERT_TRUE(file_ok);
+        fix->write_restart(file);
+        if (root && file) {
+            std::rewind(file);
+            int bytes = 0;
+            std::array<double, 6> barostat{};
+            EXPECT_EQ(std::fread(&bytes, sizeof(bytes), 1, file), 1U);
+            EXPECT_GE(bytes, int(sizeof(barostat)));
+            EXPECT_EQ(std::fread(barostat.data(), sizeof(double), barostat.size(), file),
+                      barostat.size());
+            for (double value : barostat) EXPECT_DOUBLE_EQ(value, 0.0);
+            std::fclose(file);
+        }
+        lammps_close(handle);
     }
 }
