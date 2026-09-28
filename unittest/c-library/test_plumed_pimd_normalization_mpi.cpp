@@ -30,6 +30,7 @@ BiasState evaluate(const char *mode, int beads, int displaced_bead, double displ
     int rank, size;
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    const bool probability      = std::string(mode).find("probability_") == 0;
     const bool conditional      = std::string(mode).find("conditional_") == 0;
     const double coupling       = std::string(mode) == "conditional_path" ? 0.5 : 0.0;
     const int ranks_per_bead    = size / beads;
@@ -40,7 +41,23 @@ BiasState evaluate(const char *mode, int beads, int displaced_bead, double displ
         std::ofstream out(input);
         out << "d: DISTANCE ATOMS=1,2 NOPBC\n"
             << "s: CUSTOM ARG=d FUNC=x*x PERIODIC=NO\n";
-        if (conditional) {
+        if (probability) {
+            // Core-function oracle: actual optional actions are covered by PLUMED
+            // native tests and installed-kernel integration qualification.
+            out << "v: CUSTOM ARG=d FUNC=0.4*x*x+0.2*x*x*x*x PERIODIC=NO\n"
+                << "ratio: CUSTOM ARG=v FUNC=exp(-x) PERIODIC=NO\n"
+                << "meanratio: ENSEMBLE ARG=ratio\n"
+                << "va: CUSTOM ARG=meanratio.ratio FUNC=-log(x) PERIODIC=NO\n"
+                << "dx: DISTANCE ATOMS=1,2 COMPONENTS NOPBC\n"
+                << "mean: ENSEMBLE ARG=dx.x\n"
+                << "vc: CUSTOM ARG=mean.dx.x FUNC=0.7*x*x PERIODIC=NO\n";
+            const std::string name(mode);
+            if (name == "probability_mixed")
+                out << "energy: CUSTOM ARG=vc,va FUNC=-log(0.5*exp(-x)+0.5*exp(-y-0.2)) PERIODIC=NO\n";
+            if (biased)
+                out << "b: BIASVALUE ARG=" << (name == "probability_pure" ? "va" :
+                                              name == "probability_zero" ? "vc" : "energy") << "\n";
+        } else if (conditional) {
             // Build the nonlinear CV after averaging Cartesian components.
             // The existing adapter owns all bead factors and normal-mode transforms.
             out << "dx: DISTANCE ATOMS=1,2 COMPONENTS NOPBC\n"
@@ -90,7 +107,7 @@ BiasState evaluate(const char *mode, int beads, int displaced_bead, double displ
     command("fix bias all plumed plumedfile " + input +
             " outfile test_physical_bias.log "
             "path_integral " +
-            (conditional ? "bead_mean" : mode) + " pimd_fix fpimd");
+            ((conditional || probability) ? "bead_mean" : mode) + " pimd_fix fpimd");
     command(std::string("fix_modify bias energy ") + (thermo_energy ? "yes" : "no"));
     command("run 0 post no");
 
@@ -157,7 +174,8 @@ void check_physical_bias(bool normal_modes)
     for (int beads : {1, 2, 4}) {
         const int bead = rank / (size / beads);
         for (const char *mode :
-             {"centroid", "bead_mean", "bead_density", "conditional_zero", "conditional_path"}) {
+             {"centroid", "bead_mean", "bead_density", "conditional_zero", "conditional_path",
+              "probability_pure", "probability_zero", "probability_mixed"}) {
             if (beads == 1 && std::string(mode) != "centroid") continue;
             SCOPED_TRACE(std::string(mode) + " P=" + std::to_string(beads));
             const auto zero      = evaluate(mode, beads, -1, 0.0, false, normal_modes);
@@ -185,6 +203,17 @@ void check_physical_bias(bool normal_modes)
                 const double lambda     = std::string(mode) == "conditional_path" ? 0.5 : 0.0;
                 expected_bias =
                     0.5 * std::pow(c - 0.7, 2) - std::log(1 - lambda + lambda * score / normalizer);
+            }
+            if (std::string(mode).find("probability_") == 0) {
+                double ratio = 0;
+                for (int b = 0; b < beads; ++b) {
+                    const double x = 1.0 + 0.2 * b;
+                    ratio += std::exp(-0.4 * x * x - 0.2 * std::pow(x, 4)) / beads;
+                }
+                const double vc = 0.7 * mean_distance * mean_distance;
+                expected_bias = std::string(mode) == "probability_pure" ? -std::log(ratio) :
+                                std::string(mode) == "probability_zero" ? vc :
+                                -std::log(0.5 * std::exp(-vc) + 0.5 * ratio * std::exp(-0.2));
             }
             EXPECT_NEAR(state.physical_bias, expected_bias, 1.0e-12);
 

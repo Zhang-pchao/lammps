@@ -328,6 +328,33 @@ and verify input/model identities before a restart.  Equilibrium reweighting
 uses one total-bias weight per complete path, not one independent weight per
 bead.  The existence of this force graph does not establish sampling gains.
 
+Frozen probability-ratio mixtures
+---------------------------------
+
+A common frozen field :math:`v(s)` can instead define the total path bias
+
+.. math::
+
+   U_A(X)=-k_B T\log\left[\frac{1}{P}\sum_b\exp(-v(s_b)/k_B T)\right].
+
+The optional PLUMED ``PATH_LOGMEANEXP`` action provides a numerically stable
+replica reduction and its bead-local softmax derivative. Use *bead_mean*
+for this complete-path graph. Its physical force coefficient already
+contains the normalization; another :math:`1/P` factor is incorrect.
+``EXPECTED_REPLICAS`` must equal the number of bead partitions, not the
+number of spatial MPI ranks. The native normalization tests include pure,
+centroid-only and mixed frozen graphs using ordinary PLUMED functions.
+
+For a frozen active OPES action, apply :math:`U_A-v(s_b)` as a correction
+so that the original local bias force and energy are cancelled. Applying
+both the full :math:`U_A` and the local OPES bias would double count the
+field. Verify immutable state identity and native update suppression;
+current shared-density OPES deposition weights do not implement adaptive
+learning under this new Hamiltonian. ``PROBABILITY_MIX`` can combine a
+non-bias centroid scalar and :math:`U_A` using a frozen global normalizer.
+The initial path-mixture qualification is fixed-volume NVT; this does not
+admit pressure-coupled or arbitrary molecular-centroid variants.
+
 Restrictions
 """"""""""""
 
@@ -345,7 +372,9 @@ normal-mode NVE and Cartesian-PIMD pressure coupling are not supported.  All
 three modes require a fixed atom count, consecutive atom IDs, and an atom map,
 and can distribute each bead over multiple MPI ranks.  The *bead_mean* and
 *bead_density* modes additionally require multiple LAMMPS partitions.  A
-*bead_mean* input must explicitly route each bias through ``ENSEMBLE``.  A
+*bead_mean* input must explicitly form a complete-path bias with
+``ENSEMBLE`` or another differentiated replica reduction such as
+``PATH_LOGMEANEXP``.  A
 history-dependent *bead_density* input must use one shared bias field and scale
 each bead's deposition by :math:`1/P`.  None of the path-integral modes
 supports energy-dependent PLUMED actions, minimization, or r-RESPA.
