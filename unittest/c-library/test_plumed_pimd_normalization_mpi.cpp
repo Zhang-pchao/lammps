@@ -30,6 +30,8 @@ BiasState evaluate(const char *mode, int beads, int displaced_bead, double displ
     int rank, size;
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    const bool conditional      = std::string(mode).find("conditional_") == 0;
+    const double coupling       = std::string(mode) == "conditional_path" ? 0.5 : 0.0;
     const int ranks_per_bead    = size / beads;
     const int bead              = rank / ranks_per_bead;
     const std::string partition = std::to_string(beads) + "x" + std::to_string(ranks_per_bead);
@@ -38,10 +40,26 @@ BiasState evaluate(const char *mode, int beads, int displaced_bead, double displ
         std::ofstream out(input);
         out << "d: DISTANCE ATOMS=1,2 NOPBC\n"
             << "s: CUSTOM ARG=d FUNC=x*x PERIODIC=NO\n";
-        if (std::string(mode) == "bead_mean") out << "m: ENSEMBLE ARG=s\n";
-        if (biased)
-            out << "b: RESTRAINT ARG=" << (std::string(mode) == "bead_mean" ? "m.s" : "s")
-                << " AT=0.7 KAPPA=1.0\n";
+        if (conditional) {
+            // Build the nonlinear CV after averaging Cartesian components.
+            // The existing adapter owns all bead factors and normal-mode transforms.
+            out << "dx: DISTANCE ATOMS=1,2 COMPONENTS NOPBC\n"
+                << "mean: ENSEMBLE ARG=dx.x\n"
+                << "c: CUSTOM ARG=mean.dx.x FUNC=x*x PERIODIC=NO\n"
+                << "h: CUSTOM ARG=d FUNC=exp(-x*x/2) PERIODIC=NO\n"
+                << "fraction: ENSEMBLE ARG=h\n"
+                << "a: CUSTOM ARG=fraction.h FUNC=0.1+x PERIODIC=NO\n"
+                << "m: CUSTOM ARG=c FUNC=exp(-1+0.2*x+0.03*x*x) PERIODIC=NO\n"
+                << "ratio: CUSTOM ARG=a,m FUNC=log(" << 1.0 - coupling << "+" << coupling
+                << "*x/y) PERIODIC=NO\n"
+                << "energy: CUSTOM ARG=c,ratio FUNC=0.5*(x-0.7)^2-y PERIODIC=NO\n";
+            if (biased) out << "b: BIASVALUE ARG=energy\n";
+        } else {
+            if (std::string(mode) == "bead_mean") out << "m: ENSEMBLE ARG=s\n";
+            if (biased)
+                out << "b: RESTRAINT ARG=" << (std::string(mode) == "bead_mean" ? "m.s" : "s")
+                    << " AT=0.7 KAPPA=1.0\n";
+        }
     }
     MPI_Barrier(MPI_COMM_WORLD);
     LAMMPS_NS::LAMMPS::argv args = {"test_physical_bias", "-screen", "none", "-log", "none",
@@ -72,7 +90,7 @@ BiasState evaluate(const char *mode, int beads, int displaced_bead, double displ
     command("fix bias all plumed plumedfile " + input +
             " outfile test_physical_bias.log "
             "path_integral " +
-            mode + " pimd_fix fpimd");
+            (conditional ? "bead_mean" : mode) + " pimd_fix fpimd");
     command(std::string("fix_modify bias energy ") + (thermo_energy ? "yes" : "no"));
     command("run 0 post no");
 
@@ -138,7 +156,8 @@ void check_physical_bias(bool normal_modes)
     constexpr double delta = 1.0e-5;
     for (int beads : {1, 2, 4}) {
         const int bead = rank / (size / beads);
-        for (const char *mode : {"centroid", "bead_mean", "bead_density"}) {
+        for (const char *mode :
+             {"centroid", "bead_mean", "bead_density", "conditional_zero", "conditional_path"}) {
             if (beads == 1 && std::string(mode) != "centroid") continue;
             SCOPED_TRACE(std::string(mode) + " P=" + std::to_string(beads));
             const auto zero      = evaluate(mode, beads, -1, 0.0, false, normal_modes);
@@ -150,11 +169,23 @@ void check_physical_bias(bool normal_modes)
                 mean_squared += distance * distance / beads;
                 mean_bias += 0.5 * std::pow(distance * distance - 0.7, 2) / beads;
             }
-            const double expected_bias =
-                std::string(mode) == "centroid"
-                    ? 0.5 * std::pow(mean_distance * mean_distance - 0.7, 2)
-                : std::string(mode) == "bead_mean" ? 0.5 * std::pow(mean_squared - 0.7, 2)
-                                                   : mean_bias;
+            double expected_bias = std::string(mode) == "centroid"
+                                       ? 0.5 * std::pow(mean_distance * mean_distance - 0.7, 2)
+                                   : std::string(mode) == "bead_mean"
+                                       ? 0.5 * std::pow(mean_squared - 0.7, 2)
+                                       : mean_bias;
+            if (std::string(mode).find("conditional_") == 0) {
+                double score = 0.1;
+                for (int b = 0; b < beads; ++b) {
+                    const double x = 1.0 + 0.2 * b;
+                    score += std::exp(-x * x / 2) / beads;
+                }
+                const double c          = mean_distance * mean_distance;
+                const double normalizer = std::exp(-1 + 0.2 * c + 0.03 * c * c);
+                const double lambda     = std::string(mode) == "conditional_path" ? 0.5 : 0.0;
+                expected_bias =
+                    0.5 * std::pow(c - 0.7, 2) - std::log(1 - lambda + lambda * score / normalizer);
+            }
             EXPECT_NEAR(state.physical_bias, expected_bias, 1.0e-12);
 
             EXPECT_NEAR(zero.energy_residual, 0.0, 1.0e-11);

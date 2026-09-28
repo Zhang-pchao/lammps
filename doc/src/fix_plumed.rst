@@ -299,6 +299,35 @@ energy mentioned above.  The scalar value calculated by this fix is
 Note that other quantities of interest can be output by commands that
 are native to PLUMED.
 
+Fixed conditional path functions
+-------------------------------
+
+A fixed complete-path function combining a Cartesian-centroid CV and a
+bead-averaged score can use the same *bead_mean* adapter when both inputs
+are constructed correctly in the PLUMED graph.  For example, average
+Cartesian components first with ``ENSEMBLE`` and then apply a nonlinear
+function to form the centroid CV.  Average the bead-local score separately.
+Do not replace a nonlinear centroid CV with the mean of that nonlinear CV.
+The component construction requires consistent coordinate images and does
+not provide an automatic Cartesian-centroid interface for arbitrary CVs.
+
+For positive score :math:`a(X)`, a frozen positive normalizer :math:`m(c)`,
+and :math:`0\le\lambda<1`, a conditional correction may have the form
+
+.. math::
+
+   U_B(X)=B_c(c)-k_B T\log[(1-\lambda)+\lambda a(X)/m(c)].
+
+Both the score and normalizer derivatives must remain in the graph.
+The optional PLUMED ``CONDITIONAL_PATH`` function evaluates the log mixture;
+ordinary ``CUSTOM`` and ``BIASVALUE`` actions can apply its energy correction.
+This does not introduce another *path_integral* mode.  The adapter retains
+its existing physical-energy and dynamical-force normalization; do not
+multiply this function by another bead-count factor.  Keep all fields fixed
+and verify input/model identities before a restart.  Equilibrium reweighting
+uses one total-bias weight per complete path, not one independent weight per
+bead.  The existence of this force graph does not establish sampling gains.
+
 Restrictions
 """"""""""""
 
