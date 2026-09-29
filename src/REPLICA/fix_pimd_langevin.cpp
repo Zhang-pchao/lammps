@@ -1176,6 +1176,11 @@ void *FixPIMDLangevin::extract(const char *str, int &dim)
     dim = 1;
     return xcall;
   }
+  if (strcmp(str, "nvt_unwrapped_coordinates") == 0 && ensemble == NVT) {
+    // Refreshed in post_force; callers must not retain the reallocatable pointer.
+    dim = 2;
+    return x_unwrap;
+  }
   if (strcmp(str, "nbeads") == 0) return &np;
   if (strcmp(str, "centroid_bias_force_scale") == 0 && method == PIMD && ensemble == NVT)
     return &inverse_np;
