@@ -28,13 +28,16 @@ jobs:
         run: >-
           cmake -S cmake -B build -D CMAKE_BUILD_TYPE=Release
           -D BUILD_MPI=on -D BUILD_OMP=off -D ENABLE_TESTING=on
+          -D MPIEXEC_MAX_NUMPROCS=4
           -D DOWNLOAD_POTENTIALS=off -D PKG_REPLICA=on -D PKG_MISC=on
           -D PKG_GRANULAR=on -D PKG_DPD-BASIC=on -D PKG_EFF=on
           -D LAMMPS_SIZES=${{ matrix.sizes }}
       - name: Build focused tests
         run: cmake --build build -j 2 --target test_pimd_mpi test_random test_restart_settings
-      - name: Run native tests
-        run: ctest --test-dir build -V --output-on-failure -R '^(PIMDMPI|Random|RestartSettings)$'
+      - name: Run PIMD MPI tests
+        run: ctest --test-dir build -V --output-on-failure --no-tests=error -R '^PIMDMPI$'
+      - name: Run RNG and restart tests
+        run: ctest --test-dir build -V --output-on-failure --no-tests=error -R '^(Random|RestartSettings)$'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
