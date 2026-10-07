@@ -199,6 +199,7 @@ class Modify : protected Pointers {
 
   char **id_restart_global;       // stored fix global info
   char **style_restart_global;    // from read-in restart file
+  std::vector<int> size_restart_global;
   char **state_restart_global;
   int *used_restart_global;
 

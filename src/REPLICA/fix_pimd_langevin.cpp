@@ -70,13 +70,7 @@ std::map<int, std::string> Ensembles{{FixPIMDLangevin::NVE, "NVE"},
 }    // namespace
 
 namespace {
-enum NonfiniteTraceField {
-  TRACE_NONE,
-  TRACE_BOX,
-  TRACE_POSITION,
-  TRACE_VELOCITY,
-  TRACE_FORCE
-};
+enum NonfiniteTraceField { TRACE_NONE, TRACE_BOX, TRACE_POSITION, TRACE_VELOCITY, TRACE_FORCE };
 
 struct NonfiniteTraceRecord {
   int found;
@@ -486,9 +480,9 @@ FixPIMDLangevin::~FixPIMDLangevin()
     memory->destroy(displacements);
   }
 
+  memory->sfree(lam);
   memory->destroy(M_x2xp);
   memory->destroy(M_xp2x);
-  memory->sfree(lam);
   memory->destroy(xc);
   memory->destroy(x_unwrap);
   memory->destroy(bufsend);
@@ -538,8 +532,7 @@ void FixPIMDLangevin::trace_nonfinite_state(const char *stage, const char *basis
       break;
     }
   }
-  if (!local.found && (!(domain->xprd > 0.0) || !(domain->yprd > 0.0) ||
-                       !(domain->zprd > 0.0))) {
+  if (!local.found && (!(domain->xprd > 0.0) || !(domain->yprd > 0.0) || !(domain->zprd > 0.0))) {
     local.found = 1;
     local.reason = 2;
     local.field = TRACE_BOX;
@@ -575,12 +568,9 @@ void FixPIMDLangevin::trace_nonfinite_state(const char *stage, const char *basis
   if (!local.found) {
     for (int i = 0; i < atom->nlocal; ++i) {
       for (int d = 0; d < 3; ++d) {
-        if (!std::isfinite(atom->x[i][d]))
-          select_atom_field(i, TRACE_POSITION, d, atom->x[i][d]);
-        if (!std::isfinite(atom->v[i][d]))
-          select_atom_field(i, TRACE_VELOCITY, d, atom->v[i][d]);
-        if (!std::isfinite(atom->f[i][d]))
-          select_atom_field(i, TRACE_FORCE, d, atom->f[i][d]);
+        if (!std::isfinite(atom->x[i][d])) select_atom_field(i, TRACE_POSITION, d, atom->x[i][d]);
+        if (!std::isfinite(atom->v[i][d])) select_atom_field(i, TRACE_VELOCITY, d, atom->v[i][d]);
+        if (!std::isfinite(atom->f[i][d])) select_atom_field(i, TRACE_FORCE, d, atom->f[i][d]);
       }
     }
   }
@@ -642,9 +632,9 @@ void FixPIMDLangevin::trace_nonfinite_state(const char *stage, const char *basis
     }
 
     if (winner) {
-      const std::string path = fmt::format("{}.pimd.step{}.u{}.w{}.r{}.txt", nonfinite_trace_prefix,
-                                           update->ntimestep, winner->universe_rank,
-                                           winner->bead_world, winner->world_rank);
+      const std::string path =
+          fmt::format("{}.pimd.step{}.u{}.w{}.r{}.txt", nonfinite_trace_prefix, update->ntimestep,
+                      winner->universe_rank, winner->bead_world, winner->world_rank);
       if (universe->me == winner->universe_rank) {
         const std::string report = fmt::format(
             "schema=pimd-nonfinite-trace-v1\nstep={}\nstage={}\nbasis={}\n"
@@ -671,14 +661,12 @@ void FixPIMDLangevin::trace_nonfinite_state(const char *stage, const char *basis
           std::fclose(file);
         }
       }
-      error->all(
-          FLERR,
-          fmt::format("Fix pimd/langevin nonfinite trace detected a {} at step {} stage {} "
-                      "on bead {} atom {} component {}; diagnostic {}",
-                      trace_field_name(winner->field), update->ntimestep, stage,
-                      winner->bead_world, winner->tag, winner->component, path));
+      error->all(FLERR,
+                 fmt::format("Fix pimd/langevin nonfinite trace detected a {} at step {} stage {} "
+                             "on bead {} atom {} component {}; diagnostic {}",
+                             trace_field_name(winner->field), update->ntimestep, stage,
+                             winner->bead_world, winner->tag, winner->component, path));
     }
-
   }
   if (atom->nmax > nonfinite_trace_nmax) {
     memory->destroy(nonfinite_trace_last_x);
@@ -803,7 +791,10 @@ void FixPIMDLangevin::init()
 
   comm_init();
 
-  if (!mass) mass = new double[atom->ntypes + 1];
+  // init() runs once per run command, so release the array of the previous one
+
+  delete[] mass;
+  mass = new double[atom->ntypes + 1];
 
   nmpimd_init();
 
@@ -1672,10 +1663,10 @@ void FixPIMDLangevin::prepare_normal_mode_forces()
   trace_nonfinite_state("deferred-force-transform-pre", "bead-x-normal-v-physical-f");
 
   if (bead_bias_virial_pending) {
+    // Pressure must include the current bias. The kinetic estimators retain
+    // the physical-force values computed before PLUMED in post_force().
     compute_vir();
-    compute_xf_vir();
     compute_cvir();
-    compute_t_vir();
     bead_bias_virial_pending = 0;
   }
 
@@ -1752,8 +1743,7 @@ void FixPIMDLangevin::comm_init()
   int nlocal = atom->nlocal;
   if (cmode == SINGLE_PROC) {
     if (!counts) memory->create(counts, nreplica, "FixPIMDLangevin:counts");
-    if (!displacements)
-      memory->create(displacements, nreplica, "FixPIMDLangevin:displacements");
+    if (!displacements) memory->create(displacements, nreplica, "FixPIMDLangevin:displacements");
     for (int i = 0; i < nreplica; i++) counts[i] = 3*nlocal;
     displacements[0] = 0;
     for (int i = 0; i < nreplica - 1; i++) displacements[i + 1] = displacements[i] + counts[i];
@@ -1903,8 +1893,7 @@ void FixPIMDLangevin::inter_replica_comm(double **ptr)
       }
 
       // 5) collect missing tags within this world (local-only claiming)
-      // The shared collector uses collective point-to-point exchanges, so all ranks
-      // participate whenever any rank has missing tags.
+      // Every rank must forward ring requests, even if its own list is empty.
       int has_missing_tags = miss_tag.empty() ? 0 : 1;
       MPI_Allreduce(MPI_IN_PLACE, &has_missing_tags, 1, MPI_INT, MPI_MAX, world);
 
@@ -2235,9 +2224,9 @@ void FixPIMDLangevin::write_restart(FILE *fp)
   if (tstat_flag) {
     if (comm->me == 0) list[n] = comm->nprocs;
 
-    double state[RanMars::FULL_STATE_SIZE];
-    random->get_full_state(state);
-    MPI_Gather(state, RanMars::FULL_STATE_SIZE, MPI_DOUBLE, list + n + 1, RanMars::FULL_STATE_SIZE,
+    double state[RanMars::STATE_SIZE];
+    random->get_state(state);
+    MPI_Gather(state, RanMars::STATE_SIZE, MPI_DOUBLE, list + n + 1, RanMars::STATE_SIZE,
                MPI_DOUBLE, 0, world);
   }
 
@@ -2254,7 +2243,7 @@ void FixPIMDLangevin::write_restart(FILE *fp)
 int FixPIMDLangevin::size_restart_global()
 {
   int nsize = 6;
-  if (tstat_flag) nsize += 1 + comm->nprocs * RanMars::FULL_STATE_SIZE;
+  if (tstat_flag) nsize += 1 + comm->nprocs * RanMars::STATE_SIZE;
 
   return nsize;
 }
@@ -2270,19 +2259,45 @@ int FixPIMDLangevin::pack_restart_data(double *list)
 
 /* ---------------------------------------------------------------------- */
 
-void FixPIMDLangevin::restart(char *buf)
+void FixPIMDLangevin::restart(char *buf, int nbytes)
 {
-  int n = 0;
-  auto *list = (double *) buf;
-  for (int i = 0; i < 6; i++) vw[i] = list[n++];
+  constexpr int barostat_size = 6;
+  if (nbytes < barostat_size * static_cast<int>(sizeof(double)) || nbytes % sizeof(double) != 0)
+    error->all(FLERR, "Invalid fix pimd/langevin restart data size");
+
+  auto *list = reinterpret_cast<double *>(buf);
+  for (int i = 0; i < barostat_size; i++) vw[i] = list[i];
+
+  // Older LAMMPS versions stored only the barostat state.
+  const int nvalues = nbytes / sizeof(double);
+  if (nvalues == barostat_size) {
+    if (tstat_flag && comm->me == 0)
+      error->warning(FLERR, "Legacy fix pimd/langevin restart has no PILE_L RNG state");
+    return;
+  }
+
+  const double stored_nprocs = list[barostat_size];
+  const int available = nvalues - barostat_size - 1;
+  if (!std::isfinite(stored_nprocs) || stored_nprocs < 1 ||
+      stored_nprocs > available / RanMars::STATE_SIZE || stored_nprocs != std::floor(stored_nprocs))
+    error->all(FLERR, "Invalid fix pimd/langevin restart RNG count");
+  const int restart_nprocs = static_cast<int>(stored_nprocs);
+  if (available != restart_nprocs * RanMars::STATE_SIZE)
+    error->all(FLERR, "Invalid fix pimd/langevin restart RNG data size");
 
   if (tstat_flag) {
-    int restart_nprocs = (int) list[n++];
     if (restart_nprocs != comm->nprocs) {
       if (comm->me == 0)
         error->warning(FLERR, "Different number of procs. Cannot restore PILE_L RNG state.");
-    } else
-      random->set_full_state(list + n + comm->me * RanMars::FULL_STATE_SIZE);
+    } else {
+      double state[RanMars::STATE_SIZE];
+      const double *saved = list + barostat_size + 1 + comm->me * RanMars::STATE_SIZE;
+      std::copy(saved, saved + RanMars::STATE_SIZE, state);
+      // The development implementation used the same 105-value layout with
+      // an unused zero in the marker slot. It also stored the Gaussian cache.
+      state[0] = -1.0;
+      random->set_state(state);
+    }
   }
 }
 

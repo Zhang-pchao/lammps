@@ -271,6 +271,21 @@ CMake build
                                       # no local OpenCL headers/libs needed
                                       # value = yes (default) or no
 
+Two preset files in the ``cmake/presets`` folder can simplify the
+configuration.  The ``gpu-cuda.cmake`` preset enables the GPU package
+with the CUDA back end and mixed precision.  The ``gpu-packages.cmake``
+preset enables all packages that contain styles with GPU package
+support.  It does not enable the GPU package itself, so it needs to be
+combined with ``gpu-cuda.cmake`` or explicit settings, for example:
+
+.. code-block:: bash
+
+   cmake -S cmake -B build -C cmake/presets/gcc.cmake \
+         -C cmake/presets/gpu-cuda.cmake -C cmake/presets/gpu-packages.cmake
+
+   cmake -S cmake -B build -C cmake/presets/gcc.cmake \
+         -D PKG_GPU=on -D GPU_API=opencl -C cmake/presets/gpu-packages.cmake
+
 The GPU package supports 3 precision modes: single, double, and mixed, with
 the latter being the default.  In the double precision mode, atom positions,
 forces and energies are stored, computed and accumulated in double precision.
@@ -389,6 +404,16 @@ is built with ``-D BUILD_OMP=on`` this will also be enabled.
    matching ``omp.h`` can be found automatically, you may need to add the
    directory containing it yourself, for example with
    ``-D CMAKE_CXX_FLAGS=-idirafter/usr/lib/clang/<version>/include``.
+
+The ``hip_amd.cmake`` preset in the ``cmake/presets`` folder selects
+``hipcc`` as the C and C++ compiler with support for MPI and for OpenMP
+using the LLVM OpenMP runtime.  It can be combined with the GPU package
+settings, for example:
+
+.. code-block:: bash
+
+   cmake -S cmake -B build -C cmake/presets/hip_amd.cmake \
+         -D PKG_GPU=on -D GPU_API=hip -D GPU_ARCH=gfx90a
 
 For a debug build, set ``GPU_DEBUG`` to be ``yes``.
 
@@ -901,6 +926,22 @@ This list was last updated for version 5.2.1 of the Kokkos library.
       others, but it is not possible to combine multiple GPU
       acceleration settings (CUDA, HIP, SYCL) into a single executable.
 
+      The ``kokkos-packages.cmake`` preset enables all packages that
+      contain styles with KOKKOS support.  It does not enable the KOKKOS
+      package itself or select a back end, so it needs to be combined
+      with one of the presets listed above, for example:
+
+      .. code-block:: bash
+
+         cmake -S cmake -B build-kokkos -C cmake/presets/gcc.cmake \
+               -C cmake/presets/kokkos-openmp.cmake \
+               -C cmake/presets/kokkos-packages.cmake
+
+      The ML-IAP package also contains styles with KOKKOS support, but
+      those require ``KOKKOS_PREC=double`` (the default), so the package
+      is not included in the preset.  You can add ``-D PKG_ML-IAP=on``
+      for double precision builds.
+
    .. tab:: Basic traditional make settings:
 
       .. versionchanged:: 11Feb2026
@@ -975,6 +1016,20 @@ can be one of: ``legacy`` (mostly LayoutRight, default) or ``default``
 speedup on GPUs for some models, but a slowdown for others. LayoutRight
 is always used for positions on GPUs since it has been found to be
 faster, and when compiling exclusively for CPUs.
+
+.. versionadded:: 30Sep2026
+
+The CMake option ``-D KOKKOS_DEBUG_RNG=on`` makes those KOKKOS styles
+that need random numbers (for example :doc:`fix langevin <fix_langevin>`
+or :doc:`fix brownian <fix_brownian>`) use the same random number
+generator as the corresponding plain styles instead of the parallel
+generator of the Kokkos library.  A run on a single MPI process with the
+Serial back end then follows the same trajectory as a run without the
+KOKKOS package, which makes it possible to compare the two directly and
+thus to validate the KOKKOS versions of those styles.  This is a
+validation and debugging aid only: the substitute generator is slower
+and produces the same numbers only when there is no parallelism, so this
+option must not be used for production simulations.
 
 ----------
 
@@ -1336,7 +1391,7 @@ code for the library can be found at:
 
 Instead of including the MBX package directly into LAMMPS, it is also
 possible to skip this step and build the MBX package as a plugin using
-the CMake script files in the ``examples/PACKAGE/mbx/plugin`` folder and
+the CMake script files in the ``examples/PACKAGES/mbx/plugin`` folder and
 then load this plugin at runtime with the :doc:`plugin command
 <plugin>`.
 
@@ -1381,7 +1436,7 @@ at: `https://github.com/ICAMS/lammps-user-pace/ <https://github.com/ICAMS/lammps
 
 Instead of including the ML-PACE package directly into LAMMPS, it
 is also possible to skip this step and build the ML-PACE package as
-a plugin using the CMake script files in the ``examples/PACKAGE/pace/plugin``
+a plugin using the CMake script files in the ``examples/PACKAGES/pace/plugin``
 folder and then load this plugin at runtime with the :doc:`plugin command <plugin>`.
 
 .. tabs::
@@ -1527,7 +1582,7 @@ LAMMPS build.
 
 Instead of including the PLUMED package directly into LAMMPS, it
 is also possible to skip this step and build the PLUMED package as
-a plugin using the CMake script files in the ``examples/PACKAGE/plumed/plugin``
+a plugin using the CMake script files in the ``examples/PACKAGES/plumed/plugin``
 folder and then load this plugin at runtime with the :doc:`plugin command <plugin>`.
 
 .. tabs::
@@ -1789,6 +1844,14 @@ code when using features from the INTEL package.
       .. code-block:: bash
 
          -D INTEL_LRT_MODE=value # value = threads, none, or c++17
+
+      .. versionchanged:: 30Sep2026
+
+      With the LLVM based Intel compilers (``icx`` and ``icpx``), CMake
+      adds the flags ``-xHost`` and ``-qopt-zmm-usage=high`` and compiles
+      the INTEL package sources with ``-fp-model=fast=2``.  The ``-xHost``
+      flag is omitted when a target architecture is already selected in
+      ``CMAKE_CXX_FLAGS``, e.g. when compiling for a different CPU.
 
    .. tab:: Traditional make
 

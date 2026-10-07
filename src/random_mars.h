@@ -20,7 +20,9 @@ namespace LAMMPS_NS {
 
 class RanMars : protected Pointers {
  public:
-  static constexpr int FULL_STATE_SIZE = 105;
+  // number of values stored by get_state(): a layout marker, u[1..97], i97, j97,
+  //   c, cd, cm, and the flag and value of the cached second gaussian number
+  static constexpr int STATE_SIZE = 1 + 97 + 2 + 3 + 2;
 
   RanMars(class LAMMPS *, int);
   ~RanMars() override;
@@ -32,10 +34,12 @@ class RanMars : protected Pointers {
   void select_subset(bigint, int, int *, int *);
   void get_state(double *);
   void set_state(double *);
-  void get_full_state(double *);
-  void set_full_state(double *);
+  static int state_size(const double *);
 
  private:
+  // number of values in states stored before the cached gaussian was included
+  static constexpr int LEGACY_STATE_SIZE = 98 + 2 + 3;
+
   int save;
   double second;
   double *u;

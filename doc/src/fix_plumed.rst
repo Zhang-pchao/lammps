@@ -18,9 +18,9 @@ Syntax
 
        *plumedfile* arg = name of PLUMED input file to use (default: NULL)
        *outfile* arg = name of file on which to write the PLUMED log (default: NULL)
-       *path_integral* arg = *off*, *centroid*, *bead_mean*, or *bead_density* (default: off)
+       *path_integral* arg = *off*, *coordinate_mean*, *cv_mean*, or *bias_mean* (default: off)
        *pimd_fix* arg = ID of the coupled fix pimd/langevin
-       *path_contraction* arg = fixed coordinate contraction in [0,1] for bead_mean (optional)
+       *path_contraction* arg = fixed coordinate contraction in [0,1] for cv_mean (optional)
 
 Examples
 """"""""
@@ -28,9 +28,9 @@ Examples
 .. code-block:: LAMMPS
 
    fix pl all plumed plumedfile plumed.dat outfile p.log
-   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral centroid pimd_fix fpimd
-   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral bead_mean pimd_fix fpimd
-   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral bead_density pimd_fix fpimd
+   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral coordinate_mean pimd_fix fpimd
+   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral cv_mean pimd_fix fpimd
+   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral bias_mean pimd_fix fpimd
 
 Description
 """""""""""
@@ -84,9 +84,8 @@ be specified by the user in the PLUMED input file.
 
 .. versionadded:: TBD
 
-.. versionchanged:: TBD
-   The *centroid*, *bead_mean*, and *bead_density* modes support normal-mode
-   PIMD with NVT, NPH, or NPT and multiple MPI ranks per bead.
+The *coordinate_mean*, *cv_mean*, and *bias_mean* modes support normal-mode
+PIMD with NVT, NPH, or NPT and multiple MPI ranks per bead.
 
 For these path-integral modes, :doc:`fix pimd/langevin <fix_pimd>` uses
 the ring-polymer inverse temperature :math:`\beta/P` with unscaled physical
@@ -102,7 +101,35 @@ reported scalar remains :math:`U_B`.  The PIMD energy estimator accounts
 for this distinction whether or not ``fix_modify energy yes`` includes
 the scalar in the potential energy.
 
-The *path_integral centroid* setting couples PLUMED to the Cartesian coordinate
+Use the averaging operation to distinguish the path bias choices:
+
+.. list-table:: Path bias terminology
+   :header-rows: 1
+   :widths: 22 25 53
+
+   * - Input setting
+     - Descriptive name
+     - Physical path bias
+   * - *coordinate_mean*
+     - Coordinate mean
+     - :math:`B(s(P^{-1}\sum_b\mathbf R_b))`
+   * - *cv_mean*
+     - CV mean
+     - :math:`B(P^{-1}\sum_b s(\mathbf R_b))`, using ``ENSEMBLE``
+   * - *bias_mean*
+     - Bias mean
+     - :math:`P^{-1}\sum_b B(s(\mathbf R_b))`, using one shared field
+
+The original input names *centroid*, *bead_mean*, and *bead_density*
+remain aliases for *coordinate_mean*, *cv_mean*, and *bias_mean*,
+respectively.  Existing inputs keep the same forces, energy, virial,
+and restart behavior.  Use the new names in new input files.
+
+Probability averaging is a separate complete-path construction described
+below: it requires a PLUMED function graph, not an additional
+*path_integral* value.  These averaging operations generally do not commute.
+
+The *path_integral coordinate_mean* setting couples PLUMED to the Cartesian coordinate
 centroid provided by the :doc:`fix pimd/langevin <fix_pimd>` command selected
 with *pimd_fix*.  The PIMD fix must be defined before fix plumed.  One PLUMED
 state is created on partition zero, so there is one bias history rather than an
@@ -130,7 +157,7 @@ reports the physical bias before the PIMD energy correction.  Bead-resolved
 trajectories are still required to reconstruct a bead-defined quantum free
 energy.
 
-The *path_integral bead_mean* setting creates one PLUMED instance on every
+The *path_integral cv_mean* setting creates one PLUMED instance on every
 bead partition and enables PLUMED's multiple-replica communication.  Use the
 PLUMED ``ENSEMBLE`` action to define the arithmetic bead mean of a
 collective variable and apply biases only to that mean.  For example:
@@ -172,7 +199,7 @@ LAMMPS stops with an error if a post-force fix is defined after ``fix
 plumed``; fixes without a post-force callback may still follow it.
 
 The same mode can construct the instantaneous path spread without another
-LAMMPS communication backend.  For a bead-local scalar :math:`s_b`, define
+LAMMPS communication routines.  For a bead-local scalar :math:`s_b`, define
 
 .. math::
 
@@ -220,8 +247,10 @@ centroid with their own correct periodic-coordinate convention.  A literal
 requires an explicit regularization; this example does not enable automatic
 switching between bias modes.
 
+.. versionadded:: TBD
+
 The optional *path_contraction* keyword changes only the coordinates supplied
-to PLUMED in *path_integral bead_mean* mode.  For a fixed parameter
+to PLUMED in *path_integral cv_mean* mode.  For a fixed parameter
 :math:`0 \leq \lambda \leq 1`, define a consistent lifted Cartesian path and
 
 .. math::
@@ -234,7 +263,7 @@ For example, use the same nonlinear CV and ``ENSEMBLE`` graph as for bead mean:
 
 .. code-block:: LAMMPS
 
-   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral bead_mean pimd_fix fpimd path_contraction 0.5
+   fix pl all plumed plumedfile plumed.dat outfile p.log path_integral cv_mean pimd_fix fpimd path_contraction 0.5
 
 .. code-block:: text
 
@@ -243,8 +272,12 @@ For example, use the same nonlinear CV and ``ENSEMBLE`` graph as for bead mean:
    mean: ENSEMBLE ARG=s
    bias: RESTRAINT ARG=mean.s AT=0.5 KAPPA=10
 
-This construction changes the input geometry before the nonlinear CV, rather
-than interpolating endpoint CVs or forces.  The real bead positions, springs,
+This is coordinate contraction followed by CV averaging.  The parameter
+:math:`\lambda` controls the virtual geometry; it is independent of the
+``COUPLING`` parameter in a probability-mixture function.  For a nonlinear
+CV, the intermediate result is generally different from
+:math:`(1-\lambda)s(\mathbf R_c)+\lambda P^{-1}\sum_b s(\mathbf R_b)`.
+The construction does not interpolate endpoint CVs or forces.  The real bead positions, springs,
 physical forces and physical neighbor lists remain unchanged.  The derivative
 of the single scalar potential is pulled back to each real bead:
 
@@ -286,7 +319,7 @@ valid continuation after changing the contraction parameter.  The feature
 itself provides no claim of faster decorrelation, stable adaptive reweighting,
 or improved free-energy accuracy.
 
-The *path_integral bead_density* setting implements a symmetric bias of the
+The *path_integral bias_mean* setting implements a symmetric bias of the
 instantaneous bead density,
 
 .. math::
@@ -322,12 +355,12 @@ deposition normalization.  The native regressions cover fixed biases, a
 matched five-step centroid/bead-density linear-bias dynamics limit,
 ``METAD WALKERS_MPI`` with single- and multi-rank bead partitions, and a
 four-bead ``OPES_METAD WALKERS_MPI`` restart.  They validate one shared HILLS
-stream with :math:`1/P` MetaD hill heights, shared OPES KERNELS and STATE files,
+stream with :math:`1/P` metadynamics hill heights, shared OPES KERNELS and STATE files,
 partition-zero bias ownership, zero-local-atom ranks, and PLUMED file-restart
 continuity.  This is an interface contract, not production admission for OPES
 reweighting, binary-restart dynamics, performance, or sampling efficiency.
 
-The *bead_density* and *bead_mean* modes are different.  The former evaluates
+The *bias_mean* and *cv_mean* modes are different.  The former evaluates
 :math:`P^{-1}\sum_b B(s_b)`, while the latter evaluates
 :math:`B(P^{-1}\sum_b s_b)` through ``ENSEMBLE``.  They are generally unequal
 for nonlinear collective variables or nonlinear biases.
@@ -367,10 +400,10 @@ Note that other quantities of interest can be output by commands that
 are native to PLUMED.
 
 Fixed conditional path functions
--------------------------------
+--------------------------------
 
 A fixed complete-path function combining a Cartesian-centroid CV and a
-bead-averaged score can use the same *bead_mean* adapter when both inputs
+bead-averaged score can use the same *cv_mean* adapter when both inputs
 are constructed correctly in the PLUMED graph.  For example, average
 Cartesian components first with ``ENSEMBLE`` and then apply a nonlinear
 function to form the centroid CV.  Average the bead-local score separately.
@@ -395,17 +428,18 @@ and verify input/model identities before a restart.  Equilibrium reweighting
 uses one total-bias weight per complete path, not one independent weight per
 bead.  The existence of this force graph does not establish sampling gains.
 
-Frozen probability-ratio mixtures
----------------------------------
+Probability mean and frozen mixtures
+------------------------------------
 
-A common frozen field :math:`v(s)` can instead define the total path bias
+A probability mean uses a common frozen field :math:`v(s)` to define the total
+path bias
 
 .. math::
 
    U_A(X)=-k_B T\log\left[\frac{1}{P}\sum_b\exp(-v(s_b)/k_B T)\right].
 
 The optional PLUMED ``PATH_LOGMEANEXP`` action provides a numerically stable
-replica reduction and its bead-local softmax derivative. Use *bead_mean*
+replica reduction and its bead-local softmax derivative. Use *cv_mean*
 for this complete-path graph. Its physical force coefficient already
 contains the normalization; another :math:`1/P` factor is incorrect.
 ``EXPECTED_REPLICAS`` must equal the number of bead partitions, not the
@@ -413,7 +447,7 @@ number of spatial MPI ranks. The native normalization tests include pure,
 centroid-only and mixed frozen graphs using ordinary PLUMED functions.
 
 For a frozen active OPES action, apply :math:`U_A-v(s_b)` as a correction
-so that the original local bias force and energy are cancelled. Applying
+so that the original local bias force and energy are canceled. Applying
 both the full :math:`U_A` and the local OPES bias would double count the
 field. Verify immutable state identity and native update suppression;
 current shared-density OPES deposition weights do not implement adaptive
@@ -431,18 +465,18 @@ LAMMPS was built with that package.  See the :doc:`Build package
 
 There can only be one fix plumed command active at a time.
 
-The *centroid*, *bead_mean*, and *bead_density* modes require
+The *coordinate_mean*, *cv_mean*, and *bias_mean* modes require
 :doc:`fix pimd/langevin <fix_pimd>` with either *method pimd* and *ensemble
 nvt*, or *method nmpimd* and *ensemble nvt*, *nph*, or *npt*.  Normal-mode
 pressure ensembles use the BZP barostat supported by fix pimd/langevin;
 normal-mode NVE and Cartesian-PIMD pressure coupling are not supported.  All
 three modes require a fixed atom count, consecutive atom IDs, and an atom map,
-and can distribute each bead over multiple MPI ranks.  The *bead_mean* and
-*bead_density* modes additionally require multiple LAMMPS partitions.  A
-*bead_mean* input must explicitly form a complete-path bias with
+and can distribute each bead over multiple MPI ranks.  The *cv_mean* and
+*bias_mean* modes additionally require multiple LAMMPS partitions.  A
+*cv_mean* input must explicitly form a complete-path bias with
 ``ENSEMBLE`` or another differentiated replica reduction such as
 ``PATH_LOGMEANEXP``.  A
-history-dependent *bead_density* input must use one shared bias field and scale
+history-dependent *bias_mean* input must use one shared bias field and scale
 each bead's deposition by :math:`1/P`.  None of the path-integral modes
 supports energy-dependent PLUMED actions, minimization, or r-RESPA.
 The default *path_integral off* setting remains incompatible with path-integral

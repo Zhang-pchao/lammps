@@ -25,6 +25,14 @@
 
 using namespace LAMMPS_NS;
 
+namespace {
+constexpr int TAG_RING_PENDING_COUNT = 400;
+constexpr int TAG_RING_FOUND_COUNT = 401;
+constexpr int TAG_RING_PENDING = 402;
+constexpr int TAG_RING_FOUND_TAGS = 403;
+constexpr int TAG_RING_FOUND_VALUES = 404;
+}    // namespace
+
 /* ----------------------------------------------------------------------
    check per-atom type and group consistency across all partitions
 ------------------------------------------------------------------------- */
@@ -94,62 +102,78 @@ void PIMDUtils::collect_atom_vectors(LAMMPS *lmp, const char *style,
 
   const int me = comm->me;
   const int nprocs = comm->nprocs;
+  const int next = (me + 1) % nprocs;
+  const int prev = (me - 1 + nprocs) % nprocs;
   const int nlocal = atom->nlocal;
 
-  int too_many = (requested_tags.size() >= static_cast<std::size_t>(MAXSMALLINT)) ? 1 : 0;
+  int too_many = requested_tags.size() > static_cast<std::size_t>(MAXSMALLINT / 3);
   MPI_Allreduce(MPI_IN_PLACE, &too_many, 1, MPI_INT, MPI_MAX, lmp->world);
-  if (too_many)
-    lmp->error->all(FLERR, "Fix {} atom vector collection supports fewer than {} requests", style,
-                    MAXSMALLINT);
+  if (too_many) lmp->error->all(FLERR, "Fix {} has too many atom vector requests", style);
 
-  const int nrequested = static_cast<int>(requested_tags.size());
-  std::vector<int> counts(nprocs), displacements(nprocs);
-  MPI_Allgather(&nrequested, 1, MPI_INT, counts.data(), 1, MPI_INT, lmp->world);
-  std::size_t total_requested_size = 0;
-  for (int rank = 0; rank < nprocs; rank++) {
-    displacements[rank] = static_cast<int>(total_requested_size);
-    total_requested_size += counts[rank];
-    if (total_requested_size >= static_cast<std::size_t>(MAXSMALLINT))
-      lmp->error->all(FLERR, "Fix {} atom vector collection supports fewer than {} requests", style,
-                      MAXSMALLINT);
-  }
-  const int total_requested = static_cast<int>(total_requested_size);
+  std::vector<tagint> pending(requested_tags);
+  std::vector<tagint> found_tags;
+  std::vector<double> found_values;
+  found_tags.reserve(pending.size());
+  found_values.reserve(3 * pending.size());
 
-  std::vector<tagint> all_tags(total_requested);
-  MPI_Allgatherv(requested_tags.data(), nrequested, MPI_LMP_TAGINT, all_tags.data(), counts.data(),
-                 displacements.data(), MPI_LMP_TAGINT, lmp->world);
+  for (int hop = 0; hop < nprocs; hop++) {
+    const int send_pending = static_cast<int>(pending.size());
+    const int send_found = static_cast<int>(found_tags.size());
+    int recv_pending, recv_found;
 
-  std::vector<int> owners(total_requested, 0);
-  std::vector<double> all_values(3 * static_cast<std::size_t>(total_requested), 0.0);
-  for (int i = 0; i < total_requested; i++) {
-    const int index = atom->map(all_tags[i]);
-    if (index >= 0 && index < nlocal) {
-      owners[i] = 1;
-      all_values[3 * i] = source[index][0];
-      all_values[3 * i + 1] = source[index][1];
-      all_values[3 * i + 2] = source[index][2];
+    MPI_Sendrecv(&send_pending, 1, MPI_INT, next, TAG_RING_PENDING_COUNT, &recv_pending, 1, MPI_INT,
+                 prev, TAG_RING_PENDING_COUNT, lmp->world, MPI_STATUS_IGNORE);
+    MPI_Sendrecv(&send_found, 1, MPI_INT, next, TAG_RING_FOUND_COUNT, &recv_found, 1, MPI_INT, prev,
+                 TAG_RING_FOUND_COUNT, lmp->world, MPI_STATUS_IGNORE);
+
+    std::vector<tagint> incoming_pending(recv_pending);
+    std::vector<tagint> incoming_found_tags(recv_found);
+    std::vector<double> incoming_found_values(3 * static_cast<std::size_t>(recv_found));
+
+    MPI_Sendrecv(pending.data(), send_pending, MPI_LMP_TAGINT, next, TAG_RING_PENDING,
+                 incoming_pending.data(), recv_pending, MPI_LMP_TAGINT, prev, TAG_RING_PENDING,
+                 lmp->world, MPI_STATUS_IGNORE);
+    MPI_Sendrecv(found_tags.data(), send_found, MPI_LMP_TAGINT, next, TAG_RING_FOUND_TAGS,
+                 incoming_found_tags.data(), recv_found, MPI_LMP_TAGINT, prev, TAG_RING_FOUND_TAGS,
+                 lmp->world, MPI_STATUS_IGNORE);
+    MPI_Sendrecv(found_values.data(), 3 * send_found, MPI_DOUBLE, next, TAG_RING_FOUND_VALUES,
+                 incoming_found_values.data(), 3 * recv_found, MPI_DOUBLE, prev,
+                 TAG_RING_FOUND_VALUES, lmp->world, MPI_STATUS_IGNORE);
+
+    std::vector<tagint> still_pending;
+    still_pending.reserve(incoming_pending.size());
+    for (tagint tag : incoming_pending) {
+      const int index = atom->map(tag);
+      if (index >= 0 && index < nlocal) {
+        incoming_found_tags.push_back(tag);
+        incoming_found_values.push_back(source[index][0]);
+        incoming_found_values.push_back(source[index][1]);
+        incoming_found_values.push_back(source[index][2]);
+      } else {
+        still_pending.push_back(tag);
+      }
     }
+
+    pending.swap(still_pending);
+    found_tags.swap(incoming_found_tags);
+    found_values.swap(incoming_found_values);
   }
 
-  MPI_Allreduce(MPI_IN_PLACE, owners.data(), total_requested, MPI_INT, MPI_SUM, lmp->world);
-  for (std::size_t offset = 0; offset < all_values.size();) {
-    const int count = static_cast<int>(
-        std::min(all_values.size() - offset, static_cast<std::size_t>(MAXSMALLINT)));
-    MPI_Allreduce(MPI_IN_PLACE, all_values.data() + offset, count, MPI_DOUBLE, MPI_SUM, lmp->world);
-    offset += count;
-  }
+  if (!pending.empty())
+    lmp->error->universe_one(FLERR,
+                             fmt::format("Fix {} could not find atom ID {} in partition {}", style,
+                                         pending[0], universe->iworld));
 
   requested_values.resize(3 * requested_tags.size());
-  const int first = displacements[me];
-  for (int i = 0; i < nrequested; i++) {
-    const int index = first + i;
-    if (owners[index] != 1)
+  for (std::size_t i = 0; i < requested_tags.size(); i++) {
+    const auto iter = std::find(found_tags.begin(), found_tags.end(), requested_tags[i]);
+    if (iter == found_tags.end())
       lmp->error->universe_one(FLERR,
-                               fmt::format("Fix {} found {} owners for atom ID {} in partition {}",
-                                           style, owners[index], requested_tags[i],
-                                           universe->iworld));
-    requested_values[3 * i] = all_values[3 * index];
-    requested_values[3 * i + 1] = all_values[3 * index + 1];
-    requested_values[3 * i + 2] = all_values[3 * index + 2];
+                               fmt::format("Fix {} could not collect atom ID {} in partition {}",
+                                           style, requested_tags[i], universe->iworld));
+    const std::size_t index = std::distance(found_tags.begin(), iter);
+    requested_values[3 * i] = found_values[3 * index];
+    requested_values[3 * i + 1] = found_values[3 * index + 1];
+    requested_values[3 * i + 2] = found_values[3 * index + 2];
   }
 }

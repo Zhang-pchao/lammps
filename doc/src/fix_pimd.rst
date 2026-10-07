@@ -578,6 +578,26 @@ The barostat velocity components are "intensive".  The barostat kinetic
 and potential energies, cell Jacobian, and extended-system enthalpy are
 "extensive".
 
+When coupled to :doc:`fix plumed <fix_plumed>`, the virial and
+centroid-virial kinetic estimators (entries 6 and 7) use the Cartesian
+physical forces evaluated before the PLUMED bias is added.  They are
+physical-target observables; recovering their unbiased averages from a
+biased trajectory still requires the appropriate reweighting.  The
+pressure and extended-energy diagnostics include the bias contribution.
+These diagnostics must not be substituted for physical-target observables.
+
+For example, the centroid-virial kinetic estimator uses the original
+bead positions and physical forces:
+
+.. math::
+
+   K_{\rm CV}^{\rm phys} = \frac{3N}{2\beta}
+       - \frac{1}{2P}\sum_b (\mathbf R_b-\mathbf R_c)
+                          \cdot\mathbf F_b^{\rm phys}.
+
+Virtual coordinates supplied by *path_contraction* do not replace the
+original beads in this expression.
+
 Fix *pimd/langevin/bosonic* computes a global 6-vector. The quantities
 in the global vector are:
 
@@ -632,6 +652,13 @@ processes and atoms. They must also assign the same atom type to every
 atom ID and use the same per-type atom masses, simulation cell geometry,
 and boundary settings.  Atom styles with per-atom masses, such as
 :doc:`sphere <atom_style>`, are not supported.
+
+.. versionchanged:: 30Sep2026
+
+Fixes *pimd/nvt* and *pimd/nvt/bosonic* require at least two beads,
+i.e. running with the :doc:`-partition <Run_options>` command-line
+switch, and stop with an error otherwise.  A ring polymer of a single
+bead has no neighboring beads to couple to.
 
 Only some combinations of fix styles and their options support
 partitions with multiple processors.  LAMMPS will stop with an error if

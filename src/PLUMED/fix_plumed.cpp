@@ -98,11 +98,10 @@ const char *plumed_trace_field_name(int field)
 
 FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     Fix(lmp, narg, arg), path_contraction_flag(0), path_contraction(1.0), p(nullptr),
-    pimd_fix(nullptr), nlocal(-1), natoms(0),
-    path_integral_mode(PATH_INTEGRAL_OFF), plumed_active(1), centroid_force_scale(0.0),
-    bead_density_force_scale(0.0), gatindex(nullptr), masses(nullptr), charges(nullptr),
-    centroid_coordinates(nullptr), centroid_positions(nullptr), centroid_forces(nullptr),
-    centroid_forces_all(nullptr), centroid_virial_pending(nullptr),
+    pimd_fix(nullptr), nlocal(-1), natoms(0), path_integral_mode(PATH_INTEGRAL_OFF),
+    plumed_active(1), centroid_force_scale(0.0), bead_density_force_scale(0.0), gatindex(nullptr),
+    masses(nullptr), charges(nullptr), centroid_coordinates(nullptr), centroid_positions(nullptr),
+    centroid_forces(nullptr), centroid_forces_all(nullptr), centroid_virial_pending(nullptr),
     bead_bias_virial_pending(nullptr), forces_before_plumed(nullptr), nlevels_respa(0), bias(0.0),
     c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0), id_pe(nullptr), id_press(nullptr),
     nonfinite_trace_prefix(nullptr), id_pimd(nullptr)
@@ -126,12 +125,13 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     } else if (strcmp(arg[i], "path_integral") == 0) {
       if (strcmp(arg[i + 1], "off") == 0)
         path_integral_mode = PATH_INTEGRAL_OFF;
-      else if (strcmp(arg[i + 1], "centroid") == 0)
-        path_integral_mode = PATH_INTEGRAL_CENTROID;
-      else if (strcmp(arg[i + 1], "bead_mean") == 0)
-        path_integral_mode = PATH_INTEGRAL_BEAD_MEAN;
-      else if (strcmp(arg[i + 1], "bead_density") == 0)
-        path_integral_mode = PATH_INTEGRAL_BEAD_DENSITY;
+      else if ((strcmp(arg[i + 1], "coordinate_mean") == 0) ||
+               (strcmp(arg[i + 1], "centroid") == 0))
+        path_integral_mode = PATH_INTEGRAL_COORDINATE_MEAN;
+      else if ((strcmp(arg[i + 1], "cv_mean") == 0) || (strcmp(arg[i + 1], "bead_mean") == 0))
+        path_integral_mode = PATH_INTEGRAL_CV_MEAN;
+      else if ((strcmp(arg[i + 1], "bias_mean") == 0) || (strcmp(arg[i + 1], "bead_density") == 0))
+        path_integral_mode = PATH_INTEGRAL_BIAS_MEAN;
       else
         error->all(FLERR, "Unknown fix plumed path_integral value: {}", arg[i + 1]);
     } else if (strcmp(arg[i], "path_contraction") == 0) {
@@ -156,10 +156,10 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
   if (path_integral_mode == PATH_INTEGRAL_OFF && id_pimd != nullptr)
     error->all(FLERR, "Fix plumed pimd_fix requires a path_integral mode");
 
-  if (path_contraction_flag && path_integral_mode != PATH_INTEGRAL_BEAD_MEAN)
-    error->all(FLERR, "Fix plumed path_contraction requires path_integral bead_mean");
+  if (path_contraction_flag && path_integral_mode != PATH_INTEGRAL_CV_MEAN)
+    error->all(FLERR, "Fix plumed path_contraction requires path_integral cv_mean");
 
-  plumed_active = (path_integral_mode != PATH_INTEGRAL_CENTROID) || (universe->iworld == 0);
+  plumed_active = (path_integral_mode != PATH_INTEGRAL_COORDINATE_MEAN) || (universe->iworld == 0);
 
 #if defined(__PLUMED_DEFAULT_KERNEL)
   if (getenv("PLUMED_KERNEL") == nullptr) platform::putenv(plumed_default_kernel);
@@ -176,19 +176,20 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
       error->universe_one(FLERR, fmt::format("Could not initialize PLUMED: {}", exception.what()));
     }
   }
-  if (path_integral_mode == PATH_INTEGRAL_CENTROID)
+  if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN)
     MPI_Bcast(&api_version, 1, MPI_INT, 0, universe->uworld);
   if ((api_version < 5) || (api_version > 11))
-    error->all(FLERR,
-               "Incompatible API version for PLUMED in fix plumed. "
-               "Only Plumed 2.4.x, 2.5.x, 2.6.x, 2.7.x, 2.8.x, 2.9.x, 2.10.x are tested and supported.");
+    error->all(
+        FLERR,
+        "Incompatible API version for PLUMED in fix plumed. "
+        "Only Plumed 2.4.x, 2.5.x, 2.6.x, 2.7.x, 2.8.x, 2.9.x, 2.10.x are tested and supported.");
 
 #if !defined(MPI_STUBS)
   // If the -partition option is activated then enable
   // inter-partition communication
 
   try {
-    if ((plumed_active) && (path_integral_mode != PATH_INTEGRAL_CENTROID) &&
+    if ((plumed_active) && (path_integral_mode != PATH_INTEGRAL_COORDINATE_MEAN) &&
         (universe->existflag == 1)) {
       MPI_Comm inter_comm;
 
@@ -293,7 +294,7 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
   if (plumed_active) {
     try {
       if (outfile) {
-        if ((path_integral_mode != PATH_INTEGRAL_CENTROID) && (universe->existflag == 1))
+        if ((path_integral_mode != PATH_INTEGRAL_COORDINATE_MEAN) && (universe->existflag == 1))
           p->cmd("setLogFile", fmt::format("{}.{}", outfile, universe->iworld).c_str());
         else
           p->cmd("setLogFile", outfile);
@@ -315,7 +316,7 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
 
   // Define compute to calculate potential energy
 
-  if (path_integral_mode != PATH_INTEGRAL_CENTROID) {
+  if (path_integral_mode != PATH_INTEGRAL_COORDINATE_MEAN) {
     delete[] id_pe;
     id_pe = utils::strdup("plmd_pe");
     c_pe = modify->add_compute(std::string(id_pe) + " all pe");
@@ -439,8 +440,7 @@ void FixPlumed::init()
     int unsupported = !pimd_fix->extract("nvt_unwrapped_coordinates", dim) || dim != 2 ||
         domain->box_change;
     MPI_Allreduce(MPI_IN_PLACE, &unsupported, 1, MPI_INT, MPI_MAX, universe->uworld);
-    if (unsupported)
-      error->all(FLERR, "Fix plumed path_contraction requires fixed-cell NVT PIMD");
+    if (unsupported) error->all(FLERR, "Fix plumed path_contraction requires fixed-cell NVT PIMD");
     if (natoms > MAXSMALLINT / 3)
       error->all(FLERR, "Too many atoms for fix plumed path_contraction");
   }
@@ -451,7 +451,7 @@ void FixPlumed::init()
 
     int dim = -1;
     double *force_scale = nullptr;
-    if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+    if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN) {
       force_scale = static_cast<double *>(pimd_fix->extract("centroid_bias_force_scale", dim));
       if (!force_scale) {
         force_scale =
@@ -476,10 +476,11 @@ void FixPlumed::init()
       }
     }
     if (!force_scale || dim != 0) {
-      if (path_integral_mode == PATH_INTEGRAL_CENTROID)
-        error->all(FLERR,
-                   "Fix plumed path_integral centroid requires method pimd with ensemble nvt or "
-                   "method nmpimd with ensemble nvt, nph, or npt");
+      if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN)
+        error->all(
+            FLERR,
+            "Fix plumed path_integral coordinate_mean requires method pimd with ensemble nvt or "
+            "method nmpimd with ensemble nvt, nph, or npt");
       error->all(FLERR,
                  "Fix plumed path_integral bead modes require method pimd with ensemble nvt or "
                  "method nmpimd with ensemble nvt, nph, or npt");
@@ -489,11 +490,11 @@ void FixPlumed::init()
       error->all(FLERR, "Fix plumed could not determine the PIMD bead count");
     check_normal_mode_post_force_order();
 
-    if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN ||
-        path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
+    if (path_integral_mode == PATH_INTEGRAL_CV_MEAN ||
+        path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) {
       if (universe->existflag == 0 || universe->nworlds < 2)
         error->all(FLERR, "Fix plumed path_integral bead modes require multiple partitions");
-      if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) bead_density_force_scale = *force_scale;
+      if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) bead_density_force_scale = *force_scale;
     } else {
       // The integrator samples H_ring at beta/P. A physical bias B therefore
       // enters the dynamical Hamiltonian as P*B; retain B as the reported bias.
@@ -590,8 +591,8 @@ void FixPlumed::update_atom_data()
     gatindex = new int[local_capacity];
     masses = new double[local_capacity];
     charges = new double[local_capacity];
-    forces_before_plumed = (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ||
-                            path_integral_mode == PATH_INTEGRAL_BEAD_MEAN)
+    forces_before_plumed = (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN ||
+                            path_integral_mode == PATH_INTEGRAL_CV_MEAN)
         ? new double[nlocal > 0 ? 3 * nlocal : 1]
         : nullptr;
     update_gatindex = 1;
@@ -652,8 +653,7 @@ void FixPlumed::trace_nonfinite_state(const char *stage, const double *force_bef
       local.value = box[i];
     }
   }
-  if (!local.found && (!(domain->xprd > 0.0) || !(domain->yprd > 0.0) ||
-                       !(domain->zprd > 0.0))) {
+  if (!local.found && (!(domain->xprd > 0.0) || !(domain->yprd > 0.0) || !(domain->zprd > 0.0))) {
     local.found = 1;
     local.field = PLUMED_TRACE_BOX;
     if (!(domain->xprd > 0.0)) {
@@ -698,10 +698,9 @@ void FixPlumed::trace_nonfinite_state(const char *stage, const double *force_bef
         if (force_before && !std::isfinite(delta))
           select_atom_field(i, PLUMED_TRACE_FORCE_DELTA, d, delta);
         if (!std::isfinite(atom->f[i][d]))
-          select_atom_field(i,
-                            current_force_is_physical ? PLUMED_TRACE_PHYSICAL_FORCE
-                                                      : PLUMED_TRACE_TOTAL_FORCE,
-                            d, atom->f[i][d]);
+          select_atom_field(
+              i, current_force_is_physical ? PLUMED_TRACE_PHYSICAL_FORCE : PLUMED_TRACE_TOTAL_FORCE,
+              d, atom->f[i][d]);
       }
     }
   }
@@ -711,10 +710,9 @@ void FixPlumed::trace_nonfinite_state(const char *stage, const double *force_bef
       local.position[d] = atom->x[local_index][d];
       local.velocity[d] = atom->v[local_index][d];
       local.physical_force[d] = force_before ? force_before[3 * local_index + d]
-                                              : atom->f[local_index][d];
-      local.force_delta[d] = force_before
-          ? atom->f[local_index][d] - force_before[3 * local_index + d]
-          : 0.0;
+                                             : atom->f[local_index][d];
+      local.force_delta[d] =
+          force_before ? atom->f[local_index][d] - force_before[3 * local_index + d] : 0.0;
       local.total_force[d] = atom->f[local_index][d];
     }
   }
@@ -759,10 +757,9 @@ void FixPlumed::trace_nonfinite_state(const char *stage, const double *force_bef
   }
 
   if (!winner) return;
-  const std::string path = fmt::format("{}.plumed.step{}.u{}.w{}.r{}.txt",
-                                       nonfinite_trace_prefix, update->ntimestep,
-                                       winner->universe_rank, winner->bead_world,
-                                       winner->world_rank);
+  const std::string path =
+      fmt::format("{}.plumed.step{}.u{}.w{}.r{}.txt", nonfinite_trace_prefix, update->ntimestep,
+                  winner->universe_rank, winner->bead_world, winner->world_rank);
   if (universe->me == winner->universe_rank) {
     const std::string report = fmt::format(
         "schema=plumed-nonfinite-trace-v1\nstep={}\nstage={}\nuniverse_rank={}\n"
@@ -772,26 +769,25 @@ void FixPlumed::trace_nonfinite_state(const char *stage, const double *force_bef
         "plumed_force_delta={:.17g} {:.17g} {:.17g}\ntotal_force={:.17g} {:.17g} {:.17g}\n"
         "boxlo={:.17g} {:.17g} {:.17g}\nboxhi={:.17g} {:.17g} {:.17g}\n"
         "tilt_xy_xz_yz={:.17g} {:.17g} {:.17g}\n",
-        update->ntimestep, stage, winner->universe_rank, winner->bead_world,
-        winner->world_rank, winner->tag, plumed_trace_field_name(winner->field),
-        winner->component, winner->value, winner->position[0], winner->position[1],
-        winner->position[2], winner->velocity[0], winner->velocity[1], winner->velocity[2],
-        winner->physical_force[0], winner->physical_force[1], winner->physical_force[2],
-        winner->force_delta[0], winner->force_delta[1], winner->force_delta[2],
-        winner->total_force[0], winner->total_force[1], winner->total_force[2], winner->box[0],
-        winner->box[1], winner->box[2], winner->box[3], winner->box[4], winner->box[5],
-        winner->box[6], winner->box[7], winner->box[8]);
+        update->ntimestep, stage, winner->universe_rank, winner->bead_world, winner->world_rank,
+        winner->tag, plumed_trace_field_name(winner->field), winner->component, winner->value,
+        winner->position[0], winner->position[1], winner->position[2], winner->velocity[0],
+        winner->velocity[1], winner->velocity[2], winner->physical_force[0],
+        winner->physical_force[1], winner->physical_force[2], winner->force_delta[0],
+        winner->force_delta[1], winner->force_delta[2], winner->total_force[0],
+        winner->total_force[1], winner->total_force[2], winner->box[0], winner->box[1],
+        winner->box[2], winner->box[3], winner->box[4], winner->box[5], winner->box[6],
+        winner->box[7], winner->box[8]);
     if (FILE *file = std::fopen(path.c_str(), "w")) {
       std::fwrite(report.data(), 1, report.size(), file);
       std::fclose(file);
     }
   }
-  error->all(
-      FLERR,
-      fmt::format("Fix plumed nonfinite trace detected a {} at step {} stage {} on bead {} "
-                  "atom {} component {}; diagnostic {}",
-                  plumed_trace_field_name(winner->field), update->ntimestep, stage,
-                  winner->bead_world, winner->tag, winner->component, path));
+  error->all(FLERR,
+             fmt::format("Fix plumed nonfinite trace detected a {} at step {} stage {} on bead {} "
+                         "atom {} component {}; diagnostic {}",
+                         plumed_trace_field_name(winner->field), update->ntimestep, stage,
+                         winner->bead_world, winner->tag, winner->component, path));
 }
 
 /* ---------------------------------------------------------------------- */
@@ -813,13 +809,13 @@ void FixPlumed::trace_centroid_nonfinite(const char *stage)
         const double position = centroid_positions[3 * i + d];
         const double force = centroid_forces[3 * i + d];
         const int field = !std::isfinite(position) ? PLUMED_TRACE_CENTROID_POSITION
-                                                    : PLUMED_TRACE_CENTROID_FORCE;
+                                                   : PLUMED_TRACE_CENTROID_FORCE;
         const double value = field == PLUMED_TRACE_CENTROID_POSITION ? position : force;
         if ((std::isfinite(position) && std::isfinite(force)) ||
-            (local.found && (tag > local.tag ||
-                             (tag == local.tag &&
-                              (field > local.field ||
-                               (field == local.field && d >= local.component))))))
+            (local.found &&
+             (tag > local.tag ||
+              (tag == local.tag &&
+               (field > local.field || (field == local.field && d >= local.component))))))
           continue;
         local.found = 1;
         local.field = field;
@@ -855,32 +851,29 @@ void FixPlumed::trace_centroid_nonfinite(const char *stage)
   }
   if (!winner) return;
 
-  const std::string path = fmt::format("{}.plumed.step{}.u{}.w{}.r{}.txt",
-                                       nonfinite_trace_prefix, update->ntimestep,
-                                       winner->universe_rank, winner->bead_world,
-                                       winner->world_rank);
+  const std::string path =
+      fmt::format("{}.plumed.step{}.u{}.w{}.r{}.txt", nonfinite_trace_prefix, update->ntimestep,
+                  winner->universe_rank, winner->bead_world, winner->world_rank);
   if (universe->me == winner->universe_rank) {
     const std::string report = fmt::format(
         "schema=plumed-nonfinite-trace-v1\nstep={}\nstage={}\nuniverse_rank={}\n"
         "bead_world={}\nworld_rank={}\natom_tag={}\nfield={}\ncomponent={}\n"
         "value={:.17g}\ncentroid_position={:.17g} {:.17g} {:.17g}\n"
         "centroid_force={:.17g} {:.17g} {:.17g}\n",
-        update->ntimestep, stage, winner->universe_rank, winner->bead_world,
-        winner->world_rank, winner->tag, plumed_trace_field_name(winner->field),
-        winner->component, winner->value, winner->position[0], winner->position[1],
-        winner->position[2], winner->total_force[0], winner->total_force[1],
-        winner->total_force[2]);
+        update->ntimestep, stage, winner->universe_rank, winner->bead_world, winner->world_rank,
+        winner->tag, plumed_trace_field_name(winner->field), winner->component, winner->value,
+        winner->position[0], winner->position[1], winner->position[2], winner->total_force[0],
+        winner->total_force[1], winner->total_force[2]);
     if (FILE *file = std::fopen(path.c_str(), "w")) {
       std::fwrite(report.data(), 1, report.size(), file);
       std::fclose(file);
     }
   }
-  error->all(
-      FLERR,
-      fmt::format("Fix plumed nonfinite trace detected a {} at step {} stage {} on atom {} "
-                  "component {}; diagnostic {}",
-                  plumed_trace_field_name(winner->field), update->ntimestep, stage, winner->tag,
-                  winner->component, path));
+  error->all(FLERR,
+             fmt::format("Fix plumed nonfinite trace detected a {} at step {} stage {} on atom {} "
+                         "component {}; diagnostic {}",
+                         plumed_trace_field_name(winner->field), update->ntimestep, stage,
+                         winner->tag, winner->component, path));
 }
 
 /* ---------------------------------------------------------------------- */
@@ -889,15 +882,14 @@ void FixPlumed::post_force(int /* vflag */)
 {
   trace_nonfinite_state("pre-plumed", nullptr, true);
 
-  if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+  if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN) {
     post_force_centroid();
     return;
   }
 
   update_atom_data();
 
-  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ||
-      path_integral_mode == PATH_INTEGRAL_BEAD_MEAN)
+  if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN || path_integral_mode == PATH_INTEGRAL_CV_MEAN)
     for (int i = 0; i < nlocal; i++)
       for (int d = 0; d < 3; d++) forces_before_plumed[3 * i + d] = atom->f[i][d];
 
@@ -948,8 +940,8 @@ void FixPlumed::post_force(int /* vflag */)
 
   plumedNeedsEnergy = 0;
   p->cmd("isEnergyNeeded", &plumedNeedsEnergy);
-  if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN ||
-      path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
+  if (path_integral_mode == PATH_INTEGRAL_CV_MEAN ||
+      path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) {
     int energy_requests = plumedNeedsEnergy;
     MPI_Allreduce(MPI_IN_PLACE, &energy_requests, 1, MPI_INT, MPI_SUM, universe->uworld);
     if (energy_requests)
@@ -1012,17 +1004,17 @@ void FixPlumed::post_force(int /* vflag */)
   if (path_contraction_flag) pullback_contracted_forces();
   trace_nonfinite_state("post-perform-pre-scale", forces_before_plumed, false);
 
-  if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN ||
-      path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
+  if (path_integral_mode == PATH_INTEGRAL_CV_MEAN ||
+      path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) {
     p->cmd("getBias", &bias);
     MPI_Allreduce(MPI_IN_PLACE, &plumedStopCondition, 1, MPI_INT, MPI_MAX, universe->uworld);
     const double dynamical_scale = universe->nworlds *
-        (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ? bead_density_force_scale : 1.0);
+        (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN ? bead_density_force_scale : 1.0);
     for (int i = 0; i < nlocal; i++)
       for (int d = 0; d < 3; d++)
         atom->f[i][d] = forces_before_plumed[3 * i + d] +
             dynamical_scale * (atom->f[i][d] - forces_before_plumed[3 * i + d]);
-    if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY) {
+    if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) {
       double bead_density_bias = comm->me == 0 ? bias : 0.0;
       MPI_Allreduce(MPI_IN_PLACE, &bead_density_bias, 1, MPI_DOUBLE, MPI_SUM, universe->uworld);
       bias = universe->iworld == 0 ? bead_density_force_scale * bead_density_bias : 0.0;
@@ -1054,9 +1046,9 @@ void FixPlumed::post_force(int /* vflag */)
     virial[4] = -plmd_virial[0][2];
     virial[5] = -plmd_virial[1][2];
   }
-  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY)
+  if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN)
     for (int i = 0; i < 6; i++) virial[i] *= bead_density_force_scale * universe->nworlds;
-  else if (path_integral_mode == PATH_INTEGRAL_BEAD_MEAN)
+  else if (path_integral_mode == PATH_INTEGRAL_CV_MEAN)
     for (int i = 0; i < 6; i++) virial[i] *= universe->nworlds;
   if (bead_bias_virial_pending) *bead_bias_virial_pending = 1;
 
@@ -1076,8 +1068,7 @@ void FixPlumed::prepare_contracted_coordinates()
 {
   int dim = -1;
   auto **real = static_cast<double **>(pimd_fix->extract("nvt_unwrapped_coordinates", dim));
-  if (!real || dim != 2)
-    error->all(FLERR, "Fix plumed cannot access the lifted PIMD coordinates");
+  if (!real || dim != 2) error->all(FLERR, "Fix plumed cannot access the lifted PIMD coordinates");
   contraction_mean.assign(3 * natoms, 0.0);
   const int capacity = nlocal > 0 ? 3 * nlocal : 1;
   contracted_positions.resize(capacity);
@@ -1091,8 +1082,7 @@ void FixPlumed::prepare_contracted_coordinates()
     }
   }
   MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
-  if (invalid)
-    error->all(FLERR, "Non-finite PIMD coordinates for fix plumed path_contraction");
+  if (invalid) error->all(FLERR, "Non-finite PIMD coordinates for fix plumed path_contraction");
   MPI_Allreduce(MPI_IN_PLACE, contraction_mean.data(), 3 * natoms, MPI_DOUBLE, MPI_SUM,
                 universe->uworld);
   for (int i = 0; i < nlocal; ++i) {
@@ -1119,8 +1109,7 @@ void FixPlumed::pullback_contracted_forces()
     }
   }
   MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
-  if (invalid)
-    error->all(FLERR, "Non-finite bias forces for fix plumed path_contraction");
+  if (invalid) error->all(FLERR, "Non-finite bias forces for fix plumed path_contraction");
   MPI_Allreduce(MPI_IN_PLACE, contraction_mean.data(), 3 * natoms, MPI_DOUBLE, MPI_SUM,
                 universe->uworld);
   for (int i = 0; i < nlocal; ++i) {
@@ -1142,7 +1131,7 @@ void FixPlumed::post_force_centroid()
   MPI_Allreduce(MPI_IN_PLACE, &invalid_atom_count, 1, MPI_INT, MPI_SUM, universe->uworld);
   if (invalid_atom_count)
     error->universe_all(
-        FLERR, "Fix plumed path_integral centroid requires a fixed atom count on each bead");
+        FLERR, "Fix plumed path_integral coordinate_mean requires a fixed atom count on each bead");
 
   for (int i = 0; i < 6; i++) virial[i] = 0.0;
   bias = 0.0;
@@ -1191,7 +1180,8 @@ void FixPlumed::post_force_centroid()
   MPI_Bcast(&needs_energy, 1, MPI_INT, 0, universe->uworld);
   if (needs_energy)
     error->universe_all(
-        FLERR, "Fix plumed path_integral centroid does not support energy-dependent actions");
+        FLERR,
+        "Fix plumed path_integral coordinate_mean does not support energy-dependent actions");
 
   if (plumed_active) {
     try {
@@ -1253,18 +1243,18 @@ double FixPlumed::compute_scalar()
 void *FixPlumed::extract(const char *name, int &dim)
 {
   dim = 0;
-  if (strcmp(name, "pimd_physical_bias_energy") == 0 &&
-      path_integral_mode != PATH_INTEGRAL_OFF)
+  if (strcmp(name, "pimd_physical_bias_energy") == 0 && path_integral_mode != PATH_INTEGRAL_OFF)
     return &bias;
   return nullptr;
 }
 
 int FixPlumed::modify_param(int narg, char **arg)
 {
-  if (path_integral_mode == PATH_INTEGRAL_CENTROID &&
+  if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN &&
       (strcmp(arg[0], "pe") == 0 || strcmp(arg[0], "press") == 0))
-    error->all(FLERR,
-               "Fix_modify pe and press are not supported with fix plumed path_integral centroid");
+    error->all(
+        FLERR,
+        "Fix_modify pe and press are not supported with fix plumed path_integral coordinate_mean");
 
   if (strcmp(arg[0], "pe") == 0) {
     if (narg < 2) error->all(FLERR, "Fix_modify pe requires an argument");
@@ -1305,14 +1295,14 @@ int FixPlumed::modify_param(int narg, char **arg)
 double FixPlumed::memory_usage()
 {
   double bytes = double((8 + 8 + 4) * atom->nlocal);
-  if (path_integral_mode == PATH_INTEGRAL_BEAD_DENSITY ||
-      path_integral_mode == PATH_INTEGRAL_BEAD_MEAN)
+  if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN || path_integral_mode == PATH_INTEGRAL_CV_MEAN)
     bytes += double(3 * sizeof(double) * atom->nlocal);
-  if (path_integral_mode == PATH_INTEGRAL_CENTROID) {
+  if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN) {
     bytes += double(3 * sizeof(double) * natoms);
     if (plumed_active) bytes += double(6 * sizeof(double) * natoms);
   }
-  bytes += sizeof(double) * (contracted_positions.capacity() + contracted_forces.capacity() +
-                             contraction_mean.capacity());
+  bytes += sizeof(double) *
+      (contracted_positions.capacity() + contracted_forces.capacity() +
+       contraction_mean.capacity());
   return bytes;
 }

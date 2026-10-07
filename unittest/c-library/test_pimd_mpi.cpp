@@ -1,12 +1,14 @@
 // unit tests for path-integral dynamics through the library interface
 
 #define LAMMPS_LIB_MPI 1
+#include "exceptions.h"
 #include "fix.h"
 #include "lammps.h"
 #include "library.h"
 #include "lmptype.h"
 #include "modify.h"
 #include "platform.h"
+#include "random_mars.h"
 #include "utils.h"
 
 #include <algorithm>
@@ -123,8 +125,7 @@ void add_two_bead_integrator_fix(void *lmp, const std::string &method,
     std::string command = "fix fpimd all pimd/langevin method " + method +
                           " ensemble nvt integrator " + integrator +
                           " thermostat PILE_L 2468 tau 1.0 temp 1.0 fixcom no";
-    if (!nonfinite_trace_prefix.empty())
-        command += " nonfinite_trace " + nonfinite_trace_prefix;
+    if (!nonfinite_trace_prefix.empty()) command += " nonfinite_trace " + nonfinite_trace_prefix;
     lammps_command(lmp, command.c_str());
 }
 
@@ -988,7 +989,6 @@ void check_nvt_global_output_equivalence(Ownership ownership)
     }
 }
 
-
 void expect_nonfinite_trace(const std::string &prefix, bool inject_position_nan)
 {
     void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
@@ -1008,17 +1008,17 @@ void expect_nonfinite_trace(const std::string &prefix, bool inject_position_nan)
     int me;
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     auto *nlocal = (int *)lammps_extract_global(lmp, "nlocal");
-    auto *tags = (tagint *)lammps_extract_atom(lmp, "id");
+    auto *tags   = (tagint *)lammps_extract_atom(lmp, "id");
     ASSERT_NE(nlocal, nullptr);
     ASSERT_NE(tags, nullptr);
 
-    tagint local_tag = std::numeric_limits<tagint>::max();
-    int local_index = -1;
+    tagint local_tag       = std::numeric_limits<tagint>::max();
+    int local_index        = -1;
     const int target_world = inject_position_nan ? 1 : 0;
     if (me / 2 == target_world) {
         for (int i = 0; i < *nlocal; ++i) {
             if (tags[i] < local_tag) {
-                local_tag = tags[i];
+                local_tag   = tags[i];
                 local_index = i;
             }
         }
@@ -1054,9 +1054,10 @@ void expect_nonfinite_trace(const std::string &prefix, bool inject_position_nan)
     EXPECT_NE(std::string(error_message).find("stage initial-entry"), std::string::npos);
     lammps_close(lmp);
 
-    const int world_rank = owner - 2 * target_world;
+    const int world_rank   = owner - 2 * target_world;
     const std::string path = prefix + ".pimd.step1.u" + std::to_string(owner) + ".w" +
-        std::to_string(target_world) + ".r" + std::to_string(world_rank) + ".txt";
+                             std::to_string(target_world) + ".r" + std::to_string(world_rank) +
+                             ".txt";
     MPI_Barrier(MPI_COMM_WORLD);
     if (me == 0) {
         std::ifstream input(path);
@@ -1234,8 +1235,8 @@ TEST(PIMD, multirank_nonfinite_trace_finite_parity)
 
     const auto baseline =
         run_two_bead_integrator_segments(4, 0, false, nullptr, "nmpimd", "baoab", true);
-    const auto traced = run_two_bead_integrator_segments(
-        4, 0, false, nullptr, "nmpimd", "baoab", true, "test_pimd_finite_trace");
+    const auto traced = run_two_bead_integrator_segments(4, 0, false, nullptr, "nmpimd", "baoab",
+                                                         true, "test_pimd_finite_trace");
     for (std::size_t i = 0; i < baseline.size(); ++i)
         EXPECT_DOUBLE_EQ(traced[i], baseline[i]) << i;
 }
@@ -1254,6 +1255,51 @@ TEST(PIMD, multirank_nonfinite_trace_reports_infinite_velocity)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     ASSERT_EQ(nprocs, 4);
     expect_nonfinite_trace("test_pimd_trace_infinite_velocity", false);
+}
+
+TEST(PIMD, multirank_restart_record_sizes)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+    void *handle = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+    ASSERT_NE(handle, nullptr);
+    create_two_bead_test_system(handle, 2, Ownership::DEFAULT);
+    configure_two_bead_dynamics(handle, Ownership::DEFAULT, 2468);
+    auto *lmp = static_cast<LAMMPS_NS::LAMMPS *>(handle);
+    auto *fix = lmp->modify->get_fix_by_id("fpimd");
+    ASSERT_NE(fix, nullptr);
+
+    // The public six-double legacy record must not be read past its end.
+    double legacy[6]{};
+    EXPECT_NO_THROW(fix->restart(reinterpret_cast<char *>(legacy), sizeof(legacy)));
+    EXPECT_THROW(fix->restart(reinterpret_cast<char *>(legacy), sizeof(legacy) - 1),
+                 LAMMPS_NS::LAMMPSException);
+    EXPECT_THROW(fix->restart(reinterpret_cast<char *>(legacy), 0), LAMMPS_NS::LAMMPSException);
+
+    std::array<double, 7 + 2 * LAMMPS_NS::RanMars::STATE_SIZE> state{};
+    state[6] = 2;
+    {
+        LAMMPS_NS::RanMars random(lmp, 2468);
+        random.gaussian();
+        random.get_state(state.data() + 7);
+        random.get_state(state.data() + 7 + LAMMPS_NS::RanMars::STATE_SIZE);
+    }
+    EXPECT_NO_THROW(fix->restart(reinterpret_cast<char *>(state.data()), sizeof(state)));
+    // The maintained development fork used a zero marker with a full cache.
+    state[7] = state[7 + LAMMPS_NS::RanMars::STATE_SIZE] = 0.0;
+    EXPECT_NO_THROW(fix->restart(reinterpret_cast<char *>(state.data()), sizeof(state)));
+    state[6] = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(fix->restart(reinterpret_cast<char *>(state.data()), sizeof(state)),
+                 LAMMPS_NS::LAMMPSException);
+    state[6] = 1.5;
+    EXPECT_THROW(fix->restart(reinterpret_cast<char *>(state.data()), sizeof(state)),
+                 LAMMPS_NS::LAMMPSException);
+    state[6] = 2;
+    EXPECT_THROW(
+        fix->restart(reinterpret_cast<char *>(state.data()), sizeof(state) - sizeof(double)),
+        LAMMPS_NS::LAMMPSException);
+    lammps_close(handle);
 }
 
 TEST(PIMD, multirank_nvt_restart_restores_rng)
@@ -2061,15 +2107,14 @@ TEST(PIMD, multirank_nvt_singular_parameter_rejection)
     }
 }
 
-
 TEST(PIMD, multirank_per_atom_mass_rejection)
 {
     int nprocs;
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     ASSERT_EQ(nprocs, 4);
 
-    for (const char *style : {"pimd/langevin", "pimd/langevin/bosonic", "pimd/nvt",
-                              "pimd/nvt/bosonic"}) {
+    for (const char *style :
+         {"pimd/langevin", "pimd/langevin/bosonic", "pimd/nvt", "pimd/nvt/bosonic"}) {
         SCOPED_TRACE(style);
         auto *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
         lammps_command(lmp, "units real");
@@ -2080,15 +2125,15 @@ TEST(PIMD, multirank_per_atom_mass_rejection)
         lammps_command(lmp, "create_atoms 1 single 4 4 4 units box");
         lammps_set_show_error(lmp, 0);
         std::string command = "fix fpimd all " + std::string(style);
-        if (std::string(style).find("langevin") != std::string::npos)
-            command += " ensemble nve";
+        if (std::string(style).find("langevin") != std::string::npos) command += " ensemble nve";
         lammps_command(lmp, command.c_str());
         const int has_error = lammps_has_error(lmp);
         EXPECT_EQ(has_error, 1);
         if (has_error) {
             char message[512];
             lammps_get_last_error_message(lmp, message, sizeof(message));
-            EXPECT_NE(std::string(message).find("requires per-type atom masses"), std::string::npos);
+            EXPECT_NE(std::string(message).find("requires per-type atom masses"),
+                      std::string::npos);
         }
         lammps_close(lmp);
     }
@@ -2105,7 +2150,8 @@ TEST(PIMD, multirank_inactive_barostat_restart_state)
         auto *handle = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
         create_two_bead_test_system(handle, 2, Ownership::DEFAULT);
         const std::string command = "fix fpimd all pimd/langevin ensemble " +
-            std::string(ensemble) + " thermostat PILE_L 2468 temp 1.0 fixcom no";
+                                    std::string(ensemble) +
+                                    " thermostat PILE_L 2468 temp 1.0 fixcom no";
         lammps_command(handle, command.c_str());
         lammps_command(handle, "run 0 post no");
         ASSERT_EQ(lammps_has_error(handle), 0);
@@ -2113,8 +2159,8 @@ TEST(PIMD, multirank_inactive_barostat_restart_state)
         auto *fix = lmp->modify->get_fix_by_id("fpimd");
         ASSERT_NE(fix, nullptr);
         const int root = lammps_extract_setting(handle, "world_rank") == 0;
-        FILE *file = root ? std::tmpfile() : nullptr;
-        int file_ok = !root || file != nullptr;
+        FILE *file     = root ? std::tmpfile() : nullptr;
+        int file_ok    = !root || file != nullptr;
         MPI_Allreduce(MPI_IN_PLACE, &file_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
         if (!file_ok) {
             if (file) std::fclose(file);
@@ -2130,9 +2176,26 @@ TEST(PIMD, multirank_inactive_barostat_restart_state)
             EXPECT_GE(bytes, int(sizeof(barostat)));
             EXPECT_EQ(std::fread(barostat.data(), sizeof(double), barostat.size(), file),
                       barostat.size());
-            for (double value : barostat) EXPECT_DOUBLE_EQ(value, 0.0);
+            for (double value : barostat)
+                EXPECT_DOUBLE_EQ(value, 0.0);
             std::fclose(file);
         }
         lammps_close(handle);
     }
+}
+
+// Exercise the per-run initialization lifetime under a memory checker.
+TEST(PIMD, multirank_repeated_run_initialization)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+    auto *handle = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+    create_two_bead_test_system(handle, 2, Ownership::DEFAULT);
+    configure_two_bead_dynamics(handle, Ownership::DEFAULT, 2468);
+    for (int i = 0; i < 32; ++i) {
+        lammps_command(handle, "run 0 post no");
+        ASSERT_EQ(lammps_has_error(handle), 0);
+    }
+    lammps_close(handle);
 }

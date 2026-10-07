@@ -1,6 +1,7 @@
 // Physical-bias normalization in the beta/P ring-polymer Hamiltonian.
 
 #define LAMMPS_LIB_MPI 1
+#include "atom.h"
 #include "lammps.h"
 #include "library.h"
 #include "utils.h"
@@ -19,8 +20,10 @@
 
 namespace {
 struct BiasState {
-    double physical_bias   = 0.0;
-    double energy_residual = 0.0;
+    double physical_bias           = 0.0;
+    double energy_residual         = 0.0;
+    double kinetic_virial          = 0.0;
+    double kinetic_centroid_virial = 0.0;
     std::array<double, 6> force{};
 };
 
@@ -53,10 +56,14 @@ BiasState evaluate(const char *mode, int beads, int displaced_bead, double displ
                 << "vc: CUSTOM ARG=mean.dx.x FUNC=0.7*x*x PERIODIC=NO\n";
             const std::string name(mode);
             if (name == "probability_mixed")
-                out << "energy: CUSTOM ARG=vc,va FUNC=-log(0.5*exp(-x)+0.5*exp(-y-0.2)) PERIODIC=NO\n";
+                out << "energy: CUSTOM ARG=vc,va FUNC=-log(0.5*exp(-x)+0.5*exp(-y-0.2)) "
+                       "PERIODIC=NO\n";
             if (biased)
-                out << "b: BIASVALUE ARG=" << (name == "probability_pure" ? "va" :
-                                              name == "probability_zero" ? "vc" : "energy") << "\n";
+                out << "b: BIASVALUE ARG="
+                    << (name == "probability_pure"   ? "va"
+                        : name == "probability_zero" ? "vc"
+                                                     : "energy")
+                    << "\n";
         } else if (conditional) {
             // Build the nonlinear CV after averaging Cartesian components.
             // The existing adapter owns all bead factors and normal-mode transforms.
@@ -112,7 +119,28 @@ BiasState evaluate(const char *mode, int beads, int displaced_bead, double displ
     command("run 0 post no");
 
     BiasState result;
-    lammps_gather_atoms(lmp, "f", 1, 3, result.force.data());
+    for (int index : {5, 6}) {
+        auto *value = static_cast<double *>(
+            lammps_extract_fix(lmp, "fpimd", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, index, 0));
+        EXPECT_NE(value, nullptr);
+        if (value) {
+            if (index == 5)
+                result.kinetic_virial = *value;
+            else
+                result.kinetic_centroid_virial = *value;
+            lammps_free(value);
+        }
+    }
+    // The legacy gather_atoms API rejects BIGBIG. Gather owned values using
+    // the native tag type instead of narrowing atom IDs to int.
+    std::array<double, 6> local_force{};
+    for (int i = 0; i < lmp->atom->nlocal; ++i) {
+        const auto tag = lmp->atom->tag[i];
+        if (tag >= 1 && tag <= 2)
+            for (int d = 0; d < 3; ++d)
+                local_force[3 * (tag - 1) + d] = lmp->atom->f[i][d];
+    }
+    MPI_Allreduce(local_force.data(), result.force.data(), 6, MPI_DOUBLE, MPI_SUM, lmp->world);
     auto *energy = static_cast<double *>(
         lammps_extract_fix(lmp, "bias", LMP_STYLE_GLOBAL, LMP_TYPE_SCALAR, 0, 0));
     EXPECT_NE(energy, nullptr);
@@ -211,9 +239,10 @@ void check_physical_bias(bool normal_modes)
                     ratio += std::exp(-0.4 * x * x - 0.2 * std::pow(x, 4)) / beads;
                 }
                 const double vc = 0.7 * mean_distance * mean_distance;
-                expected_bias = std::string(mode) == "probability_pure" ? -std::log(ratio) :
-                                std::string(mode) == "probability_zero" ? vc :
-                                -std::log(0.5 * std::exp(-vc) + 0.5 * ratio * std::exp(-0.2));
+                expected_bias   = std::string(mode) == "probability_pure" ? -std::log(ratio)
+                                  : std::string(mode) == "probability_zero"
+                                      ? vc
+                                      : -std::log(0.5 * std::exp(-vc) + 0.5 * ratio * std::exp(-0.2));
             }
             EXPECT_NEAR(state.physical_bias, expected_bias, 1.0e-12);
 
@@ -256,4 +285,33 @@ TEST(MPI, plumed_pimd_physical_bias_finite_difference)
 TEST(MPI, plumed_nmpimd_physical_bias_finite_difference)
 {
     check_physical_bias(true);
+}
+
+// Physical-target kinetic observables must use the force of the physical
+// potential, independent of which path function was used to sample it.
+TEST(MPI, plumed_pimd_physical_kinetic_estimators)
+{
+    for (int beads : {2, 4}) {
+        double virial = 0.0, centroid_virial = 0.0;
+        const double centroid_distance = 1.0 + 0.1 * (beads - 1);
+        for (int b = 0; b < beads; ++b) {
+            const double distance = 1.0 + 0.2 * b;
+            const double force =
+                24.0 * 0.05 * (2.0 * std::pow(distance, -13) - std::pow(distance, -7));
+            virial += distance * force;
+            centroid_virial += (distance - centroid_distance) * force;
+        }
+        for (bool normal_modes : {false, true}) {
+            for (const char *mode : {"centroid", "bead_mean", "bead_density"}) {
+                SCOPED_TRACE(std::string(mode) + " P=" + std::to_string(beads) +
+                             " normal_modes=" + std::to_string(normal_modes));
+                for (bool biased : {false, true}) {
+                    const auto state = evaluate(mode, beads, 0, 0.0, biased, normal_modes);
+                    EXPECT_NEAR(state.kinetic_virial, -0.5 * virial / beads, 1.0e-12);
+                    EXPECT_NEAR(state.kinetic_centroid_virial, 3.0 - 0.5 * centroid_virial / beads,
+                                1.0e-12);
+                }
+            }
+        }
+    }
 }

@@ -2,7 +2,7 @@
 ########################################
 # CMake build system
 # This file is part of LAMMPS
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.27)
 ########################################
 # initialize version variables with project command
 if(POLICY CMP0048)
@@ -17,14 +17,23 @@ if(POLICY CMP0075)
   cmake_policy(SET CMP0075 NEW)
 endif()
 # set policy to silence warnings about requiring execute permission for find_program
-# we use OLD because the python-config script for the Fedora MinGW cross-compiler requires it currently
+# as of Oct 2nd 2026 changed to NEW since Fedora 43 and 44 have an executable python-config script
 if(POLICY CMP0109)
-  cmake_policy(SET CMP0109 OLD)
+  cmake_policy(SET CMP0109 NEW)
+endif()
+# set policy so set(CACHE) command does not remove any normal variable of the same name from the current scope
+if(POLICY CMP0126)
+  cmake_policy(SET CMP0126 NEW)
 endif()
 # set policy to use the time of extraction as timestamps of files unpacked from downloaded
 # archives, so that updating an archive version triggers rebuilding all dependent objects
 if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
+endif()
+# set policy to ignore CMAKE_WARN_DEPRECATED and CMAKE_ERROR_DEPRECATED if available.
+# we are not using those AFAIK anyway.
+if(POLICY CMP0218)
+  cmake_policy(SET CMP0218 NEW)
 endif()
 
 ########################################
@@ -880,6 +889,7 @@ endif()
 install(FILES ${LAMMPS_DOC_DIR}/lammps.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 RENAME ${LAMMPS_BINARY}.1)
 
 include(Tools)
+include(Packaging)
 include(Documentation)
 
 ###############################################################################
@@ -900,6 +910,13 @@ install(
         ${CMAKE_BINARY_DIR}/etc/profile.d/lammps.csh
   DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/profile.d
 )
+
+###############################################################################
+# On Linux systems (any others, too?) we may need to update the shared linker cache
+###############################################################################
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  install(CODE "execute_process(COMMAND ldconfig || exit 0)")
+endif()
 
 ###############################################################################
 # Install LAMMPS lib and python module into site-packages folder with
@@ -924,21 +941,17 @@ if(BUILD_SHARED_LIBS)
   else()
     add_custom_target(
       install-python
-      ${CMAKE_COMMAND} -E echo "Must have Python installed to install the LAMMPS Python module")
+      COMMAND ${CMAKE_COMMAND} -E echo "Must have Python installed to install the LAMMPS Python module"
+      COMMAND ${CMAKE_COMMAND} -E false
+      VERBATIM)
   endif()
 else()
   add_custom_target(
     install-python
-    ${CMAKE_COMMAND} -E echo "Must build LAMMPS as a shared library to use the Python module")
+    COMMAND ${CMAKE_COMMAND} -E echo "Must build LAMMPS as a shared library to use the Python module"
+    COMMAND ${CMAKE_COMMAND} -E false
+    VERBATIM)
 endif()
-
-###############################################################################
-# Create tarball for download with html and PDF version of manual included
-###############################################################################
-add_custom_target(tarball
-  COMMAND ${LAMMPS_DIR}/cmake/packaging/build_tarball.sh ${LAMMPS_DIR}/doc
-)
-
 
 include(Testing)
 include(CodeCoverage)

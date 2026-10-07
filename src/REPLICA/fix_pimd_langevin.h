@@ -47,7 +47,7 @@ class FixPIMDLangevin : public Fix {
   void final_integrate() override;
   void end_of_step() override;
   void write_restart(FILE *fp) override;
-  void restart(char *buf) override;
+  void restart(char *, int) override;
 
   double compute_vector(int) override;
   void *extract(const char *, int &) override;
@@ -114,9 +114,9 @@ class FixPIMDLangevin : public Fix {
 
   double *lam, **M_x2xp, **M_xp2x, **M_f2fp, **M_fp2f;
   int *modeindex;
-  int defer_normal_mode_force;       // transform forces after all post-force fixes
-  int normal_mode_force_pending;     // Cartesian force still needs transformation
-  int bead_bias_virial_pending;      // bead-mode bias needs current-step estimators
+  int defer_normal_mode_force;      // transform forces after all post-force fixes
+  int normal_mode_force_pending;    // Cartesian force still needs transformation
+  int bead_bias_virial_pending;     // bead-mode bias needs current-step estimators
 
   void reallocate();
   void nmpimd_init();

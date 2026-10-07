@@ -110,7 +110,7 @@ CentroidNPTState run_centroid_npt_volume_leg(const char *plumed_file, const char
     if (me == 0) state.p_cv = extract_pimd_vector(lmp, 9);
     MPI_Bcast(&state.p_cv, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     state.pe_bead = extract_pimd_vector(lmp, 2);
-    state.tote = extract_pimd_vector(lmp, 3);
+    state.tote    = extract_pimd_vector(lmp, 3);
     auto *pressure =
         (double *)lammps_extract_compute(lmp, "plumed_pressure", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
     EXPECT_NE(pressure, nullptr);
@@ -150,10 +150,9 @@ CentroidNPTState run_nmpimd_bead_mode_volume_leg(const char *plumed_file, const 
     lammps_command(lmp, "compute plumed_pressure all pressure NULL virial");
     std::string pimd_command = "fix fpimd all pimd/langevin method nmpimd ensemble " +
                                std::string(ensemble) + " integrator obabo ";
-    if (std::string(ensemble) == "npt")
-        pimd_command += "thermostat PILE_L 2468 tau 1.0 ";
-    pimd_command += "temp 1.0 iso " + std::to_string(external_pressure) +
-                    " barostat BZP taup 1.0 fixcom no";
+    if (std::string(ensemble) == "npt") pimd_command += "thermostat PILE_L 2468 tau 1.0 ";
+    pimd_command +=
+        "temp 1.0 iso " + std::to_string(external_pressure) + " barostat BZP taup 1.0 fixcom no";
     lammps_command(lmp, pimd_command.c_str());
     const std::string plumed_command = "fix bias all plumed plumedfile " +
                                        std::string(plumed_file) + " outfile " + plumed_log +
@@ -242,8 +241,7 @@ CentroidNVTState run_centroid_nvt_volume_leg(const char *plumed_file, const char
     double boxlo[3], boxhi[3], xy, yz, xz;
     int periodicity[3], boxflag;
     lammps_extract_box(lmp, boxlo, boxhi, &xy, &yz, &xz, periodicity, &boxflag);
-    state.volume =
-        (boxhi[0] - boxlo[0]) * (boxhi[1] - boxlo[1]) * (boxhi[2] - boxlo[2]);
+    state.volume = (boxhi[0] - boxlo[0]) * (boxhi[1] - boxlo[1]) * (boxhi[2] - boxlo[2]);
 
     EXPECT_EQ(lammps_has_error(lmp), 0);
     lammps_close(lmp);
@@ -307,13 +305,12 @@ CentroidNVTContinuationState extract_centroid_nvt_continuation_state(void *lmp)
     double boxlo[3], boxhi[3], xy, yz, xz;
     int periodicity[3], boxflag;
     lammps_extract_box(lmp, boxlo, boxhi, &xy, &yz, &xz, periodicity, &boxflag);
-    state.volume =
-        (boxhi[0] - boxlo[0]) * (boxhi[1] - boxlo[1]) * (boxhi[2] - boxlo[2]);
+    state.volume = (boxhi[0] - boxlo[0]) * (boxhi[1] - boxlo[1]) * (boxhi[2] - boxlo[2]);
     return state;
 }
 
 void add_centroid_nmpimd_nvt_fixes(void *lmp, const char *plumed_file, const char *plumed_log,
-                                    const std::string &nonfinite_trace_prefix = {})
+                                   const std::string &nonfinite_trace_prefix = {})
 {
     std::string pimd_command = "fix fpimd all pimd/langevin method nmpimd ensemble nvt "
                                "integrator baoab thermostat PILE_L 2468 tau 1.0 temp 1.0 "
@@ -354,8 +351,7 @@ run_centroid_nmpimd_nvt_segments(int first_steps, int second_steps, bool restart
     create_multirank_two_atom_system(lmp);
     lammps_command(lmp, "timestep 0.00001");
     lammps_command(lmp, "thermo 0");
-    add_centroid_nmpimd_nvt_fixes(lmp, initial_plumed_file, initial_log,
-                                   nonfinite_trace_prefix);
+    add_centroid_nmpimd_nvt_fixes(lmp, initial_plumed_file, initial_log, nonfinite_trace_prefix);
     const std::string first_run = "run " + std::to_string(first_steps);
     lammps_command(lmp, first_run.c_str());
 
@@ -374,7 +370,7 @@ run_centroid_nmpimd_nvt_segments(int first_steps, int second_steps, bool restart
             lammps_command(lmp, "read_restart ${restart_file}");
             lammps_command(lmp, "thermo 0");
             add_centroid_nmpimd_nvt_fixes(lmp, restart_plumed_file, restart_log,
-                                           nonfinite_trace_prefix);
+                                          nonfinite_trace_prefix);
         }
         const std::string second_run = "run " + std::to_string(second_steps);
         lammps_command(lmp, second_run.c_str());
@@ -386,12 +382,10 @@ run_centroid_nmpimd_nvt_segments(int first_steps, int second_steps, bool restart
     return state;
 }
 
-CentroidNVTContinuationState
-run_nmpimd_bead_mode_segments(const char *mode, const char *restart_prefix, int first_steps,
-                              int second_steps, bool restart, const char *initial_plumed_file,
-                              const char *restart_plumed_file, const char *initial_log,
-                              const char *restart_log,
-                              const std::string &nonfinite_trace_prefix = {})
+CentroidNVTContinuationState run_nmpimd_bead_mode_segments(
+    const char *mode, const char *restart_prefix, int first_steps, int second_steps, bool restart,
+    const char *initial_plumed_file, const char *restart_plumed_file, const char *initial_log,
+    const char *restart_log, const std::string &nonfinite_trace_prefix = {})
 {
     auto add_fixes = [&](void *lmp_instance, const char *plumed_file, const char *plumed_log) {
         std::string pimd_command = "fix fpimd all pimd/langevin method nmpimd ensemble nvt "
@@ -401,11 +395,10 @@ run_nmpimd_bead_mode_segments(const char *mode, const char *restart_prefix, int 
             pimd_command += " nonfinite_trace " + nonfinite_trace_prefix;
         lammps_command(lmp_instance, pimd_command.c_str());
         const char *adapter = std::string(mode) == "contracted_bead_mean" ? "bead_mean" : mode;
-        std::string plumed_command = "fix bias all plumed plumedfile " +
-                                           std::string(plumed_file) + " outfile " + plumed_log +
-                                           " path_integral " + adapter + " pimd_fix fpimd";
-        if (std::string(mode) == "contracted_bead_mean")
-            plumed_command += " path_contraction 0.5";
+        std::string plumed_command = "fix bias all plumed plumedfile " + std::string(plumed_file) +
+                                     " outfile " + plumed_log + " path_integral " + adapter +
+                                     " pimd_fix fpimd";
+        if (std::string(mode) == "contracted_bead_mean") plumed_command += " path_contraction 0.5";
         if (!nonfinite_trace_prefix.empty())
             plumed_command += " nonfinite_trace " + nonfinite_trace_prefix;
         lammps_command(lmp_instance, plumed_command.c_str());
@@ -456,7 +449,7 @@ void expect_plumed_nonfinite_trace(const std::string &prefix)
     int me;
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     const std::string plumed_file = prefix + ".dat";
-    const std::string plumed_log = prefix + ".log";
+    const std::string plumed_log  = prefix + ".log";
     if (me == 0) {
         std::ofstream input(plumed_file);
         input << "d: DISTANCE ATOMS=1,2 NOPBC\n";
@@ -477,16 +470,16 @@ void expect_plumed_nonfinite_trace(const std::string &prefix)
     ASSERT_EQ(lammps_has_error(lmp), 0);
 
     auto *nlocal = (int *)lammps_extract_global(lmp, "nlocal");
-    auto *tags = (tagint *)lammps_extract_atom(lmp, "id");
+    auto *tags   = (tagint *)lammps_extract_atom(lmp, "id");
     ASSERT_NE(nlocal, nullptr);
     ASSERT_NE(tags, nullptr);
-    tagint local_tag = std::numeric_limits<tagint>::max();
-    int local_index = -1;
+    tagint local_tag           = std::numeric_limits<tagint>::max();
+    int local_index            = -1;
     constexpr int target_world = 1;
     if (me / 2 == target_world) {
         for (int i = 0; i < *nlocal; ++i) {
             if (tags[i] < local_tag) {
-                local_tag = tags[i];
+                local_tag   = tags[i];
                 local_index = i;
             }
         }
@@ -506,7 +499,7 @@ void expect_plumed_nonfinite_trace(const std::string &prefix)
         positions[local_index][0] = std::numeric_limits<double>::quiet_NaN();
     }
 
-    auto *lammps = static_cast<LAMMPS_NS::LAMMPS *>(lmp);
+    auto *lammps     = static_cast<LAMMPS_NS::LAMMPS *>(lmp);
     auto *plumed_fix = lammps->modify->get_fix_by_id("bias");
     ASSERT_NE(plumed_fix, nullptr);
     int caught = 0;
@@ -514,7 +507,7 @@ void expect_plumed_nonfinite_trace(const std::string &prefix)
     try {
         plumed_fix->post_force(0);
     } catch (const LAMMPS_NS::LAMMPSAbortException &exception) {
-        caught = 1;
+        caught  = 1;
         message = exception.what();
     }
     EXPECT_EQ(caught, 1);
@@ -522,9 +515,10 @@ void expect_plumed_nonfinite_trace(const std::string &prefix)
     EXPECT_NE(message.find("stage pre-plumed"), std::string::npos);
     lammps_close(lmp);
 
-    const int world_rank = owner - 2 * target_world;
+    const int world_rank   = owner - 2 * target_world;
     const std::string path = prefix + ".plumed.step0.u" + std::to_string(owner) + ".w" +
-        std::to_string(target_world) + ".r" + std::to_string(world_rank) + ".txt";
+                             std::to_string(target_world) + ".r" + std::to_string(world_rank) +
+                             ".txt";
     MPI_Barrier(MPI_COMM_WORLD);
     if (me == 0) {
         std::ifstream input(path);
@@ -550,7 +544,7 @@ void expect_plumed_force_delta_trace(const std::string &prefix)
     int me;
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     const std::string plumed_file = prefix + ".dat";
-    const std::string plumed_log = prefix + ".log";
+    const std::string plumed_log  = prefix + ".log";
     if (me == 0) {
         std::ofstream input(plumed_file);
         input << "d: DISTANCE ATOMS=1,2 NOPBC\n"
@@ -564,13 +558,14 @@ void expect_plumed_force_delta_trace(const std::string &prefix)
     lammps_command(lmp, "thermo 0");
 
     auto *nlocal = (int *)lammps_extract_global(lmp, "nlocal");
-    auto *tags = (tagint *)lammps_extract_atom(lmp, "id");
+    auto *tags   = (tagint *)lammps_extract_atom(lmp, "id");
     ASSERT_NE(nlocal, nullptr);
     ASSERT_NE(tags, nullptr);
-    tagint local_tag = std::numeric_limits<tagint>::max();
+    tagint local_tag           = std::numeric_limits<tagint>::max();
     constexpr int target_world = 0;
     if (me / 2 == target_world)
-        for (int i = 0; i < *nlocal; ++i) local_tag = std::min(local_tag, tags[i]);
+        for (int i = 0; i < *nlocal; ++i)
+            local_tag = std::min(local_tag, tags[i]);
     std::array<tagint, 4> candidate_tags{};
     MPI_Allgather(&local_tag, 1, MPI_LMP_TAGINT, candidate_tags.data(), 1, MPI_LMP_TAGINT,
                   MPI_COMM_WORLD);
@@ -595,9 +590,10 @@ void expect_plumed_force_delta_trace(const std::string &prefix)
     EXPECT_THAT(error_message, HasSubstr("stage post-perform-pre-scale"));
     lammps_close(lmp);
 
-    const int world_rank = owner - 2 * target_world;
+    const int world_rank   = owner - 2 * target_world;
     const std::string path = prefix + ".plumed.step0.u" + std::to_string(owner) + ".w" +
-        std::to_string(target_world) + ".r" + std::to_string(world_rank) + ".txt";
+                             std::to_string(target_world) + ".r" + std::to_string(world_rank) +
+                             ".txt";
     MPI_Barrier(MPI_COMM_WORLD);
     if (me == 0) {
         std::ifstream input(path);
@@ -619,6 +615,60 @@ void expect_plumed_force_delta_trace(const std::string &prefix)
 
 } // namespace
 
+TEST(MPI, plumed_path_integral_keyword_aliases)
+{
+    int me;
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    const std::array<std::pair<const char *, const char *>, 3> modes = {
+        std::pair{"coordinate_mean", "centroid"}, std::pair{"cv_mean", "bead_mean"},
+        std::pair{"bias_mean", "bead_density"}};
+    for (const auto &[mode, alias] : modes) {
+        SCOPED_TRACE(mode);
+        const std::string stem = std::string("test_keyword_") + mode;
+        const std::string file = stem + ".dat";
+        if (me == 0) {
+            std::ofstream input(file);
+            input << "d: DISTANCE ATOMS=1,2 NOPBC\n";
+            if (std::string(mode) == "cv_mean")
+                input << "mean: ENSEMBLE ARG=d\n"
+                      << "bias: RESTRAINT ARG=mean.d AT=6.5 KAPPA=4.0\n";
+            else
+                input << "bias: RESTRAINT ARG=d AT=6.5 KAPPA=4.0\n";
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+        for (bool restart : {false, true}) {
+            SCOPED_TRACE(restart);
+            auto run = [&](const char *keyword) {
+                const std::string prefix = stem + "_" + keyword;
+                return run_nmpimd_bead_mode_segments(
+                    keyword, (prefix + "_restart").c_str(), 2, 2, restart, file.c_str(),
+                    file.c_str(), (prefix + ".log").c_str(), (prefix + "_restart.log").c_str());
+            };
+            const auto expected = run(alias);
+            const auto actual   = run(mode);
+            ASSERT_EQ(actual.atoms.size(), expected.atoms.size());
+            for (std::size_t i = 0; i < expected.atoms.size(); ++i)
+                EXPECT_DOUBLE_EQ(actual.atoms[i], expected.atoms[i]) << i;
+            for (std::size_t i = 0; i < expected.pimd.size(); ++i)
+                EXPECT_DOUBLE_EQ(actual.pimd[i], expected.pimd[i]) << i;
+            for (std::size_t i = 0; i < expected.bias.size(); ++i)
+                EXPECT_DOUBLE_EQ(actual.bias[i], expected.bias[i]) << i;
+            EXPECT_DOUBLE_EQ(actual.volume, expected.volume);
+        }
+        if (me == 0) {
+            std::remove(file.c_str());
+            for (const auto *keyword : {mode, alias}) {
+                const std::string prefix = stem + "_" + keyword;
+                for (const auto *suffix :
+                     {".log", ".log.0", ".log.1", "_restart.log", "_restart.log.0",
+                      "_restart.log.1", "_restart.0", "_restart.1"})
+                    std::remove((prefix + suffix).c_str());
+            }
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
+}
+
 TEST(MPI, plumed_nonfinite_trace_finite_parity)
 {
     auto compare = [](const CentroidNVTContinuationState &baseline,
@@ -635,8 +685,8 @@ TEST(MPI, plumed_nonfinite_trace_finite_parity)
     int me;
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     const char *centroid_file = "test_plumed_nonfinite_trace_centroid.dat";
-    const char *mean_file = "test_plumed_nonfinite_trace_mean.dat";
-    const char *density_file = "test_plumed_nonfinite_trace_density.dat";
+    const char *mean_file     = "test_plumed_nonfinite_trace_mean.dat";
+    const char *density_file  = "test_plumed_nonfinite_trace_density.dat";
     if (me == 0) {
         const std::string distance = "d: DISTANCE ATOMS=1,2 NOPBC\n";
         std::ofstream centroid(centroid_file);
@@ -661,13 +711,12 @@ TEST(MPI, plumed_nonfinite_trace_finite_parity)
         std::pair{"bead_mean", mean_file}, std::pair{"bead_density", density_file}};
     for (const auto &[mode, file] : bead_modes) {
         const std::string stem = std::string("test_trace_") + mode;
-        const auto baseline = run_nmpimd_bead_mode_segments(
+        const auto baseline    = run_nmpimd_bead_mode_segments(
             mode, (stem + "_base_restart").c_str(), 3, 0, false, file, file,
             (stem + "_base.log").c_str(), (stem + "_base_restart.log").c_str());
         const auto traced = run_nmpimd_bead_mode_segments(
             mode, (stem + "_on_restart").c_str(), 3, 0, false, file, file,
-            (stem + "_on.log").c_str(), (stem + "_on_restart.log").c_str(),
-            stem + "_finite_trace");
+            (stem + "_on.log").c_str(), (stem + "_on_restart.log").c_str(), stem + "_finite_trace");
         compare(baseline, traced);
     }
 
@@ -756,9 +805,10 @@ TEST(MPI, plumed_pimd_input_contract)
                         "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
     lammps_command(lmp, "fix guard all plumed path_integral centroid pimd_fix fpimd");
     EXPECT_EQ(lammps_has_error(lmp), 0);
-    expect_error(lmp, "run 0 post no",
-                 "Fix plumed path_integral centroid requires method pimd with ensemble nvt or "
-                 "method nmpimd with ensemble nvt, nph, or npt");
+    expect_error(
+        lmp, "run 0 post no",
+        "Fix plumed path_integral coordinate_mean requires method pimd with ensemble nvt or "
+        "method nmpimd with ensemble nvt, nph, or npt");
     lammps_close(lmp);
 
     lmp = open_lammps();
@@ -775,9 +825,10 @@ TEST(MPI, plumed_pimd_input_contract)
                         "integrator obabo temp 1.0 fixcom no");
     lammps_command(lmp, "fix guard all plumed path_integral centroid pimd_fix fpimd");
     EXPECT_EQ(lammps_has_error(lmp), 0);
-    expect_error(lmp, "run 0 post no",
-                 "Fix plumed path_integral centroid requires method pimd with ensemble nvt or "
-                 "method nmpimd with ensemble nvt, nph, or npt");
+    expect_error(
+        lmp, "run 0 post no",
+        "Fix plumed path_integral coordinate_mean requires method pimd with ensemble nvt or "
+        "method nmpimd with ensemble nvt, nph, or npt");
     lammps_close(lmp);
 
     for (const char *mode : {"bead_mean", "bead_density"}) {
@@ -837,7 +888,6 @@ TEST(MPI, plumed_pimd_input_contract)
                      "addforce because it has a post-force callback");
         lammps_close(lmp);
     }
-
 }
 
 TEST(MPI, plumed_nmpimd_bead_modes_force)
@@ -898,7 +948,7 @@ TEST(MPI, plumed_nmpimd_bead_modes_force)
     lammps_command(lmp, "fix fpimd all pimd/langevin method nmpimd ensemble nvt "
                         "integrator baoab thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
 
-    const double sqrt_two = std::sqrt(2.0);
+    const double sqrt_two                                       = std::sqrt(2.0);
     const std::array<std::array<double, 6>, 4> mean_force_delta = {
         {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0},
          {sqrt_two, 0.0, 0.0, -sqrt_two, 0.0, 0.0},
@@ -926,8 +976,7 @@ TEST(MPI, plumed_nmpimd_bead_modes_force)
         return result;
     };
     auto check_mode = [&](const std::string &zero_command, const std::string &bias_command,
-                          double expected_bias,
-                          const std::array<double, 6> &expected_force_delta) {
+                          double expected_bias, const std::array<double, 6> &expected_force_delta) {
         lammps_command(lmp, zero_command.c_str());
         lammps_command(lmp, "run 0 post no");
         const auto zero_forces = extract_forces();
@@ -1006,16 +1055,16 @@ TEST(MPI, plumed_nmpimd_multirank_bead_modes)
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
-    const int bead = me / 2;
-    const double inverse_sqrt_two = 1.0 / std::sqrt(2.0);
+    const int bead                                              = me / 2;
+    const double inverse_sqrt_two                               = 1.0 / std::sqrt(2.0);
     const std::array<std::array<double, 6>, 2> mean_force_delta = {
         {{inverse_sqrt_two, inverse_sqrt_two, 0.0, -inverse_sqrt_two, -inverse_sqrt_two, 0.0},
          {inverse_sqrt_two, -inverse_sqrt_two, 0.0, -inverse_sqrt_two, inverse_sqrt_two, 0.0}}};
     const std::array<std::array<double, 6>, 2> density_force_delta = {
-        {{3.0 * inverse_sqrt_two, -inverse_sqrt_two, 0.0, -3.0 * inverse_sqrt_two,
-          inverse_sqrt_two, 0.0},
-         {3.0 * inverse_sqrt_two, inverse_sqrt_two, 0.0, -3.0 * inverse_sqrt_two,
-          -inverse_sqrt_two, 0.0}}};
+        {{3.0 * inverse_sqrt_two, -inverse_sqrt_two, 0.0, -3.0 * inverse_sqrt_two, inverse_sqrt_two,
+          0.0},
+         {3.0 * inverse_sqrt_two, inverse_sqrt_two, 0.0, -3.0 * inverse_sqrt_two, -inverse_sqrt_two,
+          0.0}}};
 
     auto run_case = [&](const char *plumed_file, const char *plumed_log, const char *mode) {
         std::array<double, 7> result{};
@@ -1077,7 +1126,9 @@ TEST(MPI, plumed_nmpimd_multirank_bead_modes)
     EXPECT_NEAR(density_zero[6], 0.0, 1.0e-12);
     EXPECT_NEAR(density_bias[6], bead == 0 ? 2.5 : 0.0, 1.0e-12);
     for (std::size_t i = 0; i < density_force_delta[bead].size(); ++i)
-        EXPECT_NEAR(density_bias[i] - density_zero[i], beads * density_force_delta[bead][i], 1.0e-12) << i;
+        EXPECT_NEAR(density_bias[i] - density_zero[i], beads * density_force_delta[bead][i],
+                    1.0e-12)
+            << i;
 
     MPI_Barrier(MPI_COMM_WORLD);
     if (me == 0) {
@@ -1121,12 +1172,11 @@ TEST(MPI, plumed_nmpimd_bead_modes_pbc)
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
-    const int bead = me / 2;
+    const int bead                                                  = me / 2;
     const std::array<std::array<double, 6>, 2> expected_force_delta = {
         {{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}},
          {{2.0 * std::sqrt(2.0), 0.0, 0.0, -2.0 * std::sqrt(2.0), 0.0, 0.0}}}};
-    auto run_case = [&](const char *plumed_file, const std::string &plumed_log,
-                        const char *mode) {
+    auto run_case = [&](const char *plumed_file, const std::string &plumed_log, const char *mode) {
         std::array<double, 7> result{};
         void *lmp = open_multirank_partition();
         EXPECT_NE(lmp, nullptr);
@@ -1172,12 +1222,12 @@ TEST(MPI, plumed_nmpimd_bead_modes_pbc)
     };
 
     for (const char *mode : {"bead_mean", "bead_density"}) {
-        const bool mean = std::string(mode) == "bead_mean";
-        const char *zero_file = mean ? mean_zero_file : density_zero_file;
-        const char *bias_file = mean ? mean_bias_file : density_bias_file;
+        const bool mean          = std::string(mode) == "bead_mean";
+        const char *zero_file    = mean ? mean_zero_file : density_zero_file;
+        const char *bias_file    = mean ? mean_bias_file : density_bias_file;
         const std::string prefix = "test_plumed_nmpimd_pbc_" + std::string(mode);
-        const auto zero = run_case(zero_file, prefix + "_zero.log", mode);
-        const auto biased = run_case(bias_file, prefix + "_bias.log", mode);
+        const auto zero          = run_case(zero_file, prefix + "_zero.log", mode);
+        const auto biased        = run_case(bias_file, prefix + "_bias.log", mode);
         EXPECT_NEAR(zero[6], 0.0, 1.0e-12);
         EXPECT_NEAR(biased[6], bead == 0 ? 2.0 : 0.0, 1.0e-12);
         for (std::size_t i = 0; i < expected_force_delta[bead].size(); ++i)
@@ -1232,15 +1282,14 @@ TEST(MPI, plumed_centroid_multirank_force_modes)
         lammps_command(lmp, "compute first_force first reduce sum fx fy fz");
         lammps_command(lmp, "compute second_force second reduce sum fx fy fz");
         lammps_command(lmp, normal_mode_commands[mode].c_str());
-        const std::string fix_command = "fix bias all plumed plumedfile " +
-                                        std::string(plumed_file) + " outfile " + plumed_log + "." +
-                                        std::to_string(mode) +
-                                        " path_integral centroid pimd_fix fpimd";
+        const std::string fix_command =
+            "fix bias all plumed plumedfile " + std::string(plumed_file) + " outfile " +
+            plumed_log + "." + std::to_string(mode) + " path_integral centroid pimd_fix fpimd";
         lammps_command(lmp, fix_command.c_str());
         lammps_command(lmp, "run 0 post no");
 
-        auto *first = (double *)lammps_extract_compute(lmp, "first_force", LMP_STYLE_GLOBAL,
-                                                       LMP_TYPE_VECTOR);
+        auto *first =
+            (double *)lammps_extract_compute(lmp, "first_force", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR);
         auto *second = (double *)lammps_extract_compute(lmp, "second_force", LMP_STYLE_GLOBAL,
                                                         LMP_TYPE_VECTOR);
         ASSERT_NE(first, nullptr);
@@ -1336,7 +1385,8 @@ TEST(MPI, plumed_nmpimd_centroid_npt_volume)
     EXPECT_NEAR(biased.pe_bead - zero.pe_bead, me / 2 == 0 ? -32000.0 : 0.0, 1.0e-10);
     EXPECT_NEAR(biased.tote - zero.tote, -32000.0, 1.0e-10);
     for (int i = 0; i < 3; ++i)
-        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], me / 2 == 0 ? 2.0 * bias_pressure : 0.0, 1.0e-12);
+        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], me / 2 == 0 ? 2.0 * bias_pressure : 0.0,
+                    1.0e-12);
     for (int i = 3; i < 6; ++i)
         EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], 0.0, 1.0e-12);
     EXPECT_NEAR(zero.bias, 0.0, 1.0e-12);
@@ -1387,18 +1437,18 @@ TEST(MPI, plumed_nmpimd_bead_modes_bzp_volume)
     const int bead = me / 2;
     for (const char *ensemble : {"nph", "npt"}) {
         for (const char *mode : {"bead_mean", "bead_density"}) {
-            const bool mean = std::string(mode) == "bead_mean";
+            const bool mean       = std::string(mode) == "bead_mean";
             const char *zero_file = mean ? mean_zero_file : density_zero_file;
             const char *bias_file = mean ? mean_bias_file : density_bias_file;
-            const std::string prefix = "test_plumed_nmpimd_bzp_" + std::string(ensemble) + "_" + mode;
+            const std::string prefix =
+                "test_plumed_nmpimd_bzp_" + std::string(ensemble) + "_" + mode;
             const auto zero = run_nmpimd_bead_mode_volume_leg(
                 zero_file, (prefix + "_zero.log").c_str(), mode, ensemble, 0.0);
             const auto biased = run_nmpimd_bead_mode_volume_leg(
                 bias_file, (prefix + "_bias.log").c_str(), mode, ensemble, bias_pressure);
 
             EXPECT_NEAR(biased.p_cv - zero.p_cv, bias_pressure, 1.0e-12);
-            EXPECT_NEAR(biased.pe_bead - zero.pe_bead, bead == 0 ? -32000.0 : 0.0,
-                        1.0e-10);
+            EXPECT_NEAR(biased.pe_bead - zero.pe_bead, bead == 0 ? -32000.0 : 0.0, 1.0e-10);
             EXPECT_NEAR(biased.tote - zero.tote, -32000.0, 1.0e-10);
             for (int i = 0; i < 3; ++i)
                 EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], bias_pressure, 1.0e-12);
@@ -1456,7 +1506,8 @@ TEST(MPI, plumed_nmpimd_centroid_nvt_virial)
 
     EXPECT_NEAR(biased.p_cv - zero.p_cv, bias_pressure, 1.0e-12);
     for (int i = 0; i < 3; ++i)
-        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], me / 2 == 0 ? 2.0 * bias_pressure : 0.0, 1.0e-12);
+        EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], me / 2 == 0 ? 2.0 * bias_pressure : 0.0,
+                    1.0e-12);
     for (int i = 3; i < 6; ++i)
         EXPECT_NEAR(biased.pressure[i] - zero.pressure[i], 0.0, 1.0e-12);
     EXPECT_NEAR(zero.bias, 0.0, 1.0e-12);
@@ -1519,8 +1570,8 @@ TEST(MPI, plumed_nmpimd_centroid_nvt_wrapped_four_bead)
     lammps_command(lmp, "compute second_force second reduce sum fx fy fz");
     lammps_command(lmp, "fix fpimd all pimd/langevin method nmpimd ensemble nvt "
                         "integrator baoab thermostat PILE_L 2468 tau 1.0 temp 1.0 fixcom no");
-    const std::string fix_command = "fix bias all plumed plumedfile " +
-                                    std::string(plumed_file) + " outfile " + plumed_log +
+    const std::string fix_command = "fix bias all plumed plumedfile " + std::string(plumed_file) +
+                                    " outfile " + plumed_log +
                                     " path_integral centroid pimd_fix fpimd";
     lammps_command(lmp, fix_command.c_str());
     lammps_command(lmp, "run 0 post no");
@@ -1624,10 +1675,10 @@ TEST(MPI, plumed_nmpimd_centroid_nvt_restart_continuity)
     if (me == 0) {
         std::remove(initial_file);
         std::remove(restart_file);
-        for (const char *log : {"test_plumed_nmpimd_nvt_continuous.log",
-                                "test_plumed_nmpimd_nvt_segmented.log",
-                                "test_plumed_nmpimd_nvt_restart_first.log",
-                                "test_plumed_nmpimd_nvt_restart_second.log"})
+        for (const char *log :
+             {"test_plumed_nmpimd_nvt_continuous.log", "test_plumed_nmpimd_nvt_segmented.log",
+              "test_plumed_nmpimd_nvt_restart_first.log",
+              "test_plumed_nmpimd_nvt_restart_second.log"})
             std::remove(log);
     }
 }
@@ -1669,7 +1720,8 @@ TEST(MPI, plumed_nmpimd_opes_langevin_restart_continuity)
                 if (contracted)
                     input << "r: DISTANCE ATOMS=1,2 NOPBC\n"
                           << "d: CUSTOM ARG=r FUNC=x+0.01*x*x*x PERIODIC=NO\n";
-                else input << "d: DISTANCE ATOMS=1,2 NOPBC\n";
+                else
+                    input << "d: DISTANCE ATOMS=1,2 NOPBC\n";
                 if (mean) input << "mean: ENSEMBLE ARG=d\n";
                 input << "bias: OPES_METAD ARG=" << (mean ? "mean.d" : "d")
                       << " PACE=2 BARRIER=4 TEMP=1 SIGMA=0.5 FIXED_SIGMA FILE=" << stem
@@ -1713,12 +1765,11 @@ TEST(MPI, plumed_nmpimd_opes_langevin_restart_continuity)
                 EXPECT_TRUE(std::isfinite(continuous.pimd[i]));
                 EXPECT_TRUE(std::isfinite(segmented.pimd[i]));
                 EXPECT_TRUE(std::isfinite(restarted.pimd[i]));
-                const double scale = std::max({1.0, std::abs(continuous.pimd[i]),
-                                               std::abs(segmented.pimd[i]),
-                                               std::abs(restarted.pimd[i])});
+                const double scale =
+                    std::max({1.0, std::abs(continuous.pimd[i]), std::abs(segmented.pimd[i]),
+                              std::abs(restarted.pimd[i])});
                 EXPECT_NEAR(segmented.pimd[i], continuous.pimd[i], 1.0e-14 * scale) << i;
-                EXPECT_NEAR(restarted.pimd[i], segmented.pimd[i], restart_tolerance * scale)
-                    << i;
+                EXPECT_NEAR(restarted.pimd[i], segmented.pimd[i], restart_tolerance * scale) << i;
             }
             for (std::size_t i = 0; i < continuous.bias.size(); ++i) {
                 EXPECT_TRUE(std::isfinite(continuous.bias[i]));
@@ -1768,12 +1819,12 @@ TEST(MPI, plumed_nmpimd_bead_modes_restart_continuity)
     ASSERT_EQ(nprocs, 4);
 
     for (const char *mode : {"bead_mean", "bead_density"}) {
-        const bool mean = std::string(mode) == "bead_mean";
-        const std::string prefix = "test_plumed_nmpimd_restart_" + std::string(mode);
-        const std::string initial_file = prefix + "_initial.dat";
-        const std::string restart_file = prefix + "_continue.dat";
+        const bool mean                  = std::string(mode) == "bead_mean";
+        const std::string prefix         = "test_plumed_nmpimd_restart_" + std::string(mode);
+        const std::string initial_file   = prefix + "_initial.dat";
+        const std::string restart_file   = prefix + "_continue.dat";
         const std::string restart_prefix = prefix + "_binary";
-        std::string graph = "d: DISTANCE ATOMS=1,2 NOPBC\n";
+        std::string graph                = "d: DISTANCE ATOMS=1,2 NOPBC\n";
         if (mean) graph += "mean: ENSEMBLE ARG=d\n";
         graph += mean ? "bias: RESTRAINT ARG=mean.d AT=7.5 KAPPA=0.01\n"
                       : "bias: RESTRAINT ARG=d AT=7.5 KAPPA=0.01\n";
@@ -1807,8 +1858,8 @@ TEST(MPI, plumed_nmpimd_bead_modes_restart_continuity)
         }
         for (std::size_t i = 0; i < continuous.pimd.size(); ++i) {
             EXPECT_TRUE(std::isfinite(continuous.pimd[i]));
-            const double tolerance =
-                1.0e-14 * std::max({1.0, std::abs(continuous.pimd[i]), std::abs(restarted.pimd[i])});
+            const double tolerance = 1.0e-14 * std::max({1.0, std::abs(continuous.pimd[i]),
+                                                         std::abs(restarted.pimd[i])});
             EXPECT_NEAR(segmented.pimd[i], continuous.pimd[i], tolerance) << mode << " " << i;
             EXPECT_NEAR(restarted.pimd[i], continuous.pimd[i], tolerance) << mode << " " << i;
         }
@@ -1946,16 +1997,16 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     ASSERT_EQ(nprocs, 4);
 
-    const char *centroid_file  = "test_plumed_pimd_cyclic_centroid.dat";
-    const char *bead_mean_file = "test_plumed_pimd_cyclic_bead_mean.dat";
-    const char *path_spread_file  = "test_plumed_pimd_cyclic_path_spread.dat";
+    const char *centroid_file        = "test_plumed_pimd_cyclic_centroid.dat";
+    const char *bead_mean_file       = "test_plumed_pimd_cyclic_bead_mean.dat";
+    const char *path_spread_file     = "test_plumed_pimd_cyclic_path_spread.dat";
     const char *centroid_spread_file = "test_plumed_pimd_cyclic_centroid_spread.dat";
-    const char *bead_density_file = "test_plumed_pimd_cyclic_bead_density.dat";
-    const char *centroid_log   = "test_plumed_pimd_cyclic_centroid.log";
-    const char *bead_mean_log  = "test_plumed_pimd_cyclic_bead_mean.log";
-    const char *path_spread_log   = "test_plumed_pimd_cyclic_path_spread.log";
+    const char *bead_density_file    = "test_plumed_pimd_cyclic_bead_density.dat";
+    const char *centroid_log         = "test_plumed_pimd_cyclic_centroid.log";
+    const char *bead_mean_log        = "test_plumed_pimd_cyclic_bead_mean.log";
+    const char *path_spread_log      = "test_plumed_pimd_cyclic_path_spread.log";
     const char *centroid_spread_log  = "test_plumed_pimd_cyclic_centroid_spread.log";
-    const char *bead_density_log  = "test_plumed_pimd_cyclic_bead_density.log";
+    const char *bead_density_log     = "test_plumed_pimd_cyclic_bead_density.log";
     if (me == 0) {
         std::ofstream centroid(centroid_file);
         centroid << "d: DISTANCE ATOMS=1,2 NOPBC\n"
@@ -2039,10 +2090,10 @@ TEST(MPI, plumed_pimd_cyclic_bead_permutation)
         return result;
     };
 
-    const double centroid_original  = run_case(centroid_file, centroid_log, "centroid", 0);
-    const double centroid_shifted   = run_case(centroid_file, centroid_log, "centroid", 1);
-    const double bead_mean_original = run_case(bead_mean_file, bead_mean_log, "bead_mean", 0);
-    const double bead_mean_shifted  = run_case(bead_mean_file, bead_mean_log, "bead_mean", 1);
+    const double centroid_original    = run_case(centroid_file, centroid_log, "centroid", 0);
+    const double centroid_shifted     = run_case(centroid_file, centroid_log, "centroid", 1);
+    const double bead_mean_original   = run_case(bead_mean_file, bead_mean_log, "bead_mean", 0);
+    const double bead_mean_shifted    = run_case(bead_mean_file, bead_mean_log, "bead_mean", 1);
     const double path_spread_original = run_case(path_spread_file, path_spread_log, "bead_mean", 0);
     const double path_spread_shifted  = run_case(path_spread_file, path_spread_log, "bead_mean", 1);
     const double centroid_spread_original =
@@ -2101,26 +2152,26 @@ TEST(MPI, plumed_pimd_bias_modes)
     // Tables contain -grad(B); the beta/P Hamiltonian requires -P*grad(B).
     constexpr int beads = 4;
 
-    const char *bead_zero_file          = "test_plumed_pimd_bead_zero.dat";
-    const char *bead_restraint_file     = "test_plumed_pimd_bead_restraint.dat";
+    const char *bead_zero_file             = "test_plumed_pimd_bead_zero.dat";
+    const char *bead_restraint_file        = "test_plumed_pimd_bead_restraint.dat";
     const char *path_spread_zero_file      = "test_plumed_pimd_path_spread_zero.dat";
     const char *path_spread_restraint_file = "test_plumed_pimd_path_spread_restraint.dat";
     const char *centroid_spread_zero_file  = "test_plumed_pimd_centroid_spread_zero.dat";
     const char *centroid_spread_bias_file  = "test_plumed_pimd_centroid_spread_bias.dat";
-    const char *centroid_zero_file      = "test_plumed_pimd_centroid_zero.dat";
-    const char *centroid_restraint_file = "test_plumed_pimd_centroid_restraint.dat";
-    const char *density_zero_file       = "test_plumed_pimd_density_zero.dat";
-    const char *density_restraint_file  = "test_plumed_pimd_density_restraint.dat";
-    const char *bead_zero_log           = "test_plumed_pimd_bead_zero.log";
-    const char *bead_restraint_log      = "test_plumed_pimd_bead_restraint.log";
+    const char *centroid_zero_file         = "test_plumed_pimd_centroid_zero.dat";
+    const char *centroid_restraint_file    = "test_plumed_pimd_centroid_restraint.dat";
+    const char *density_zero_file          = "test_plumed_pimd_density_zero.dat";
+    const char *density_restraint_file     = "test_plumed_pimd_density_restraint.dat";
+    const char *bead_zero_log              = "test_plumed_pimd_bead_zero.log";
+    const char *bead_restraint_log         = "test_plumed_pimd_bead_restraint.log";
     const char *path_spread_zero_log       = "test_plumed_pimd_path_spread_zero.log";
     const char *path_spread_restraint_log  = "test_plumed_pimd_path_spread_restraint.log";
     const char *centroid_spread_zero_log   = "test_plumed_pimd_centroid_spread_zero.log";
     const char *centroid_spread_bias_log   = "test_plumed_pimd_centroid_spread_bias.log";
-    const char *centroid_zero_log       = "test_plumed_pimd_centroid_zero.log";
-    const char *centroid_restraint_log  = "test_plumed_pimd_centroid_restraint.log";
-    const char *density_zero_log        = "test_plumed_pimd_density_zero.log";
-    const char *density_restraint_log   = "test_plumed_pimd_density_restraint.log";
+    const char *centroid_zero_log          = "test_plumed_pimd_centroid_zero.log";
+    const char *centroid_restraint_log     = "test_plumed_pimd_centroid_restraint.log";
+    const char *density_zero_log           = "test_plumed_pimd_density_zero.log";
+    const char *density_restraint_log      = "test_plumed_pimd_density_restraint.log";
     if (me == 0) {
         std::ofstream bead_zero(bead_zero_file);
         bead_zero << "d: DISTANCE ATOMS=1,2 NOPBC\n"
@@ -2193,8 +2244,9 @@ TEST(MPI, plumed_pimd_bias_modes)
     lammps_command(lmp, "timestep 0.001");
     lammps_command(lmp, "velocity all set 0.0 0.0 0.0");
     // Keep nonzero springs modest so force differences do not lose precision.
-    lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
-                        "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 sp 10.0 fixcom no");
+    lammps_command(lmp,
+                   "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                   "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 sp 10.0 fixcom no");
     const std::array<std::array<double, 6>, 4> bead_force_delta = {
         {{1.0, 0.0, 0.0, -1.0, 0.0, 0.0},
          {0.0, 1.0, 0.0, 0.0, -1.0, 0.0},
@@ -2220,7 +2272,7 @@ TEST(MPI, plumed_pimd_bias_modes)
          {0.0, 1.5, 0.0, 0.0, -1.5, 0.0},
          {-0.5, 0.0, 0.0, 0.5, 0.0, 0.0},
          {0.0, 0.5, 0.0, 0.0, -0.5, 0.0}}};
-    auto extract_forces                              = [&]() {
+    auto extract_forces = [&]() {
         std::array<double, 6> result{};
         auto **forces = (double **)lammps_extract_atom(lmp, "f");
         EXPECT_NE(forces, nullptr);
@@ -3079,7 +3131,8 @@ TEST(MPI, plumed_pimd_multirank_bead_modes)
     const std::array<std::array<double, 6>, 2> expected_force_delta = {
         {{1.0, 0.0, 0.0, -1.0, 0.0, 0.0}, {0.0, 1.0, 0.0, 0.0, -1.0, 0.0}}};
     for (std::size_t i = 0; i < expected_force_delta[bead].size(); ++i)
-        EXPECT_NEAR(biased_result[i] - zero_result[i], beads * expected_force_delta[bead][i], 1.0e-12);
+        EXPECT_NEAR(biased_result[i] - zero_result[i], beads * expected_force_delta[bead][i],
+                    1.0e-12);
 
     const auto density_zero_result =
         run_case(density_zero_file, density_zero_log, "bead_density", -1);

@@ -280,7 +280,6 @@ TEST(MPI, pimd_multirank_spring_force)
 
 #endif
 
-
 class MPITest : public ::testing::Test {
 public:
     void command(const std::string &line) { lammps_command(lmp, line.c_str()); }
