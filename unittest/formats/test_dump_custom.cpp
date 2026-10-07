@@ -363,6 +363,53 @@ TEST_F(DumpCustomTest, rerun)
     delete_file(dump_file);
 }
 
+TEST_F(DumpCustomTest, rerun_forces)
+{
+    const auto reference_file = dump_filename("rerun_forces_reference");
+    const auto rerun_file     = dump_filename("rerun_forces");
+    const auto *fields        = "id type x y z fx fy fz";
+
+    // Break the lattice symmetry so stale zero forces cannot pass the test.
+    HIDE_OUTPUT([&] {
+        command("group displaced id 1");
+        command("displace_atoms displaced move 0.1 0.02 -0.03 units box");
+    });
+    generate_dump(reference_file, fields, "sort id format float %.17g", 0);
+    close_dump();
+    HIDE_OUTPUT([&] {
+        command(fmt::format("dump id all custom 1 {} {}", rerun_file, fields));
+        command("dump_modify id sort id format float %.17g");
+        command(fmt::format("rerun {} dump x y z box yes", reference_file));
+    });
+    close_dump();
+
+    // Read the actual output: extracting atom arrays would synchronize a
+    // KOKKOS device copy and could hide a missing sync in the rerun path.
+    const auto reference = read_lines(reference_file);
+    const auto rerun     = read_lines(rerun_file);
+    delete_file(reference_file);
+    delete_file(rerun_file);
+    ASSERT_EQ(reference.size(), 41);
+    ASSERT_EQ(rerun.size(), reference.size());
+    ASSERT_EQ(reference[8], "ITEM: ATOMS id type x y z fx fy fz");
+    ASSERT_EQ(rerun[8], reference[8]);
+    double max_force = 0.0;
+    for (std::size_t i = 9; i < reference.size(); ++i) {
+        const auto expected = utils::split_words(reference[i]);
+        const auto actual   = utils::split_words(rerun[i]);
+        ASSERT_EQ(expected.size(), 8);
+        ASSERT_EQ(actual.size(), expected.size());
+        EXPECT_EQ(actual[0], expected[0]);
+        for (int j = 5; j < 8; ++j) {
+            const double force = utils::numeric(FLERR, expected[j], false, lmp);
+            const double value = utils::numeric(FLERR, actual[j], false, lmp);
+            max_force          = std::max(max_force, std::fabs(force));
+            EXPECT_NEAR(value, force, prec_tol(force, 1.0e-12));
+        }
+    }
+    EXPECT_GT(max_force, 0.1);
+}
+
 TEST_F(DumpCustomTest, rerun_bin)
 {
     auto dump_file     = binary_dump_filename("rerun");
