@@ -1,0 +1,42 @@
+name: Fork PIMD review
+on:
+  push:
+    branches: [codex/lammps-pimd-review]
+permissions:
+  contents: read
+concurrency:
+  group: pimd-review-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    if: github.repository == 'Zhang-pchao/lammps'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sizes: [smallbig, bigbig]
+    env:
+      OMP_NUM_THREADS: 1
+      OMPI_MCA_rmaps_base_oversubscribe: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MPI
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin python3-yaml python3-venv doxygen graphviz
+      - name: Check source conventions
+        run: make -C src check
+      - name: Configure
+        run: >-
+          cmake -S cmake -B build -D CMAKE_BUILD_TYPE=Release
+          -D BUILD_MPI=on -D BUILD_OMP=off -D ENABLE_TESTING=on
+          -D DOWNLOAD_POTENTIALS=off -D PKG_REPLICA=on -D PKG_MISC=on
+          -D PKG_GRANULAR=on -D PKG_DPD-BASIC=on -D PKG_EFF=on
+          -D LAMMPS_SIZES=${{ matrix.sizes }}
+      - name: Build focused tests
+        run: cmake --build build -j 2 --target test_pimd_mpi test_random test_restart_settings
+      - name: Run native tests
+        run: ctest --test-dir build -V --output-on-failure -R '^(PIMDMPI|Random|RestartSettings)$'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-tests-${{ matrix.sizes }}
+          path: build/Testing/Temporary/
