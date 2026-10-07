@@ -1138,6 +1138,8 @@ void FixPlumed::post_force_centroid()
   int plumed_stop_condition = 0;
   int needs_energy = 0;
   double plmd_virial[3][3] = {};
+  // PLUMED retains the box pointer until performCalc completes.
+  double box[3][3] = {};
 
   if (plumed_active) {
     update_atom_data();
@@ -1149,7 +1151,6 @@ void FixPlumed::post_force_centroid()
       }
     }
 
-    double box[3][3] = {};
     box[0][0] = domain->h[0];
     box[1][1] = domain->h[1];
     box[2][2] = domain->h[2];
