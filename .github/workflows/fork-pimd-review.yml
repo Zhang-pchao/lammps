@@ -43,3 +43,93 @@ jobs:
         with:
           name: native-tests-${{ matrix.sizes }}
           path: build/Testing/Temporary/
+
+  coupling:
+    if: github.repository == 'Zhang-pchao/lammps'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      OMP_NUM_THREADS: 1
+      OPENBLAS_NUM_THREADS: 1
+      OMPI_MCA_rmaps_base_oversubscribe: 1
+      PLUMED_REVISION: 19b3d1ac5c2a3d109d3b7ce0c1590f228407a031
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libopenmpi-dev openmpi-bin libgsl-dev libfftw3-dev liblapack-dev
+      - name: Build pinned PLUMED dependency
+        run: |
+          # This fork snapshot supplies the pending shared-path actions.
+          # Build it in a disposable directory, separate from the LAMMPS tree.
+          git init "$RUNNER_TEMP/plumed-build"
+          git -C "$RUNNER_TEMP/plumed-build" fetch --depth=1 https://github.com/Zhang-pchao/plumed2.git "$PLUMED_REVISION"
+          git -C "$RUNNER_TEMP/plumed-build" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/plumed-build" rev-parse HEAD)" = "$PLUMED_REVISION"
+          cd "$RUNNER_TEMP/plumed-build"
+          ./configure --prefix="$RUNNER_TEMP/plumed-install" --enable-mpi \
+            --disable-python --disable-openmp --enable-modules=+opes:+pathbias \
+            CXX=mpicxx CC=mpicc
+          make -j 2
+          make install
+      - name: Configure coupling tests
+        run: |
+          export PKG_CONFIG_PATH="$RUNNER_TEMP/plumed-install/lib/pkgconfig"
+          cmake -S cmake -B build-coupling -D CMAKE_BUILD_TYPE=Release \
+            -D BUILD_MPI=on -D BUILD_OMP=off -D ENABLE_TESTING=on \
+            -D MPIEXEC_MAX_NUMPROCS=6 -D DOWNLOAD_POTENTIALS=off \
+            -D PKG_REPLICA=on -D PKG_PLUMED=on -D PKG_MISC=on \
+            -D DOWNLOAD_PLUMED=off -D PLUMED_MODE=shared
+      - name: Build coupling tests
+        run: >-
+          cmake --build build-coupling -j 2 --target
+          test_plumed_pimd_mpi test_plumed_pimd_normalization_mpi
+          test_plumed_path_contraction_mpi
+      - name: Run PLUMED coupling, virial and contraction tests
+        run: |
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/plumed-install/lib:${LD_LIBRARY_PATH:-}"
+          export PLUMED_KERNEL="$RUNNER_TEMP/plumed-install/lib/libplumedKernel.so"
+          for group in PlumedPIMDMPI PlumedPIMDNormalizationMPI PlumedPathContractionMPI PlumedPathContractionOddMPI; do
+            ctest --test-dir build-coupling -V --output-on-failure --no-tests=error -R "^${group}$"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plumed-coupling-tests
+          path: |
+            build-coupling/Testing/Temporary/
+            build-coupling/CMakeCache.txt
+
+  kokkos:
+    if: github.repository == 'Zhang-pchao/lammps'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      OMP_NUM_THREADS: 1
+      # Keep this CPU backend distinct from separate device-memory GPU checks.
+      GTEST_FILTER: DumpCustomTest.run1:DumpCustomTest.triclinic_run1:DumpCustomTest.rerun:DumpCustomTest.rerun_forces
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MPI
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
+      - name: Configure KOKKOS Serial
+        run: >-
+          cmake -S cmake -B build-kokkos -D CMAKE_BUILD_TYPE=Release
+          -D BUILD_MPI=on -D BUILD_OMP=off -D ENABLE_TESTING=on
+          -D DOWNLOAD_POTENTIALS=off -D PKG_KOKKOS=on
+          -D Kokkos_ENABLE_SERIAL=on -D Kokkos_ENABLE_OPENMP=off
+      - name: Build native dump tests
+        run: cmake --build build-kokkos -j 2 --target test_dump_custom
+      - name: Run default and explicitly enabled KOKKOS tests
+        run: |
+          for group in DumpCustom DumpCustomKokkos; do
+            ctest --test-dir build-kokkos -V --output-on-failure --no-tests=error -R "^${group}$"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kokkos-dump-tests
+          path: |
+            build-kokkos/Testing/Temporary/
+            build-kokkos/CMakeCache.txt
