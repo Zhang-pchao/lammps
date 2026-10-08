@@ -309,6 +309,9 @@ void VerletKokkos::setup_minimal(int flag)
   modify->setup(vflag);
   lmp->kokkos->auto_sync = 1;
 
+  // callers such as rerun access per-atom data on the host after setup
+
+  atomKK->sync(Host,ALL_MASK);
   update->setupflag = 0;
 }
 

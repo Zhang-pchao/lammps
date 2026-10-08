@@ -2009,3 +2009,5 @@
 /pair_bondval.h
 /pair_bondval_vec.cpp
 /pair_bondval_vec.h
+pimd_partition.cpp
+pimd_partition.h
