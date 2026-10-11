@@ -3,6 +3,7 @@
 #define LAMMPS_LIB_MPI 1
 #include "REPLICA/fix_pimd_langevin.h"
 #include "atom.h"
+#include "atom_vec.h"
 #include "error.h"
 #include "exceptions.h"
 #include "fix.h"
@@ -38,6 +39,13 @@ public:
     double harmonic_strength = 0.125;
     double physical_energy   = 0.0;
     int completed            = 0;
+
+    struct Observation {
+        tagint tag;
+        std::array<double, 3> bead, unwrapped, centroid, force;
+    };
+    bool capture_coordinates = false;
+    std::vector<Observation> observations;
 
     FixTestPIMDBias(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg)
     {
@@ -83,6 +91,7 @@ public:
         std::vector<double> contribution(3 * view.nlocal, 0.0);
         std::array<double, 6> physical_virial{};
         double local_energy = 0.0;
+        if (capture_coordinates) observations.clear();
         // Two independent analytic potentials: a uniform centroid load, or
         // B = k/(2P) sum_b sum_i |x_bi|^2 with bead-dependent forces.
         for (int i = 0; i < view.nlocal; ++i) {
@@ -99,6 +108,17 @@ public:
             physical_virial[3] += x[1] * contribution[3 * i];
             physical_virial[4] += x[2] * contribution[3 * i];
             physical_virial[5] += x[2] * contribution[3 * i + 1];
+            if (capture_coordinates) {
+                Observation observed{};
+                observed.tag = view.tags[i];
+                for (int d = 0; d < 3; ++d) {
+                    observed.bead[d]      = view.beads[i][d];
+                    observed.unwrapped[d] = view.unwrapped_beads[i][d];
+                    observed.centroid[d]  = view.centroid_by_tag[3 * (view.tags[i] - 1) + d];
+                    observed.force[d]     = contribution[3 * i + d];
+                }
+                observations.push_back(observed);
+            }
         }
         MPI_Allreduce(&local_energy, &physical_energy, 1, MPI_DOUBLE, MPI_SUM, world);
         auto generation = view.generation;
@@ -576,6 +596,145 @@ TEST_F(PIMDBiasMPI, split_and_restart_continuation)
                 std::remove((std::string(prefix) + "." + std::to_string(bead)).c_str());
     }
     MPI_Barrier(MPI_COMM_WORLD);
+}
+
+TEST_F(PIMDBiasMPI, capacity_growth_during_migration)
+{
+    // create_box starts with one slot. Reserve a small real AtomVec capacity
+    // before creating atoms, then let the normal MPI exchange grow it in-run.
+    lammps_command(handle, "clear");
+    for (const char *command :
+         {"units lj", "atom_style atomic", "atom_modify map array sort 0 0.0", "processors 2 1 1",
+          "region box block 0 20 0 20 0 20", "create_box 1 box"})
+        lammps_command(handle, command);
+    auto *lmp = static_cast<LAMMPS *>(handle);
+    lmp->atom->avec->grow(8);
+    constexpr int natoms      = 12;
+    constexpr double dt       = 0.0001;
+    constexpr double strength = 0.125;
+    std::array<std::array<double, 3>, natoms> initial{};
+    for (int i = 0; i < natoms; ++i) {
+        initial[i] = {i < 6 ? 6.0 + 0.125 * i : 11.0 + 0.125 * (i - 6), 4.0 + 0.25 * (i % 3),
+                      2.0 + 0.125 * (i % 2)};
+        const std::string command = "create_atoms 1 single " + std::to_string(initial[i][0]) + " " +
+                                    std::to_string(initial[i][1]) + " " +
+                                    std::to_string(initial[i][2]);
+        lammps_command(handle, command.c_str());
+    }
+    for (const char *command :
+         {"mass 1 1.0", "pair_style zero 0.1", "pair_coeff * *", "neighbor 0.01 nsq",
+          "neigh_modify every 1 delay 0 check no", "group left id 1:6", "group right id 7:12",
+          "variable left_v world 0.0 45000.0", "variable right_v world -20000.0 0.0",
+          "velocity left set ${left_v} 0.0 0.0 units box",
+          "velocity right set ${right_v} 0.0 0.0 units box", "timestep 0.0001",
+          "thermo_style custom step", "thermo 0"})
+        lammps_command(handle, command);
+    lammps_set_show_error(handle, 0);
+    const auto all_true = [](bool condition) {
+        int result = condition ? 1 : 0;
+        MPI_Allreduce(MPI_IN_PLACE, &result, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+        return result != 0;
+    };
+    ASSERT_TRUE(all_true(lammps_has_error(handle) == 0));
+    ASSERT_TRUE(all_true((lmp->atom->nlocal == 6) && (lmp->atom->nmax == 8)));
+    add_core("pimd");
+    auto *bias = add_bias();
+    ASSERT_TRUE(all_true(bias != nullptr));
+    bias->harmonic_bias = bias->capture_coordinates = true;
+    bias->harmonic_strength                         = strength;
+    lammps_command(handle, "run 0 post no");
+    ASSERT_TRUE(all_true(lammps_has_error(handle) == 0));
+    ASSERT_TRUE(all_true((lmp->atom->nlocal == 6) && (lmp->atom->nmax == 8)));
+    const int old_nmax      = lmp->atom->nmax;
+    const auto registration = bias->registration;
+    const double stiffness  = 2.0 * std::pow(4.0 * std::acos(-1.0), 2);
+    const auto position     = [&](int atom, int bead, int step) {
+        auto result = initial[atom];
+        if (step) {
+            const double vx = atom < 6 ? (bead == 1 ? 45000.0 : 0.0) : (bead == 0 ? -20000.0 : 0.0);
+            for (int d = 0; d < 3; ++d)
+                result[d] += (d == 0 ? dt * vx : 0.0) - 0.5 * dt * dt * strength * initial[atom][d];
+        }
+        return result;
+    };
+    const auto verify = [&](int step) {
+        const int bead = rank / 2;
+        bool valid     = bias->observations.size() == static_cast<std::size_t>(lmp->atom->nlocal);
+        for (const auto &observed : bias->observations)
+            valid = valid && (observed.tag >= 1) && (observed.tag <= natoms);
+        ASSERT_TRUE(all_true(valid));
+        std::array<double, 6 * natoms> actual_force{};
+        std::array<int, 2 * natoms> owners{};
+        for (int i = 0; i < lmp->atom->nlocal; ++i) {
+            const auto &observed = bias->observations[i];
+            const int atom       = static_cast<int>(observed.tag) - 1;
+            const auto own       = position(atom, bead, step);
+            const auto other     = position(atom, 1 - bead, step);
+            EXPECT_EQ(observed.tag, lmp->atom->tag[i]);
+            ++owners[bead * natoms + atom];
+            for (int d = 0; d < 3; ++d) {
+                EXPECT_NEAR(observed.bead[d], own[d], 1.0e-12);
+                EXPECT_NEAR(observed.unwrapped[d], own[d], 1.0e-12);
+                EXPECT_NEAR(observed.centroid[d], 0.5 * (own[d] + other[d]), 1.0e-12);
+                EXPECT_NEAR(observed.force[d], -0.5 * strength * own[d], 1.0e-12);
+                EXPECT_NEAR(lmp->atom->x[i][d], own[d], 1.0e-12);
+                EXPECT_NEAR(lmp->atom->f[i][d],
+                            -strength * own[d] + stiffness * (other[d] - own[d]), 1.0e-10);
+                actual_force[3 * (bead * natoms + atom) + d] = lmp->atom->f[i][d];
+            }
+        }
+        MPI_Allreduce(MPI_IN_PLACE, owners.data(), static_cast<int>(owners.size()), MPI_INT,
+                      MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, actual_force.data(), static_cast<int>(actual_force.size()),
+                      MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        for (int owner : owners)
+            EXPECT_EQ(owner, 1);
+        for (int atom = 0; atom < natoms; ++atom) {
+            const auto first  = position(atom, 0, step);
+            const auto second = position(atom, 1, step);
+            for (int d = 0; d < 3; ++d)
+                EXPECT_NEAR(actual_force[3 * atom + d] + actual_force[3 * (natoms + atom) + d],
+                            -strength * (first[d] + second[d]), 1.0e-10);
+        }
+        double energy = 0.0;
+        std::array<double, 6> expected_virial{}, actual_virial{};
+        constexpr std::array<int, 6> rows{0, 1, 2, 0, 0, 1};
+        constexpr std::array<int, 6> columns{0, 1, 2, 1, 2, 2};
+        for (int atom = 0; atom < natoms; ++atom) {
+            const auto x = position(atom, bead, step);
+            for (int d = 0; d < 3; ++d)
+                energy += 0.25 * strength * x[d] * x[d];
+            for (int d = 0; d < 6; ++d)
+                expected_virial[d] -= strength * x[rows[d]] * x[columns[d]];
+        }
+        MPI_Allreduce(bias->virial, actual_virial.data(), 6, MPI_DOUBLE, MPI_SUM, lmp->world);
+        EXPECT_NEAR(bias->physical_energy, energy, 1.0e-10);
+        for (int d = 0; d < 6; ++d)
+            EXPECT_NEAR(actual_virial[d], expected_virial[d], 1.0e-10);
+    };
+    verify(0);
+
+    // Opposite bead ownership exercises both local storage growth and requests
+    // larger than an empty partner's original inter-replica send capacity.
+    lammps_command(handle, "run 1 pre no post no");
+    ASSERT_TRUE(all_true(lammps_has_error(handle) == 0));
+    const bool receiver = (rank == 0) || (rank == 3);
+    ASSERT_TRUE(all_true(lmp->atom->nlocal == (receiver ? natoms : 0)));
+    ASSERT_TRUE(
+        all_true(!receiver || ((lmp->atom->nlocal > old_nmax) && (lmp->atom->nmax > old_nmax))));
+    verify(1);
+    EXPECT_EQ(bias->completed, 2);
+    EXPECT_EQ(bias->registration, registration);
+
+    lammps_command(handle, "run 0 post no");
+    ASSERT_TRUE(all_true(lammps_has_error(handle) == 0));
+    verify(1);
+    ASSERT_TRUE(all_true(bias->generations.size() == 3));
+    EXPECT_LT(bias->generations[0], bias->generations[1]);
+    EXPECT_LT(bias->generations[1], bias->generations[2]);
+    EXPECT_EQ(bias->timesteps[1], bias->timesteps[2]);
+    EXPECT_EQ(bias->completed, 3);
+    EXPECT_EQ(bias->registration, registration);
 }
 
 TEST_F(PIMDBiasMPI, physical_bias_finite_strain_virial)

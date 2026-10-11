@@ -503,6 +503,11 @@ uses the same LAMMPS executable and the same number of MPI processes per bead.
 If the process count changes, the barostat is restored but LAMMPS emits
 a warning and retains the newly initialized random-number state.
 
+Restoring the per-process random-number state does not by itself guarantee
+a trajectory identical to an uninterrupted run. Identical stochastic
+trajectories also require the same atom ownership and ordering and the
+same sequence of random-number draws on each MPI process.
+
 None of the :doc:`fix_modify <fix_modify>` options are relevant to fix
 pimd/nvt.
 
