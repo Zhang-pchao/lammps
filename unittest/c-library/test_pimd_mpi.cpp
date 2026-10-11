@@ -2200,6 +2200,161 @@ TEST(PIMD, multirank_repeated_run_initialization)
     lammps_close(handle);
 }
 
+namespace {
+
+// P=2 has one centroid and one relative mode.  These coordinates also give
+// asymmetric ownership (1,1,2,0 atoms) in a 2x2 decomposition, including an
+// empty rank.  The bead differences are smaller than half the periodic box.
+constexpr std::array<std::array<double, 6>, 2> free_ring_positions = {
+    {{5.0, 10.0, 2.0, 15.0, 10.0, 2.0}, {5.0, 10.0, 2.0, 6.0, 14.0, 2.0}}};
+
+std::array<double, 18> collect_free_ring_bead(void *lmp)
+{
+    auto state = extract_two_atom_state(lmp);
+    MPI_Allreduce(MPI_IN_PLACE, state.data(), static_cast<int>(state.size()), MPI_DOUBLE, MPI_SUM,
+                  static_cast<LAMMPS_NS::LAMMPS *>(lmp)->world);
+    return state;
+}
+
+void check_direct_free_ring(MPI_Comm communicator, const char *partition, int ranks_per_bead,
+                            const char *integrator, double fmass)
+{
+    int rank;
+    MPI_Comm_rank(communicator, &rank);
+    const int bead = rank / ranks_per_bead;
+    void *lmp      = open_two_bead_partition(communicator, partition);
+    ASSERT_NE(lmp, nullptr);
+    create_two_bead_test_system(lmp, ranks_per_bead, Ownership::ASYMMETRIC);
+    if (ranks_per_bead == 2) {
+        constexpr std::array<int, 4> expected_local = {1, 1, 2, 0};
+        auto *nlocal = static_cast<int *>(lammps_extract_global(lmp, "nlocal"));
+        EXPECT_NE(nlocal, nullptr);
+        if (nlocal) EXPECT_EQ(*nlocal, expected_local[rank]);
+    }
+    lammps_command(lmp, "timestep 0.0001");
+    lammps_command(lmp, "thermo 0");
+    const std::string command = "fix fpimd all pimd/langevin method pimd ensemble nve integrator " +
+                                std::string(integrator) +
+                                " temp 1.0 sp 1.0 fmmode physical fmass " + std::to_string(fmass) +
+                                " fixcom no";
+    lammps_command(lmp, command.c_str());
+
+    // In LJ units h=1, k_B*T=1, so omega_P=4*pi.  Differentiate the
+    // P=2 ring energy m*omega_P^2*|x_0-x_1|^2, counting both ring links.
+    const double omega_p   = 4.0 * std::acos(-1.0);
+    const double stiffness = 2.0 * omega_p * omega_p;
+    constexpr double dt    = 0.0001;
+    for (int setup = 0; setup < 2; ++setup) {
+        SCOPED_TRACE(setup);
+        lammps_command(lmp, "run 0 post no");
+        EXPECT_EQ(lammps_has_error(lmp), 0);
+        const auto state = collect_free_ring_bead(lmp);
+        for (int d = 0; d < 6; ++d) {
+            const double initial_force =
+                stiffness * (free_ring_positions[1 - bead][d] - free_ring_positions[bead][d]);
+            EXPECT_NEAR(state[d], free_ring_positions[bead][d], 1.0e-12) << d;
+            EXPECT_NEAR(state[6 + d], 0.0, 1.0e-12) << d;
+            EXPECT_NEAR(state[12 + d], initial_force, 1.0e-10) << d;
+        }
+    }
+    lammps_command(lmp, "run 1 pre no post no");
+    EXPECT_EQ(lammps_has_error(lmp), 0);
+    const auto state = collect_free_ring_bead(lmp);
+    for (int d = 0; d < 6; ++d) {
+        const double x0     = free_ring_positions[bead][d];
+        const double other0 = free_ring_positions[1 - bead][d];
+        const double f0     = stiffness * (other0 - x0);
+        // A single velocity-Verlet step, initially at rest, with M=fmass*m.
+        const double x1     = x0 + 0.5 * dt * dt * f0 / fmass;
+        const double other1 = other0 - 0.5 * dt * dt * f0 / fmass;
+        const double f1     = stiffness * (other1 - x1);
+        const double v1     = 0.5 * dt * (f0 + f1) / fmass;
+        EXPECT_NEAR(state[d], x1, 1.0e-12) << d;
+        EXPECT_NEAR(state[6 + d], v1, 1.0e-12) << d;
+        EXPECT_NEAR(state[12 + d], f1, 1.0e-10) << d;
+    }
+    lammps_close(lmp);
+}
+
+void check_normal_mode_free_ring(const char *mass_mode)
+{
+    int nprocs, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    ASSERT_EQ(nprocs, 4);
+    const int bead = rank / 2;
+    for (const char *integrator : {"obabo", "baoab"}) {
+        for (double fmass : {1.0, 0.5, 1.5}) {
+            SCOPED_TRACE(integrator);
+            SCOPED_TRACE(fmass);
+            void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+            ASSERT_NE(lmp, nullptr);
+            create_two_bead_test_system(lmp, 2, Ownership::ASYMMETRIC);
+            lammps_command(lmp, "timestep 0.01");
+            lammps_command(lmp, "thermo 0");
+            const std::string command =
+                "fix fpimd all pimd/langevin method nmpimd ensemble nve integrator " +
+                std::string(integrator) + " temp 1.0 sp 1.0 fmmode " + mass_mode + " fmass " +
+                std::to_string(fmass) + " fixcom no";
+            lammps_command(lmp, command.c_str());
+            lammps_command(lmp, "run 1 post no");
+            EXPECT_EQ(lammps_has_error(lmp), 0);
+            const auto state = collect_free_ring_bead(lmp);
+            // The relative coordinate has eigenvalue 4.  Its harmonic
+            // frequency follows from omega^2=(m*omega_P^2*4)/M, not the
+            // integrator's cached trigonometric coefficients.
+            const double mode_mass = fmass * (std::string(mass_mode) == "normal" ? 4.0 : 1.0);
+            const double omega     = 8.0 * std::acos(-1.0) / std::sqrt(mode_mass);
+            const double phase     = omega * 0.01;
+            for (int d = 0; d < 6; ++d) {
+                const double center = 0.5 * (free_ring_positions[0][d] + free_ring_positions[1][d]);
+                const double relative =
+                    0.5 * (free_ring_positions[0][d] - free_ring_positions[1][d]);
+                const double position =
+                    center + (bead == 0 ? relative : -relative) * std::cos(phase);
+                // Positions are Cartesian beads; stored velocities are normal modes.
+                const double velocity =
+                    bead == 0 ? 0.0 : -std::sqrt(2.0) * relative * omega * std::sin(phase);
+                EXPECT_NEAR(state[d], position, 1.0e-11) << d;
+                EXPECT_NEAR(state[6 + d], velocity, 1.0e-11) << d;
+                EXPECT_NEAR(state[12 + d], 0.0, 1.0e-12) << d;
+            }
+            lammps_close(lmp);
+        }
+    }
+}
+
+} // namespace
+
+TEST(PIMD, direct_free_ring_force_and_first_step)
+{
+    int nprocs, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    ASSERT_EQ(nprocs, 4);
+    MPI_Comm two_rank_comm;
+    MPI_Comm_split(MPI_COMM_WORLD, rank / 2, rank, &two_rank_comm);
+    for (const char *integrator : {"obabo", "baoab"}) {
+        for (double fmass : {1.0, 0.5}) {
+            SCOPED_TRACE(integrator);
+            SCOPED_TRACE(fmass);
+            check_direct_free_ring(two_rank_comm, "2x1", 1, integrator, fmass);
+            check_direct_free_ring(MPI_COMM_WORLD, "2x2", 2, integrator, fmass);
+        }
+    }
+    MPI_Comm_free(&two_rank_comm);
+}
+
+TEST(PIMD, normal_mode_free_ring_physical_mass)
+{
+    check_normal_mode_free_ring("physical");
+}
+
+TEST(PIMD, normal_mode_free_ring_normal_mass)
+{
+    check_normal_mode_free_ring("normal");
+}
+
 TEST(PIMD, common_core_nve_command_equivalence)
 {
     int nprocs;

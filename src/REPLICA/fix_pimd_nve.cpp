@@ -892,7 +892,9 @@ void FixPIMDNVE::init_normal_mode_coefficients()
 {
   double beta = 1.0 / kt;
   const double _omega_np = np / beta / hbar;
-  const double _omega_np_dt_half = _omega_np * update->dt * 0.5;
+  // The phase and velocity prefactor use the same fictitious-mass frequency.
+  // Dividing by one retains the default-fmass evaluation order.
+  const double _omega_np_dt_half = _omega_np * update->dt * 0.5 / sqrt(fmass);
 
   if (!_omega_k) _omega_k = new double[np];
   if (!Lan_c) Lan_c = new double[np];

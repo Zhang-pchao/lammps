@@ -473,7 +473,7 @@ void FixPIMDNVT::init_nvt_normal_modes()
   lam[0] = 0.0;
   if (np % 2 == 0) lam[np - 1] = 4.0 * np;
 
-  for (int i = 2; i <= np / 2; i++) {
+  for (int i = 2; i <= (np + 1) / 2; i++) {
     lam[2 * i - 3] = lam[2 * i - 2] = 2.0 * np * (1.0 - 1.0 * cos(2.0 * MY_PI * (i - 1) / np));
   }
 

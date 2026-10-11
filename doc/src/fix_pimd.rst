@@ -218,6 +218,15 @@ masses of beads, which can be used for the Partial Adiabatic CMD
 masses to be equal to the real particle masses. For all listed fix styles,
 *fmass* must be greater than zero and no larger than the number of beads P.
 
+.. versionchanged:: TBD
+
+The analytical free-ring propagation in *pimd/langevin* uses the same
+fictitious-mass frequency in its trigonometric phase and velocity factors.
+This corrects propagation with *fmass* values other than 1.0 for both
+fictitious mass modes. The default *fmass* of 1.0 is unchanged. Normal-mode
+initialization in *pimd/nvt* also includes the highest sine/cosine pair
+when the bead count is odd.
+
 The keyword *fmmode* of *fix pimd/langevin* determines the mode of fictitious
 mass preconditioning. There are two options: *physical* and *normal*. If *fmmode* is
 *physical*, then the physical mass of the particles are used (and then multiplied by
