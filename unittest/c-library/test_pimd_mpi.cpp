@@ -7,6 +7,7 @@
 #include "library.h"
 #include "lmptype.h"
 #include "modify.h"
+#include "pimd_bias_interface.h"
 #include "platform.h"
 #include "random_mars.h"
 #include "utils.h"
@@ -2378,15 +2379,16 @@ TEST(PIMD, common_core_nve_command_equivalence)
                         set_two_bead_initial_velocities(lmp, Ownership::ASYMMETRIC);
                         lammps_command(lmp, "timestep 0.0001");
                         lammps_command(lmp, "thermo 0");
-                        std::string command = variant == 0 ?
-                            "fix fpimd all pimd/langevin ensemble nve" : "fix fpimd all pimd/nve";
+                        std::string command = variant == 0
+                                                  ? "fix fpimd all pimd/langevin ensemble nve"
+                                                  : "fix fpimd all pimd/nve";
                         command += " method " + std::string(method) + " integrator " + integrator +
-                            " fmmode " + mass_mode + " fmass " + std::to_string(fmass) +
-                            " temp 1.0 sp 1.0";
+                                   " fmmode " + mass_mode + " fmass " + std::to_string(fmass) +
+                                   " temp 1.0 sp 1.0";
                         lammps_command(lmp, command.c_str());
                         lammps_command(lmp, "run 3 post no");
                         EXPECT_EQ(lammps_has_error(lmp), 0);
-                        state[variant] = collect_two_bead_state(extract_two_atom_state(lmp));
+                        state[variant]  = collect_two_bead_state(extract_two_atom_state(lmp));
                         output[variant] = extract_langevin_nvt_global_outputs(lmp);
                         lammps_close(lmp);
                     }
@@ -2400,4 +2402,173 @@ TEST(PIMD, common_core_nve_command_equivalence)
             }
         }
     }
+}
+
+TEST(PIMD, common_core_nve_restart_continuation)
+{
+    int nprocs, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    ASSERT_EQ(nprocs, 4);
+    for (const char *method : {"pimd", "nmpimd"}) {
+        for (const char *integrator : {"obabo", "baoab"}) {
+            SCOPED_TRACE(method);
+            SCOPED_TRACE(integrator);
+            const std::string fix_command = "fix fpimd all pimd/nve method " + std::string(method) +
+                                            " integrator " + integrator +
+                                            " temp 1.0 sp 1.0 fmass 0.5 fmmode physical";
+            auto run                      = [&](int continuation) {
+                void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+                EXPECT_NE(lmp, nullptr);
+                create_two_bead_test_system(lmp, 2, Ownership::ASYMMETRIC);
+                set_two_bead_initial_velocities(lmp, Ownership::ASYMMETRIC);
+                lammps_command(lmp, "timestep 0.0001");
+                lammps_command(lmp, "thermo 0");
+                lammps_command(lmp, fix_command.c_str());
+                lammps_command(lmp, continuation ? "run 2 post no" : "run 4 post no");
+                if (continuation == 2) {
+                    lammps_command(lmp, "variable checkpoint world test_pimd_nve_restart.0 "
+                                        "test_pimd_nve_restart.1");
+                    lammps_command(lmp, "write_restart ${checkpoint}");
+                    EXPECT_EQ(lammps_has_error(lmp), 0);
+                    lammps_close(lmp);
+                    lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+                    lammps_command(lmp, "variable checkpoint world test_pimd_nve_restart.0 "
+                                        "test_pimd_nve_restart.1");
+                    lammps_command(lmp, "read_restart ${checkpoint}");
+                    lammps_command(lmp, "thermo 0");
+                    lammps_command(lmp, fix_command.c_str());
+                }
+                if (continuation) lammps_command(lmp, "run 2 post no");
+                EXPECT_EQ(lammps_has_error(lmp), 0);
+                const auto result = collect_two_bead_state(extract_two_atom_state(lmp));
+                lammps_close(lmp);
+                return result;
+            };
+            const auto continuous = run(0);
+            const auto split      = run(1);
+            const auto restarted  = run(2);
+            for (std::size_t i = 0; i < continuous.size(); ++i) {
+                EXPECT_NEAR(split[i], continuous[i], 1.0e-12) << i;
+                EXPECT_NEAR(restarted[i], continuous[i], 1.0e-12) << i;
+            }
+            MPI_Barrier(MPI_COMM_WORLD);
+            if (rank == 0) {
+                std::remove("test_pimd_nve_restart.0");
+                std::remove("test_pimd_nve_restart.1");
+            }
+            MPI_Barrier(MPI_COMM_WORLD);
+        }
+    }
+}
+
+TEST(PIMD, single_particle_bosonic_dynamics_reduction)
+{
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    ASSERT_EQ(size, 4);
+    MPI_Comm two_rank_comm;
+    MPI_Comm_split(MPI_COMM_WORLD, rank / 2, rank, &two_rank_comm);
+    for (bool nose_hoover : {false, true}) {
+        for (const char *esynch : {"yes", "no"}) {
+            if (nose_hoover && std::string(esynch) == "no") continue;
+            SCOPED_TRACE(nose_hoover);
+            SCOPED_TRACE(esynch);
+            std::array<std::array<double, 9>, 2> results{};
+            for (int bosonic = 0; bosonic < 2; ++bosonic) {
+                void *lmp = open_two_bead_partition(two_rank_comm, "2x1");
+                ASSERT_NE(lmp, nullptr);
+                lammps_command(lmp, nose_hoover ? "units real" : "units lj");
+                lammps_command(lmp, "atom_style atomic");
+                lammps_command(lmp, "atom_modify map array");
+                lammps_command(lmp, "variable x world 5.0 5.125");
+                lammps_command(lmp, "variable vx world 0.125 -0.25");
+                lammps_command(lmp, "region box block 0 20 0 20 0 20");
+                lammps_command(lmp, "create_box 1 box");
+                lammps_command(lmp, "create_atoms 1 single ${x} 10 2");
+                lammps_command(lmp, "mass 1 1.0");
+                lammps_command(lmp, "pair_style zero 2.5");
+                lammps_command(lmp, "pair_coeff * *");
+                lammps_command(lmp, "velocity all set ${vx} 0.0625 -0.125");
+                lammps_command(lmp, "timestep 0.00001");
+                lammps_command(lmp, "thermo 0");
+                std::string command = nose_hoover ? "fix fpimd all pimd/nvt"
+                                                  : "fix fpimd all pimd/langevin";
+                if (bosonic) command += "/bosonic";
+                command += " method pimd temp 1.0 fmass 1.0 sp 1.0";
+                if (nose_hoover)
+                    command += " nhc 2";
+                else {
+                    command += " ensemble nve integrator obabo fixcom no";
+                    if (bosonic) command += " esynch " + std::string(esynch);
+                }
+                lammps_command(lmp, command.c_str());
+                lammps_command(lmp, "run 3 post no");
+                ASSERT_EQ(lammps_has_error(lmp), 0);
+                for (int field = 0; field < 3; ++field) {
+                    const char *name = field == 0 ? "x" : (field == 1 ? "v" : "f");
+                    auto **values    = static_cast<double **>(lammps_extract_atom(lmp, name));
+                    ASSERT_NE(values, nullptr);
+                    for (int d = 0; d < 3; ++d) {
+                        results[bosonic][3 * field + d] = values[0][d];
+                        EXPECT_TRUE(std::isfinite(values[0][d]));
+                    }
+                }
+                EXPECT_NE(results[bosonic][0], rank % 2 == 0 ? 5.0 : 5.125);
+                lammps_close(lmp);
+            }
+            // One particle has only the identity permutation, so both spring
+            // laws and the resulting deterministic trajectory must coincide.
+            for (std::size_t i = 0; i < results[0].size(); ++i)
+                EXPECT_NEAR(results[1][i], results[0][i], 1.0e-12) << i;
+        }
+    }
+    MPI_Comm_free(&two_rank_comm);
+}
+
+TEST(PIMD, external_bias_rejects_unverified_integrators)
+{
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    ASSERT_EQ(size, 4);
+    MPI_Comm two_rank_comm;
+    MPI_Comm_split(MPI_COMM_WORLD, rank / 2, rank, &two_rank_comm);
+    for (const char *style :
+         {"pimd/nve", "pimd/nvt", "pimd/nvt/bosonic", "pimd/langevin/bosonic"}) {
+        SCOPED_TRACE(style);
+        void *handle = open_two_bead_partition(two_rank_comm, "2x1");
+        ASSERT_NE(handle, nullptr);
+        create_two_bead_test_system(handle, 1, Ownership::DEFAULT, "real");
+        std::string command =
+            "fix fpimd all " + std::string(style) + " method pimd temp 1.0 fmass 1.0 sp 1.0";
+        if (std::string(style).find("nvt") != std::string::npos) command += " nhc 2";
+        if (std::string(style) == "pimd/langevin/bosonic")
+            command += " ensemble nvt thermostat PILE_L 1234 tau 1.0 fixcom no";
+        lammps_command(handle, command.c_str());
+        lammps_command(handle, "fix adapter all addforce 0.0 0.0 0.0");
+        ASSERT_EQ(lammps_has_error(handle), 0);
+        auto *lmp     = static_cast<LAMMPS_NS::LAMMPS *>(handle);
+        auto *core    = lmp->modify->get_fix_by_id("fpimd");
+        auto *adapter = lmp->modify->get_fix_by_id("adapter");
+        int dim       = -1;
+        auto *api =
+            static_cast<LAMMPS_NS::PIMDBiasInterface *>(core->extract("pimd_bias_interface", dim));
+        // Legacy NHC may expose no adapter interface at all.  A core which
+        // exposes the typed surface must explicitly reject every unverified mode.
+        if (api) {
+            EXPECT_EQ(dim, 0);
+            const auto capabilities = api->bias_capabilities();
+            EXPECT_FALSE(capabilities.coordinate_mean);
+            EXPECT_FALSE(capabilities.bead_modes);
+            EXPECT_FALSE(capabilities.fixed_cell_contraction);
+            for (const auto mode :
+                 {LAMMPS_NS::PIMDBiasMode::COORDINATE_MEAN, LAMMPS_NS::PIMDBiasMode::CV_MEAN,
+                  LAMMPS_NS::PIMDBiasMode::BIAS_MEAN})
+                EXPECT_THROW(api->register_bias(adapter, mode, false), LAMMPS_NS::LAMMPSException);
+        }
+        lammps_close(handle);
+    }
+    MPI_Comm_free(&two_rank_comm);
 }

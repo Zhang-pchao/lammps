@@ -149,8 +149,6 @@ FixPIMDNVE::FixPIMDNVE(LAMMPS *lmp, int narg, char **arg, bool /*defer_setup*/) 
   ntotal = maxlocal = maxxc = maxunwrap = maxsend = sizeplan = 0;
   x_last = x_next = 0;
   cmode = -1;
-  defer_normal_mode_force = normal_mode_force_pending = 0;
-  bead_bias_virial_pending = centroid_bias_virial_pending = 0;
   dtv = dtf = dtv2 = dtv3 = 0.0;
   vir = vir_ = centroid_vir = 0.0;
   t_prim = t_vir = t_cv = p_prim = p_vir = p_cv = p_md = 0.0;
@@ -161,6 +159,10 @@ FixPIMDNVE::FixPIMDNVE(LAMMPS *lmp, int narg, char **arg, bool /*defer_setup*/) 
 
 FixPIMDNVE::~FixPIMDNVE()
 {
+  if (bias_registration) {
+    bias_registration->owner = nullptr;
+    bias_registration->adapter = nullptr;
+  }
   if (id_pe) modify->delete_compute(id_pe);
   if (id_press) modify->delete_compute(id_press);
   delete[] id_pe;
@@ -371,9 +373,6 @@ void FixPIMDNVE::create_energy_computes()
 
 void FixPIMDNVE::init()
 {
-  defer_normal_mode_force = 0;
-  normal_mode_force_pending = 0;
-  bead_bias_virial_pending = 0;
 
   validate_partition_topology(true);
 
@@ -495,7 +494,7 @@ void FixPIMDNVE::setup(int vflag)
 
   post_force(vflag);
   compute_totke();
-  end_of_step();
+  if (!bias_pending) end_of_step();
   c_pe->addstep(update->ntimestep + 1);
   c_press->addstep(update->ntimestep + 1);
 }
@@ -505,7 +504,7 @@ void FixPIMDNVE::setup(int vflag)
 void FixPIMDNVE::initial_integrate(int /*vflag*/)
 {
   trace_nonfinite_state("initial-entry", "bead-x-normal-vf");
-  prepare_normal_mode_forces();
+  require_force_completion();
   trace_nonfinite_state("initial-force-ready", "bead-x-normal-vf");
 
   int nlocal = atom->nlocal;
@@ -609,7 +608,7 @@ void FixPIMDNVE::initial_integrate(int /*vflag*/)
 void FixPIMDNVE::final_integrate()
 {
   trace_nonfinite_state("final-entry", "bead-x-normal-v-physical-f");
-  prepare_normal_mode_forces();
+  require_force_completion();
   trace_nonfinite_state("final-force-ready", "bead-x-normal-vf");
 
   b_step();
@@ -635,9 +634,18 @@ void FixPIMDNVE::post_force(int /*flag*/)
 {
   trace_nonfinite_state("post-physical-force", "bead-x-normal-v-physical-f");
 
+  if (bias_pending) error->all(FLERR, "Missing external PIMD bias force submission");
+  ++bias_generation;
+  force_ready = false;
+  bias_pending = bool(bias_registration);
+  bias_energy = 0.0;
+  if (bias_registration) {
+    validate_bias_order(bias_registration->adapter);
+    for (double &value : bias_registration->adapter->virial) value = 0.0;
+  }
+
   int nlocal = atom->nlocal;
   double **x = atom->x;
-  double **f = atom->f;
   imageint *image = atom->image;
   tagint *tag = atom->tag;
 
@@ -662,34 +670,7 @@ void FixPIMDNVE::post_force(int /*flag*/)
   compute_cvir();
   compute_t_vir();
 
-  if (method == PIMD) {
-    if (mapflag) {
-      for (int i = 0; i < nlocal; i++) { domain->unmap(x[i], image[i]); }
-    }
-    prepare_coordinates();
-    spring_force();
-    compute_spring_energy();
-    compute_t_prim();
-    compute_p_prim();
-    if (mapflag) {
-      for (int i = 0; i < nlocal; i++) { domain->unmap_inv(x[i], image[i]); }
-    }
-  }
-  if (method == NMPIMD) {
-    if (defer_normal_mode_force) {
-      normal_mode_force_pending = 1;
-    } else {
-      inter_replica_comm(f);
-      if (cmode == SINGLE_PROC)
-        nmpimd_transform(bufsortedall, f, M_x2xp[universe->iworld]);
-      else if (cmode == MULTI_PROC)
-        nmpimd_transform(bufbeads, f, M_x2xp[universe->iworld]);
-      trace_nonfinite_state("post-force-transform-post", "bead-x-normal-vf");
-      after_force_transform_hook();
-    }
-  }
-
-  if (method == PIMD) after_force_transform_hook();
+  if (!bias_pending) complete_force_evaluation();
   c_pe->addstep(update->ntimestep + 1);
   c_press->addstep(update->ntimestep + 1);
 }
@@ -698,7 +679,7 @@ void FixPIMDNVE::post_force(int /*flag*/)
 
 void FixPIMDNVE::end_of_step()
 {
-  if (bead_bias_virial_pending) prepare_normal_mode_forces();
+  require_force_completion();
   compute_pote();
   compute_totke();
   compute_p_cv();
@@ -950,30 +931,6 @@ void FixPIMDNVE::nmpimd_transform(double **src, double **des, double *vector)
 }
 
 /* ---------------------------------------------------------------------- */
-
-void FixPIMDNVE::prepare_normal_mode_forces()
-{
-  if (method != NMPIMD || !normal_mode_force_pending) return;
-  trace_nonfinite_state("deferred-force-transform-pre", "bead-x-normal-v-physical-f");
-
-  if (bead_bias_virial_pending) {
-    // Pressure must include the current bias. The kinetic estimators retain
-    // the physical-force values computed before PLUMED in post_force().
-    compute_vir();
-    compute_cvir();
-    bead_bias_virial_pending = 0;
-  }
-
-  double **f = atom->f;
-  inter_replica_comm(f);
-  if (cmode == SINGLE_PROC)
-    nmpimd_transform(bufsortedall, f, M_x2xp[universe->iworld]);
-  else if (cmode == MULTI_PROC)
-    nmpimd_transform(bufbeads, f, M_x2xp[universe->iworld]);
-  trace_nonfinite_state("deferred-force-transform-post", "bead-x-normal-vf");
-  normal_mode_force_pending = 0;
-  after_force_transform_hook();
-}
 
 /* ---------------------------------------------------------------------- */
 
@@ -1470,13 +1427,11 @@ void FixPIMDNVE::compute_pote()
   pote = 0.0;
   c_pe->compute_scalar();
   pe_bead = c_pe->scalar;
-  // PLUMED reports the physical bias B, while this beta/P integrator evolves
-  // H_ring + P*B. Complete the energy tally without changing f_plumed or COLVAR.
-  for (const auto &fix : modify->get_fix_list()) {
-    int dim = -1;
-    auto *physical_bias = static_cast<double *>(fix->extract("pimd_physical_bias_energy", dim));
-    if (physical_bias && dim == 0)
-      pe_bead += (np - (fix->thermo_energy ? 1 : 0)) * (*physical_bias);
+  // The adapter reports physical B; this beta/P Hamiltonian contains P*B.
+  if (bias_registration) {
+    const auto *adapter = bias_registration->adapter;
+    const bool tallied = adapter->energy_global_flag && adapter->thermo_energy;
+    pe_bead += (np - (tallied ? 1 : 0)) * bias_energy;
   }
   double pot_energy_partition = pe_bead / universe->procs_per_world[universe->iworld];
   MPI_Allreduce(&pot_energy_partition, &pote, 1, MPI_DOUBLE, MPI_SUM, universe->uworld);
@@ -1516,10 +1471,6 @@ void FixPIMDNVE::compute_p_prim()
 
 void FixPIMDNVE::compute_p_cv()
 {
-  if (centroid_bias_virial_pending) {
-    compute_vir();
-    centroid_bias_virial_pending = 0;
-  }
   double inv_volume = 1.0 / (domain->xprd * domain->yprd * domain->zprd);
   p_md = THIRD * inv_volume * (totke + vir);
   if (method == NMPIMD) {
@@ -1541,6 +1492,7 @@ void FixPIMDNVE::compute_p_cv()
 
 double FixPIMDNVE::compute_vector(int n)
 {
+  require_force_completion();
   if (n == 0) return ke_bead;
   if (n == 1) return se_bead;
   if (n == 2) return pe_bead;
@@ -1574,3 +1526,159 @@ void FixPIMDNVE::after_force_transform_hook() {}
 /* ---------------------------------------------------------------------- */
 
 void FixPIMDNVE::trace_nonfinite_state(const char * /*stage*/, const char * /*basis*/) {}
+
+PIMDBiasCapabilities FixPIMDNVE::bias_capabilities() const
+{ return {np, false, false, false}; }
+
+std::shared_ptr<PIMDBiasRegistration> FixPIMDNVE::register_bias(Fix *adapter, PIMDBiasMode mode,
+                                                                bool contraction)
+{
+  const auto capabilities = bias_capabilities();
+  const bool supported = mode == PIMDBiasMode::COORDINATE_MEAN ? capabilities.coordinate_mean
+                                                               : capabilities.bead_modes;
+  int settings[2] = {static_cast<int>(mode), contraction ? 1 : 0};
+  int minimum[2], maximum[2];
+  MPI_Allreduce(settings, minimum, 2, MPI_INT, MPI_MIN, universe->uworld);
+  MPI_Allreduce(settings, maximum, 2, MPI_INT, MPI_MAX, universe->uworld);
+  if ((minimum[0] != maximum[0]) || (minimum[1] != maximum[1]))
+    error->all(FLERR, "External PIMD bias settings must match in all partitions");
+  int invalid = !supported ? 1 : 0;
+  if (contraction && !capabilities.fixed_cell_contraction) invalid = 2;
+  if (bias_registration &&
+      ((bias_registration->adapter != adapter) || (bias_registration->mode != mode) ||
+       (bias_registration->contraction != contraction)))
+    invalid = 3;
+  MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (invalid == 3)
+    error->all(FLERR, "Fix {} already has a different external bias registration", style);
+  if (invalid == 2)
+    error->all(FLERR, "Fix {} external bias contraction requires fixed-cell NVT PIMD", style);
+  if (invalid == 1)
+    error->all(FLERR, "Fix {} does not support the requested external PIMD bias mode", style);
+
+  // Publish a token only after validation, so a failed init leaves no registration.
+  validate_bias_order(adapter);
+  if (!bias_registration) {
+    bias_registration = std::make_shared<PIMDBiasRegistration>();
+    bias_registration->owner = this;
+    bias_registration->adapter = adapter;
+    bias_registration->mode = mode;
+    bias_registration->contraction = contraction;
+  }
+  return bias_registration;
+}
+
+void FixPIMDNVE::unregister_bias(PIMDBiasRegistration &registration)
+{
+  if (bias_registration.get() != &registration) return;
+  registration.owner = nullptr;
+  registration.adapter = nullptr;
+  bias_registration.reset();
+  bias_pending = false;
+  bias_energy = 0.0;
+}
+
+void FixPIMDNVE::validate_bias_order(Fix *adapter) const
+{
+  int core_index = -1, adapter_index = -1;
+  for (int i = 0; i < modify->nfix; ++i) {
+    if (modify->fix[i] == this) core_index = i;
+    if (modify->fix[i] == adapter) adapter_index = i;
+  }
+  int invalid = (core_index < 0) || (adapter_index <= core_index) ? 1 : 0;
+  if (!invalid)
+    for (int i = adapter_index + 1; i < modify->nfix; ++i)
+      if ((modify->fmask[i] & POST_FORCE) && (strcmp(modify->fix[i]->style, "GROUP") != 0))
+        invalid = 2;
+  MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (invalid == 1)
+    error->all(FLERR, "External PIMD bias adapter must be defined after its integrator");
+  if (invalid == 2)
+    error->all(FLERR,
+               "External PIMD bias adapter must be defined after all other "
+               "post-force fixes");
+}
+
+PIMDBiasCoordinates FixPIMDNVE::bias_coordinates(const PIMDBiasRegistration &registration) const
+{
+  int state_error = !bias_pending ? 1 : 0;
+  if ((bias_registration.get() != &registration) || (registration.owner != this)) state_error = 2;
+  MPI_Allreduce(MPI_IN_PLACE, &state_error, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (state_error == 2) error->all(FLERR, "Stale external PIMD bias registration");
+  if (state_error == 1) error->all(FLERR, "No pending external PIMD bias force evaluation");
+  return {bias_generation, update->ntimestep, atom->nlocal, atom->tag, atom->x, x_unwrap, xcall};
+}
+
+void FixPIMDNVE::submit_bias(const PIMDBiasRegistration &registration,
+                             const PIMDBiasSubmission &submission, double *dynamical_virial)
+{
+  int state_error = 0;
+  if (!bias_pending) state_error = 1;
+  if (submission.generation != bias_generation) state_error = 2;
+  if ((bias_registration.get() != &registration) || (registration.owner != this)) state_error = 3;
+  MPI_Allreduce(MPI_IN_PLACE, &state_error, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (state_error == 3) error->all(FLERR, "Stale external PIMD bias registration");
+  if (state_error == 2) error->all(FLERR, "Stale external PIMD bias force evaluation");
+  if (state_error == 1) error->all(FLERR, "Duplicate external PIMD bias force submission");
+  int invalid = (submission.nlocal != atom->nlocal) || !submission.virial || !dynamical_virial ||
+      (atom->nlocal && !submission.force) || !std::isfinite(submission.energy);
+  if (!invalid) {
+    for (int i = 0; i < 3 * atom->nlocal; ++i)
+      if (!std::isfinite(submission.force[i])) invalid = 1;
+    for (int i = 0; i < 6; ++i)
+      if (!std::isfinite(submission.virial[i])) invalid = 1;
+  }
+  MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (invalid) error->all(FLERR, "Invalid external PIMD bias submission");
+  bias_energy = submission.energy;
+  for (int i = 0; i < atom->nlocal; ++i)
+    for (int d = 0; d < 3; ++d) atom->f[i][d] += np * submission.force[3 * i + d];
+  for (int d = 0; d < 6; ++d) dynamical_virial[d] = np * submission.virial[d];
+
+  // Keep the physical kinetic estimators captured before external forces.
+  // Refresh only biased pressure from Cartesian forces, before adding springs
+  // or changing the force representation.
+  c_press->invoked_vector = -1;
+  c_pe->invoked_scalar = -1;
+  compute_vir();
+  compute_cvir();
+  bias_pending = false;
+  complete_force_evaluation();
+  end_of_step();
+}
+
+void FixPIMDNVE::require_force_completion() const
+{
+  if (!force_ready) error->all(FLERR, "Missing external PIMD bias force submission");
+}
+
+void FixPIMDNVE::post_run()
+{ require_force_completion(); }
+
+void FixPIMDNVE::complete_force_evaluation()
+{
+  if (method == PIMD) {
+    if (mapflag)
+      for (int i = 0; i < atom->nlocal; ++i) domain->unmap(atom->x[i], atom->image[i]);
+    prepare_coordinates();
+    spring_force();
+    compute_spring_energy();
+    compute_t_prim();
+    compute_p_prim();
+    if (mapflag)
+      for (int i = 0; i < atom->nlocal; ++i) domain->unmap_inv(atom->x[i], atom->image[i]);
+  } else if (method == NMPIMD) {
+    inter_replica_comm(atom->f);
+    nmpimd_transform(normal_mode_transform_buffer(), atom->f, M_x2xp[universe->iworld]);
+    trace_nonfinite_state("post-force-transform-post", "bead-x-normal-vf");
+  }
+  force_ready = true;
+  after_force_transform_hook();
+}
+
+void *FixPIMDNVE::extract(const char *name, int &dim)
+{
+  dim = 0;
+  if (strcmp(name, "pimd_bias_interface") == 0) return static_cast<PIMDBiasInterface *>(this);
+  return Fix::extract(name, dim);
+}

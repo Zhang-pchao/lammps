@@ -21,6 +21,7 @@ FixStyle(plumed,FixPlumed);
 #define LMP_FIX_PLUMED_H
 
 #include "fix.h"
+#include "pimd_bias_interface.h"
 
 #include <vector>
 
@@ -60,41 +61,39 @@ class FixPlumed : public Fix {
   double path_contraction;
   std::vector<double> contracted_positions, contracted_forces, contraction_mean;
 
-  PLMD::Plumed *p;                    // pointer to plumed object
-  class Fix *pimd_fix;                // fix providing the Cartesian PIMD centroid
-  int nlocal;                         // number of atoms local to this process
-  int natoms;                         // total number of atoms
-  int path_integral_mode;             // path-integral coupling mode
-  int plumed_active;                  // this partition runs a PLUMED instance
-  double centroid_force_scale;        // chain-rule force scale supplied by the PIMD fix
-  double bead_density_force_scale;    // 1/P scaling for shared bead-density forces
-  int *gatindex;                      // array of atom indexes local to this process
-  double *masses;                     // array of masses for local atoms
-  double *charges;                    // array of charges for local atoms
-  double *centroid_coordinates;       // tag-ordered Cartesian centroid coordinates
-  double *centroid_positions;         // local centroid coordinates passed to PLUMED
-  double *centroid_forces;            // local centroid forces returned by PLUMED
-  double *centroid_forces_all;        // tag-ordered centroid forces shared by all beads
-  int *centroid_virial_pending;       // asks the NMPIMD fix to collect this step's bias virial
-  int *bead_bias_virial_pending;      // asks NMPIMD to transform bead forces and refresh virial
-  double *forces_before_plumed;       // local forces before bead-density bias
-  int nlevels_respa;                  // this is something to enable respa
-  double bias;                        // output bias potential
-  class Compute *c_pe;                // Compute for the energy
-  class Compute *c_press;             // Compute for the pressure
-  int plumedNeedsEnergy;              // Flag to trigger calculation of the
-                                      // energy and virial
-  char *id_pe, *id_press;             // ID for potential energy and pressure compute
-  char *nonfinite_trace_prefix;       // opt-in diagnostic output prefix
-  char *id_pimd;                      // ID for the coupled fix pimd/langevin
+  PLMD::Plumed *p;                 // pointer to plumed object
+  PIMDBiasInterface *pimd_core;    // typed capability, refreshed during init
+  std::shared_ptr<PIMDBiasRegistration> pimd_registration;
+  bigint last_pimd_update_step;    // history updates are distinct from force evaluations
+  std::vector<double> bias_positions, bias_forces;
+  int nlocal;                      // number of atoms local to this process
+  int natoms;                      // total number of atoms
+  int path_integral_mode;          // path-integral coupling mode
+  int plumed_active;               // this partition runs a PLUMED instance
+  int *gatindex;                   // array of atom indexes local to this process
+  double *masses;                  // array of masses for local atoms
+  double *charges;                 // array of charges for local atoms
+  double *centroid_positions;      // local centroid coordinates passed to PLUMED
+  double *centroid_forces;         // local centroid forces returned by PLUMED
+  double *centroid_forces_all;     // tag-ordered centroid forces shared by all beads
+  int nlevels_respa;               // this is something to enable respa
+  double bias;                     // output bias potential
+  class Compute *c_pe;             // Compute for the energy
+  class Compute *c_press;          // Compute for the pressure
+  int plumedNeedsEnergy;           // Flag to trigger calculation of the
+                                   // energy and virial
+  char *id_pe, *id_press;          // ID for potential energy and pressure compute
+  char *nonfinite_trace_prefix;    // opt-in diagnostic output prefix
+  char *id_pimd;                   // ID for the coupled PIMD integrator
 
   void check_path_integral_compatibility();
-  void check_normal_mode_post_force_order();
   void update_atom_data();
-  void post_force_centroid();
-  void prepare_contracted_coordinates();
+  void post_force_beads(const PIMDBiasCoordinates &);
+  void post_force_centroid(const PIMDBiasCoordinates &);
+  void prepare_contracted_coordinates(const PIMDBiasCoordinates &);
   void pullback_contracted_forces();
-  void trace_nonfinite_state(const char *, const double *, bool);
+  void trace_nonfinite_state(const char *, const double *, bool, const double * = nullptr,
+                             double = 1.0);
   void trace_centroid_nonfinite(const char *);
 };
 

@@ -300,10 +300,10 @@ ensemble is it going to sample. The value can be *nve* (microcanonical),
 support *ensemble* other than *nve*, *nvt*.
 
 When :doc:`fix plumed <fix_plumed>` uses a *path_integral* mode, normal-mode
-PIMD supports the NVT, NPH, and NPT ensembles.  For *centroid*, the Cartesian
+PIMD supports the NVT, NPH, and NPT ensembles.  For *coordinate_mean*, the Cartesian
 centroid passed to PLUMED is :math:`\mathbf{q}_0/\sqrt{P}` and the returned
 force on the zero mode is :math:`\sqrt{P}\mathbf{F}_c`; every non-centroid
-mode receives zero bias force.  For *bead_mean* and *bead_density*, PLUMED
+mode receives zero bias force.  For *cv_mean* and *bias_mean*, PLUMED
 evaluates Cartesian bead coordinates and the complete Cartesian force is
 transformed, so nonlinear collective variables can exert nonzero forces on
 internal modes.  The physical bias :math:`U_B` enters the dynamical
@@ -318,9 +318,10 @@ barostat or update the cell.  NPH and NPT additionally use that pressure in
 their BZP barostat path.  Normal-mode NVE path-integral coupling is not
 supported.
 
-For these NMPIMD path-integral modes, ``fix plumed`` must be the last fix with
-a post-force callback.  Define any other such fixes before it so their
-Cartesian force contributions are included in the complete transformation.
+For all supported path-integral modes, define ``fix plumed`` after its
+PIMD integrator and after other fixes with a post-force callback. This
+ensures that Cartesian force contributions are complete before the
+integrator adds spring forces or transforms forces to normal modes.
 
 The keyword *temp* specifies temperature parameter for fix styles
 *pimd/nvt* and *pimd/langevin*. It must be a positive floating-point

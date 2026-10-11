@@ -192,9 +192,12 @@ centroid-only force would be incorrect.  NVT keeps the cell fixed.  NPH and
 NPT include the current-step bead-bias virial in the centroid pressure used by
 the BZP barostat.
 
-For every *path_integral* mode used with *method nmpimd*, define ``fix
-plumed`` after all other fixes that have a post-force callback.  This keeps
-Cartesian force contributions ahead of the normal-mode force transformation.
+.. versionchanged:: TBD
+
+For every supported *path_integral* mode, define ``fix plumed`` after its
+PIMD integrator and all other fixes that have a post-force callback. This
+keeps Cartesian force contributions ahead of spring-force addition or the
+normal-mode force transformation.
 LAMMPS stops with an error if a post-force fix is defined after ``fix
 plumed``; fixes without a post-force callback may still follow it.
 

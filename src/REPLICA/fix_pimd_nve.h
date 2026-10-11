@@ -21,12 +21,13 @@ FixStyle(pimd/nve,FixPIMDNVE);
 #define LMP_FIX_PIMD_NVE_H
 
 #include "fix.h"
+#include "pimd_bias_interface.h"
 
 #include <vector>
 
 namespace LAMMPS_NS {
 
-class FixPIMDNVE : public Fix {
+class FixPIMDNVE : public Fix, public PIMDBiasInterface {
  public:
   enum { PIMD, NMPIMD, CMD };
   enum { PHYSICAL, NORMAL };
@@ -44,6 +45,13 @@ class FixPIMDNVE : public Fix {
   void final_integrate() override;
   void end_of_step() override;
   double compute_vector(int) override;
+  void *extract(const char *, int &) override;
+  void post_run() override;
+  PIMDBiasCapabilities bias_capabilities() const override;
+  std::shared_ptr<PIMDBiasRegistration> register_bias(Fix *, PIMDBiasMode, bool) override;
+  void unregister_bias(PIMDBiasRegistration &) override;
+  PIMDBiasCoordinates bias_coordinates(const PIMDBiasRegistration &) const override;
+  void submit_bias(const PIMDBiasRegistration &, const PIMDBiasSubmission &, double *) override;
 
  protected:
   // Deferred construction initializes storage without parsing options or creating computes.
@@ -68,8 +76,11 @@ class FixPIMDNVE : public Fix {
 
   double *lam, **M_x2xp, **M_xp2x, **M_f2fp, **M_fp2f;
   int *modeindex;
-  int defer_normal_mode_force, normal_mode_force_pending;
-  int bead_bias_virial_pending, centroid_bias_virial_pending;
+  std::shared_ptr<PIMDBiasRegistration> bias_registration;
+  std::uint64_t bias_generation = 0;
+  bool bias_pending = false;
+  bool force_ready = true;
+  double bias_energy = 0.0;
   double dtv, dtf, dtv2, dtv3;
   double *_omega_k, *Lan_s, *Lan_c;
 
@@ -95,7 +106,9 @@ class FixPIMDNVE : public Fix {
   void init_normal_mode_coefficients();
   void nmpimd_transform(double **, double **, double *);
   double **normal_mode_transform_buffer();
-  void prepare_normal_mode_forces();
+  void require_force_completion() const;
+  void complete_force_evaluation();
+  void validate_bias_order(Fix *) const;
   void collect_xc();
   void remove_com_motion();
 

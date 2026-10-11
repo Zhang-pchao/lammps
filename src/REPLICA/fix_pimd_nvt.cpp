@@ -113,7 +113,8 @@ FixPIMDNVT::FixPIMDNVT(LAMMPS *lmp, int narg, char **arg) :
   if (np < 2)
     error->universe_all(FLERR,
                         fmt::format("Fix {} requires at least 2 beads, i.e. running with the "
-                                    "-partition command line option", style));
+                                    "-partition command line option",
+                                    style));
 
   /* Initiation */
 
@@ -254,16 +255,12 @@ void FixPIMDNVT::initial_integrate(int /*vflag*/)
 /* ---------------------------------------------------------------------- */
 
 void FixPIMDNVT::final_integrate()
-{
-  nhc_update_v();
-}
+{ nhc_update_v(); }
 
 /* ---------------------------------------------------------------------- */
 
 void FixPIMDNVT::prepare_coordinates()
-{
-  inter_replica_comm(atom->x);
-}
+{ inter_replica_comm(atom->x); }
 
 /* ---------------------------------------------------------------------- */
 
@@ -518,9 +515,7 @@ void FixPIMDNVT::init_nvt_normal_modes()
 /* ---------------------------------------------------------------------- */
 
 void FixPIMDNVT::pre_spring_force_estimators()
-{
-  vir_estimator();
-}
+{ vir_estimator(); }
 
 /* ---------------------------------------------------------------------- */
 
@@ -590,9 +585,7 @@ void *FixPIMDNVT::extract(const char *name, int &dim)
 ------------------------------------------------------------------------- */
 
 double FixPIMDNVT::memory_usage()
-{
-  return (double) atom->nmax * size_peratom_cols * sizeof(double);
-}
+{ return (double) atom->nmax * size_peratom_cols * sizeof(double); }
 
 /* ---------------------------------------------------------------------- */
 
@@ -706,16 +699,12 @@ void FixPIMDNVT::unpack_restart(int nlocal, int nth)
 /* ---------------------------------------------------------------------- */
 
 int FixPIMDNVT::maxsize_restart()
-{
-  return size_peratom_cols + 1;
-}
+{ return size_peratom_cols + 1; }
 
 /* ---------------------------------------------------------------------- */
 
 int FixPIMDNVT::size_restart(int /*nlocal*/)
-{
-  return size_peratom_cols + 1;
-}
+{ return size_peratom_cols + 1; }
 
 /* ---------------------------------------------------------------------- */
 

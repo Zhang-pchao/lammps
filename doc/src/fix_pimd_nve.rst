@@ -1,7 +1,7 @@
 .. index:: fix pimd/nve
 
 fix pimd/nve command
-===================
+================================================================================
 
 Syntax
 """"""
@@ -49,7 +49,7 @@ splitting. This command does not change the input syntax or the
 Nose-Hoover chain convention of *pimd/nvt*.
 
 Restart, fix_modify, output, run start/stop, minimize info
-""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 This fix has no thermostat, barostat, or random-number state to save.
 Atom coordinates and velocities are stored by :doc:`write_restart`.
@@ -76,7 +76,7 @@ group membership, and numbers of MPI processes. See :doc:`fix pimd/langevin
 
 The *normal* fictitious mass mode requires *method nmpimd*. Coupling this
 style to an external bias is not enabled. Use the supported combinations
-documented for :doc:`fix plumed` when a PLUMED bias is required.
+documented for :doc:`fix plumed <fix_plumed>` when a PLUMED bias is required.
 
 Related commands
 """"""""""""""""

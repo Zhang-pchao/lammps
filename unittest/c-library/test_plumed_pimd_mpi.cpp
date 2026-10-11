@@ -884,8 +884,7 @@ TEST(MPI, plumed_pimd_input_contract)
         lammps_command(lmp, valid_command.c_str());
         lammps_command(lmp, "fix late all addforce 0.1 0.0 0.0");
         expect_error(lmp, "run 0 post no",
-                     "Fix plumed with NMPIMD path_integral modes must be defined after fix "
-                     "addforce because it has a post-force callback");
+                     "External PIMD bias adapter must be defined after all other post-force fixes");
         lammps_close(lmp);
     }
 }
@@ -3219,3 +3218,294 @@ TEST(MPI, plumed_pimd_multirank_bead_modes)
         }
     }
 };
+
+namespace {
+
+std::array<double, 6> collect_plumed_atom_vectors(void *lmp, const char *field)
+{
+    std::array<double, 6> result{};
+    auto *nlocal  = static_cast<int *>(lammps_extract_global(lmp, "nlocal"));
+    auto *tags    = static_cast<tagint *>(lammps_extract_atom(lmp, "id"));
+    auto **values = static_cast<double **>(lammps_extract_atom(lmp, field));
+    EXPECT_NE(nlocal, nullptr);
+    EXPECT_NE(tags, nullptr);
+    EXPECT_NE(values, nullptr);
+    if (nlocal && tags && values) {
+        for (int i = 0; i < *nlocal; ++i) {
+            EXPECT_GE(tags[i], 1);
+            EXPECT_LE(tags[i], 2);
+            if (tags[i] < 1 || tags[i] > 2) continue;
+            for (int d = 0; d < 3; ++d)
+                result[3 * (tags[i] - 1) + d] = values[i][d];
+        }
+    }
+    MPI_Allreduce(MPI_IN_PLACE, result.data(), static_cast<int>(result.size()), MPI_DOUBLE, MPI_SUM,
+                  static_cast<LAMMPS_NS::LAMMPS *>(lmp)->world);
+    return result;
+}
+
+} // namespace
+
+TEST(MPI, plumed_intervening_cartesian_force_transform)
+{
+    int nprocs, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    ASSERT_EQ(nprocs, 4);
+    const char *input_file = "test_plumed_cartesian_force_order.dat";
+    if (rank == 0) {
+        std::ofstream input(input_file);
+        input << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+              << "bias: RESTRAINT ARG=d AT=0.0 KAPPA=0.0\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    constexpr std::array<double, 3> increment = {0.125, -0.25, 0.375};
+    for (const char *mode : {"coordinate_mean", "cv_mean", "bias_mean"}) {
+        SCOPED_TRACE(mode);
+        void *lmp = open_multirank_partition();
+        ASSERT_NE(lmp, nullptr);
+        create_multirank_two_atom_system(lmp);
+        lammps_command(lmp, "fix fpimd all pimd/langevin method nmpimd ensemble nvt "
+                            "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no");
+        lammps_command(lmp, "fix early all addforce 0.125 -0.25 0.375");
+        const std::string logfile =
+            "test_plumed_cartesian_force_order_" + std::string(mode) + ".log";
+        const std::string command = "fix bias all plumed plumedfile " + std::string(input_file) +
+                                    " outfile " + logfile + " path_integral " + mode +
+                                    " pimd_fix fpimd";
+        lammps_command(lmp, command.c_str());
+        for (int setup = 0; setup < 2; ++setup) {
+            SCOPED_TRACE(setup);
+            lammps_command(lmp, "run 0 post no");
+            EXPECT_EQ(lammps_has_error(lmp), 0);
+            const auto forces = collect_plumed_atom_vectors(lmp, "f");
+            // A spatially uniform Cartesian increment acts only on q_0:
+            // F_0=(A+A)/sqrt(2), F_1=(A-A)/sqrt(2).
+            for (int atom = 0; atom < 2; ++atom)
+                for (int d = 0; d < 3; ++d)
+                    EXPECT_NEAR(forces[3 * atom + d],
+                                rank / 2 == 0 ? std::sqrt(2.0) * increment[d] : 0.0, 1.0e-12)
+                        << atom << " " << d;
+        }
+        lammps_close(lmp);
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == 0) {
+            std::remove(logfile.c_str());
+            for (int bead = 0; bead < 2; ++bead)
+                std::remove((logfile + "." + std::to_string(bead)).c_str());
+        }
+    }
+    if (rank == 0) std::remove(input_file);
+    MPI_Barrier(MPI_COMM_WORLD);
+}
+
+TEST(MPI, plumed_direct_free_ring_setup_force)
+{
+    int nprocs, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    ASSERT_EQ(nprocs, 4);
+    const int bead         = rank / 2;
+    const char *input_file = "test_plumed_direct_free_ring.dat";
+    if (rank == 0) {
+        std::ofstream input(input_file);
+        input << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+              << "bias: RESTRAINT ARG=d AT=0.0 KAPPA=0.0\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    const std::array<std::array<double, 6>, 2> initial = {
+        {{10.0, 10.0, 2.0, 19.0, 10.0, 2.0}, {10.0, 10.0, 2.0, 10.0, 17.0, 2.0}}};
+    const double omega_p   = 4.0 * std::acos(-1.0);
+    const double stiffness = 2.0 * omega_p * omega_p;
+    constexpr double dt    = 0.0001;
+    constexpr double fmass = 0.5;
+    for (const char *mode : {"coordinate_mean", "cv_mean", "bias_mean"}) {
+        SCOPED_TRACE(mode);
+        void *lmp = open_multirank_partition();
+        ASSERT_NE(lmp, nullptr);
+        create_multirank_two_atom_system(lmp);
+        lammps_command(lmp, "timestep 0.0001");
+        // Direct PIMD requires NVT for the adapter.  This damping time makes
+        // the O step exactly the identity in double precision (no noise).
+        lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                            "integrator obabo thermostat PILE_L 1234 tau 1.0e100 temp 1.0 "
+                            "sp 1.0 fmmode physical fmass 0.5 fixcom no");
+        const std::string logfile = "test_plumed_direct_free_ring_" + std::string(mode) + ".log";
+        const std::string command = "fix bias all plumed plumedfile " + std::string(input_file) +
+                                    " outfile " + logfile + " path_integral " + mode +
+                                    " pimd_fix fpimd";
+        lammps_command(lmp, command.c_str());
+        for (int setup = 0; setup < 2; ++setup) {
+            SCOPED_TRACE(setup);
+            lammps_command(lmp, "run 0 post no");
+            EXPECT_EQ(lammps_has_error(lmp), 0);
+            const auto force = collect_plumed_atom_vectors(lmp, "f");
+            for (int d = 0; d < 6; ++d)
+                EXPECT_NEAR(force[d], stiffness * (initial[1 - bead][d] - initial[bead][d]),
+                            1.0e-10)
+                    << d;
+        }
+        lammps_command(lmp, "run 1 pre no post no");
+        EXPECT_EQ(lammps_has_error(lmp), 0);
+        const auto position = collect_plumed_atom_vectors(lmp, "x");
+        const auto velocity = collect_plumed_atom_vectors(lmp, "v");
+        const auto force    = collect_plumed_atom_vectors(lmp, "f");
+        for (int d = 0; d < 6; ++d) {
+            const double f0     = stiffness * (initial[1 - bead][d] - initial[bead][d]);
+            const double x1     = initial[bead][d] + 0.5 * dt * dt * f0 / fmass;
+            const double other1 = initial[1 - bead][d] - 0.5 * dt * dt * f0 / fmass;
+            const double f1     = stiffness * (other1 - x1);
+            EXPECT_NEAR(position[d], x1, 1.0e-12) << d;
+            EXPECT_NEAR(velocity[d], 0.5 * dt * (f0 + f1) / fmass, 1.0e-12) << d;
+            EXPECT_NEAR(force[d], f1, 1.0e-10) << d;
+        }
+        lammps_close(lmp);
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == 0) {
+            std::remove(logfile.c_str());
+            for (int index = 0; index < 2; ++index)
+                std::remove((logfile + "." + std::to_string(index)).c_str());
+        }
+    }
+    if (rank == 0) std::remove(input_file);
+    MPI_Barrier(MPI_COMM_WORLD);
+}
+
+TEST(MPI, plumed_core_removal_and_recreation)
+{
+    int nprocs, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    ASSERT_EQ(nprocs, 4);
+    const char *input_file = "test_plumed_core_lifetime.dat";
+    if (rank == 0) {
+        std::ofstream input(input_file);
+        input << "d: DISTANCE ATOMS=1,2 NOPBC\n"
+              << "bias: RESTRAINT ARG=d AT=0.0 KAPPA=0.0\n";
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    void *lmp = open_multirank_partition();
+    ASSERT_NE(lmp, nullptr);
+    create_multirank_two_atom_system(lmp);
+    const char *core = "fix fpimd all pimd/langevin method nmpimd ensemble nvt "
+                       "integrator obabo thermostat PILE_L 1234 tau 1.0 temp 1.0 fixcom no";
+    const char *adapter =
+        "fix bias all plumed plumedfile test_plumed_core_lifetime.dat "
+        "outfile test_plumed_core_lifetime.log path_integral coordinate_mean pimd_fix fpimd";
+    lammps_command(lmp, core);
+    lammps_command(lmp, adapter);
+    lammps_command(lmp, "run 0 post no");
+    ASSERT_EQ(lammps_has_error(lmp), 0);
+    lammps_command(lmp, "unfix fpimd");
+    lammps_set_show_error(lmp, 0);
+    lammps_command(lmp, "run 0 post no");
+    EXPECT_EQ(lammps_has_error(lmp), 1);
+    char message[1024]{};
+    EXPECT_NE(lammps_get_last_error_message(lmp, message, sizeof(message)), 0);
+    EXPECT_THAT(message, HasSubstr("does not provide a PIMD bias interface"));
+    lammps_command(lmp, core);
+    lammps_command(lmp, "run 0 post no");
+    EXPECT_EQ(lammps_has_error(lmp), 1);
+    EXPECT_NE(lammps_get_last_error_message(lmp, message, sizeof(message)), 0);
+    EXPECT_THAT(message, HasSubstr("must be defined after its integrator"));
+    lammps_command(lmp, "unfix bias");
+    lammps_command(lmp, adapter);
+    lammps_command(lmp, "run 0 post no");
+    EXPECT_EQ(lammps_has_error(lmp), 0);
+    lammps_close(lmp);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (rank == 0) {
+        std::remove(input_file);
+        std::remove("test_plumed_core_lifetime.log");
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+}
+
+TEST(MPI, plumed_repeated_force_evaluation_preserves_metad_history)
+{
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    ASSERT_EQ(size, 4);
+    for (const char *mode : {"coordinate_mean", "cv_mean", "bias_mean"}) {
+        SCOPED_TRACE(mode);
+        const bool mean          = std::string(mode) == "cv_mean";
+        const bool density       = std::string(mode) == "bias_mean";
+        const std::string prefix = "test_plumed_repeat_history_" + std::string(mode);
+        if (rank == 0) {
+            for (const char *suffix : {"", ".0", ".1"})
+                std::remove((prefix + ".hills" + suffix).c_str());
+            std::ofstream input(prefix + ".dat");
+            input << "d: DISTANCE ATOMS=1,2 NOPBC\n";
+            if (mean) input << "mean: ENSEMBLE ARG=d\n";
+            input << "bias: METAD ARG=" << (mean ? "mean.d" : "d")
+                  << " SIGMA=0.5 HEIGHT=0.25 PACE=1 FILE=" << prefix << ".hills RESTART=NO";
+            if (density) input << " WALKERS_MPI";
+            input << "\nFLUSH STRIDE=1\n";
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+        void *lmp = open_multirank_partition();
+        ASSERT_NE(lmp, nullptr);
+        create_multirank_two_atom_system(lmp);
+        lammps_command(lmp, "timestep 0.00001");
+        lammps_command(lmp, "thermo 0");
+        lammps_command(lmp, "fix fpimd all pimd/langevin method pimd ensemble nvt "
+                            "integrator obabo thermostat PILE_L 1234 tau 1.0e100 "
+                            "temp 1.0 fixcom no");
+        const std::string command = "fix bias all plumed plumedfile " + prefix + ".dat outfile " +
+                                    prefix + ".log path_integral " + mode + " pimd_fix fpimd";
+        lammps_command(lmp, command.c_str());
+        lammps_command(lmp, "run 1 post no");
+        ASSERT_EQ(lammps_has_error(lmp), 0);
+        auto count_hills = [&]() {
+            std::array<int, 2> count{};
+            if (rank == 0) {
+                for (int copy = 0; copy < (mean ? 2 : 1); ++copy) {
+                    const std::string suffix = mean ? "." + std::to_string(copy) : "";
+                    std::ifstream input(prefix + ".hills" + suffix);
+                    EXPECT_TRUE(input.good());
+                    std::string line;
+                    while (std::getline(input, line))
+                        if (!line.empty() && line[0] != '#') ++count[copy];
+                }
+            }
+            MPI_Bcast(count.data(), 2, MPI_INT, 0, MPI_COMM_WORLD);
+            return count;
+        };
+        const auto first_history = count_hills();
+        EXPECT_EQ(first_history[0], density ? 2 : 1);
+        if (mean) EXPECT_EQ(first_history[1], 1);
+        // Reevaluate the deposited state, then change only the shared centroid
+        // of atom 2.  Its ring springs are unchanged; the bias force must refresh.
+        lammps_command(lmp, "run 0 post no");
+        ASSERT_EQ(lammps_has_error(lmp), 0);
+        const auto before = collect_plumed_atom_vectors(lmp, "f");
+        EXPECT_EQ(count_hills(), first_history);
+        lammps_command(lmp, "group moved id 2");
+        lammps_command(lmp, "displace_atoms moved move 0.2 0.0 0.0 units box");
+        lammps_command(lmp, "run 0 post no");
+        ASSERT_EQ(lammps_has_error(lmp), 0);
+        const auto changed = collect_plumed_atom_vectors(lmp, "f");
+        double difference  = 0.0;
+        for (std::size_t i = 0; i < before.size(); ++i)
+            difference += std::abs(changed[i] - before[i]);
+        MPI_Allreduce(MPI_IN_PLACE, &difference, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        EXPECT_GT(difference, 1.0e-6);
+        EXPECT_EQ(count_hills(), first_history);
+        lammps_command(lmp, "run 0 post no");
+        ASSERT_EQ(lammps_has_error(lmp), 0);
+        const auto repeated = collect_plumed_atom_vectors(lmp, "f");
+        for (std::size_t i = 0; i < changed.size(); ++i)
+            EXPECT_NEAR(repeated[i], changed[i], 1.0e-12) << i;
+        EXPECT_EQ(count_hills(), first_history);
+        lammps_close(lmp);
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == 0 && !::testing::Test::HasFailure()) {
+            std::remove((prefix + ".dat").c_str());
+            for (const char *extension : {".log", ".hills"})
+                for (const char *suffix : {"", ".0", ".1"})
+                    std::remove((prefix + extension + suffix).c_str());
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
+}

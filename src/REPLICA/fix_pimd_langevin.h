@@ -38,10 +38,12 @@ class FixPIMDLangevin : public FixPIMDNVE {
   void restart(char *, int) override;
   double compute_vector(int) override;
   void *extract(const char *, int &) override;
+  PIMDBiasCapabilities bias_capabilities() const override;
 
  protected:
   FixPIMDLangevin(class LAMMPS *, int, char **, bool);
   int thermostat, barostat, ensemble;
+  bool external_bias_enabled;
   double fixedpoint[3];
 
   char *nonfinite_trace_prefix;

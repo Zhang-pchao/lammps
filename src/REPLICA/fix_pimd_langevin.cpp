@@ -112,6 +112,7 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg, bool allow_e
     nonfinite_trace_last_f(nullptr), nonfinite_trace_last_tag(nullptr), tau_k(nullptr),
     c1_k(nullptr), c2_k(nullptr), random(nullptr)
 {
+  external_bias_enabled = !allow_esynch;
   nonfinite_trace_last_stage[0] = '\0';
   restart_global = 1;
   time_integrate = 1;
@@ -140,10 +141,6 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg, bool allow_e
   pilescale = 1.0;
   tstat_flag = 1;
   pstat_flag = 0;
-  centroid_bias_virial_pending = 0;
-  defer_normal_mode_force = 0;
-  normal_mode_force_pending = 0;
-  bead_bias_virial_pending = 0;
   mapflag = 1;
   removecomflag = 1;
   fmmode = PHYSICAL;
@@ -634,16 +631,7 @@ void *FixPIMDLangevin::extract(const char *str, int &dim)
   if (strcmp(str, "normal_mode_centroid_force_scale") == 0 && method == NMPIMD &&
       (ensemble == NVT || ensemble == NPH || ensemble == NPT))
     return &normal_mode_centroid_force_scale;
-  if (strcmp(str, "centroid_bias_virial_pending") == 0 && method == NMPIMD &&
-      (ensemble == NVT || ensemble == NPH || ensemble == NPT))
-    return &centroid_bias_virial_pending;
-  if (strcmp(str, "defer_normal_mode_force") == 0 && method == NMPIMD &&
-      (ensemble == NVT || ensemble == NPH || ensemble == NPT))
-    return &defer_normal_mode_force;
-  if (strcmp(str, "bead_bias_virial_pending") == 0 && method == NMPIMD &&
-      (ensemble == NVT || ensemble == NPH || ensemble == NPT))
-    return &bead_bias_virial_pending;
-  return nullptr;
+  return FixPIMDNVE::extract(str, dim);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1092,6 +1080,7 @@ void FixPIMDLangevin::restart(char *buf, int nbytes)
 
 double FixPIMDLangevin::compute_vector(int n)
 {
+  require_force_completion();
   if (n < 10) return FixPIMDNVE::compute_vector(n);
 
   if (pstat_flag) {
@@ -1126,3 +1115,11 @@ double FixPIMDLangevin::compute_vector(int n)
 
 void FixPIMDLangevin::setup_subclass_state()
 { langevin_init(); }
+
+PIMDBiasCapabilities FixPIMDLangevin::bias_capabilities() const
+{
+  const bool modes = external_bias_enabled &&
+      (((method == PIMD) && (ensemble == NVT)) ||
+       ((method == NMPIMD) && ((ensemble == NVT) || (ensemble == NPH) || (ensemble == NPT))));
+  return {np, modes, modes, modes && (ensemble == NVT) && !domain->box_change};
+}

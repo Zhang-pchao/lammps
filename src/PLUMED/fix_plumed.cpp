@@ -98,13 +98,12 @@ const char *plumed_trace_field_name(int field)
 
 FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     Fix(lmp, narg, arg), path_contraction_flag(0), path_contraction(1.0), p(nullptr),
-    pimd_fix(nullptr), nlocal(-1), natoms(0), path_integral_mode(PATH_INTEGRAL_OFF),
-    plumed_active(1), centroid_force_scale(0.0), bead_density_force_scale(0.0), gatindex(nullptr),
-    masses(nullptr), charges(nullptr), centroid_coordinates(nullptr), centroid_positions(nullptr),
-    centroid_forces(nullptr), centroid_forces_all(nullptr), centroid_virial_pending(nullptr),
-    bead_bias_virial_pending(nullptr), forces_before_plumed(nullptr), nlevels_respa(0), bias(0.0),
-    c_pe(nullptr), c_press(nullptr), plumedNeedsEnergy(0), id_pe(nullptr), id_press(nullptr),
-    nonfinite_trace_prefix(nullptr), id_pimd(nullptr)
+    pimd_core(nullptr), last_pimd_update_step(-1), nlocal(-1), natoms(0),
+    path_integral_mode(PATH_INTEGRAL_OFF), plumed_active(1), gatindex(nullptr), masses(nullptr),
+    charges(nullptr), centroid_positions(nullptr), centroid_forces(nullptr),
+    centroid_forces_all(nullptr), nlevels_respa(0), bias(0.0), c_pe(nullptr), c_press(nullptr),
+    plumedNeedsEnergy(0), id_pe(nullptr), id_press(nullptr), nonfinite_trace_prefix(nullptr),
+    id_pimd(nullptr)
 {
 
   if (!atom->tag_enable) error->all(FLERR, "Fix plumed requires atom tags");
@@ -365,37 +364,22 @@ void FixPlumed::check_path_integral_compatibility()
   if (path_integral_mode == PATH_INTEGRAL_OFF && has_path_integral_fix)
     error->all(FLERR, "Fix plumed is incompatible with path-integrals");
   if (path_integral_mode != PATH_INTEGRAL_OFF) {
-    pimd_fix = modify->get_fix_by_id(id_pimd);
-    if (!pimd_fix || strcmp(pimd_fix->style, "pimd/langevin") != 0)
-      error->all(FLERR, "Fix plumed pimd_fix {} must use style pimd/langevin", id_pimd);
+    auto *pimd_fix = modify->get_fix_by_id(id_pimd);
+    int dim = -1;
+    pimd_core = pimd_fix
+        ? static_cast<PIMDBiasInterface *>(pimd_fix->extract("pimd_bias_interface", dim))
+        : nullptr;
+    if (!pimd_core || dim != 0)
+      error->all(FLERR, "Fix plumed pimd_fix {} does not provide a PIMD bias interface", id_pimd);
   }
 }
 
 /* ---------------------------------------------------------------------- */
 
-void FixPlumed::check_normal_mode_post_force_order()
-{
-  if (!centroid_virial_pending && !bead_bias_virial_pending) return;
-
-  int plumed_index = -1;
-  for (int i = 0; i < modify->nfix; ++i) {
-    if (modify->fix[i] == this) {
-      plumed_index = i;
-      break;
-    }
-  }
-
-  for (int i = plumed_index + 1; i < modify->nfix; ++i) {
-    if ((modify->fmask[i] & POST_FORCE) && strcmp(modify->fix[i]->style, "GROUP") != 0)
-      error->all(FLERR,
-                 "Fix plumed with NMPIMD path_integral modes must be defined after fix {} "
-                 "because it has a post-force callback",
-                 modify->fix[i]->style);
-  }
-}
-
 FixPlumed::~FixPlumed()
 {
+  if (pimd_registration && pimd_registration->owner)
+    pimd_registration->owner->unregister_bias(*pimd_registration);
   delete p;
   if (id_pe) modify->delete_compute(id_pe);
   if (id_press) modify->delete_compute(id_press);
@@ -409,7 +393,6 @@ FixPlumed::~FixPlumed()
   delete[] centroid_positions;
   delete[] centroid_forces;
   delete[] centroid_forces_all;
-  delete[] forces_before_plumed;
 }
 
 int FixPlumed::setmask()
@@ -427,82 +410,47 @@ void FixPlumed::init()
   check_path_integral_compatibility();
 
   if (path_integral_mode != PATH_INTEGRAL_OFF) {
-    // All partitions must enter the same coordinate and force collectives.
+    // All partitions enter the same coordinate and force collectives.
     double settings[2] = {double(path_contraction_flag), path_contraction};
     double settings_min[2], settings_max[2];
     MPI_Allreduce(settings, settings_min, 2, MPI_DOUBLE, MPI_MIN, universe->uworld);
     MPI_Allreduce(settings, settings_max, 2, MPI_DOUBLE, MPI_MAX, universe->uworld);
     if (settings_min[0] != settings_max[0] || settings_min[1] != settings_max[1])
       error->all(FLERR, "Fix plumed path_contraction must match in all partitions");
-  }
-  if (path_contraction_flag) {
-    int dim = -1;
-    int unsupported = !pimd_fix->extract("nvt_unwrapped_coordinates", dim) || dim != 2 ||
-        domain->box_change;
-    MPI_Allreduce(MPI_IN_PLACE, &unsupported, 1, MPI_INT, MPI_MAX, universe->uworld);
-    if (unsupported) error->all(FLERR, "Fix plumed path_contraction requires fixed-cell NVT PIMD");
-    if (natoms > MAXSMALLINT / 3)
-      error->all(FLERR, "Too many atoms for fix plumed path_contraction");
-  }
-
-  if (path_integral_mode != PATH_INTEGRAL_OFF) {
     if (utils::strmatch(update->integrate_style, "^respa"))
       error->all(FLERR, "Fix plumed path_integral modes do not support r-RESPA");
 
-    int dim = -1;
-    double *force_scale = nullptr;
-    if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN) {
-      force_scale = static_cast<double *>(pimd_fix->extract("centroid_bias_force_scale", dim));
-      if (!force_scale) {
-        force_scale =
-            static_cast<double *>(pimd_fix->extract("normal_mode_centroid_force_scale", dim));
-        centroid_virial_pending =
-            static_cast<int *>(pimd_fix->extract("centroid_bias_virial_pending", dim));
-        if (force_scale && !centroid_virial_pending)
-          error->all(FLERR, "Fix plumed could not access the NMPIMD centroid virial state");
-      }
-    } else {
-      force_scale = static_cast<double *>(pimd_fix->extract("bead_bias_force_scale", dim));
-      int deferred_dim = -1;
-      auto *defer_normal_mode_force =
-          static_cast<int *>(pimd_fix->extract("defer_normal_mode_force", deferred_dim));
-      if (defer_normal_mode_force) {
-        int pending_dim = -1;
-        bead_bias_virial_pending =
-            static_cast<int *>(pimd_fix->extract("bead_bias_virial_pending", pending_dim));
-        if (deferred_dim != 0 || !bead_bias_virial_pending || pending_dim != 0)
-          error->all(FLERR, "Fix plumed could not access the NMPIMD bead-force state");
-        *defer_normal_mode_force = 1;
-      }
-    }
-    if (!force_scale || dim != 0) {
-      if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN)
-        error->all(
-            FLERR,
-            "Fix plumed path_integral coordinate_mean requires method pimd with ensemble nvt or "
-            "method nmpimd with ensemble nvt, nph, or npt");
-      error->all(FLERR,
-                 "Fix plumed path_integral bead modes require method pimd with ensemble nvt or "
-                 "method nmpimd with ensemble nvt, nph, or npt");
-    }
-    auto *beads = static_cast<int *>(pimd_fix->extract("nbeads", dim));
-    if (!beads || dim != 0 || *beads != universe->nworlds)
+    const auto capabilities = pimd_core->bias_capabilities();
+    if (capabilities.beads != universe->nworlds)
       error->all(FLERR, "Fix plumed could not determine the PIMD bead count");
-    check_normal_mode_post_force_order();
-
-    if (path_integral_mode == PATH_INTEGRAL_CV_MEAN ||
-        path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) {
+    if (path_contraction_flag) {
+      int unsupported = !capabilities.fixed_cell_contraction || domain->box_change;
+      MPI_Allreduce(MPI_IN_PLACE, &unsupported, 1, MPI_INT, MPI_MAX, universe->uworld);
+      if (unsupported)
+        error->all(FLERR, "Fix plumed path_contraction requires fixed-cell NVT PIMD");
+      if (natoms > MAXSMALLINT / 3)
+        error->all(FLERR, "Too many atoms for fix plumed path_contraction");
+    }
+    if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN && !capabilities.coordinate_mean)
+      error->all(
+          FLERR,
+          "Fix plumed path_integral coordinate_mean requires method pimd with ensemble nvt or "
+          "method nmpimd with ensemble nvt, nph, or npt");
+    if (path_integral_mode != PATH_INTEGRAL_COORDINATE_MEAN) {
+      if (!capabilities.bead_modes)
+        error->all(FLERR,
+                   "Fix plumed path_integral bead modes require method pimd with ensemble nvt or "
+                   "method nmpimd with ensemble nvt, nph, or npt");
       if (universe->existflag == 0 || universe->nworlds < 2)
         error->all(FLERR, "Fix plumed path_integral bead modes require multiple partitions");
-      if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) bead_density_force_scale = *force_scale;
-    } else {
-      // The integrator samples H_ring at beta/P. A physical bias B therefore
-      // enters the dynamical Hamiltonian as P*B; retain B as the reported bias.
-      centroid_force_scale = *force_scale * (*beads);
-      centroid_coordinates = static_cast<double *>(pimd_fix->extract("centroid_coordinates", dim));
-      if (!centroid_coordinates || dim != 1)
-        error->all(FLERR, "Fix plumed could not access the PIMD centroid coordinates");
+    }
+    const auto mode = path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN
+        ? PIMDBiasMode::COORDINATE_MEAN
+        : (path_integral_mode == PATH_INTEGRAL_CV_MEAN ? PIMDBiasMode::CV_MEAN
+                                                       : PIMDBiasMode::BIAS_MEAN);
+    pimd_registration = pimd_core->register_bias(this, mode, path_contraction_flag != 0);
 
+    if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN) {
       delete[] centroid_forces_all;
       centroid_forces_all = new double[3 * natoms]();
       if (plumed_active) {
@@ -559,7 +507,6 @@ void FixPlumed::setup(int vflag)
   } else {
     post_force(vflag);
   }
-  if (centroid_virial_pending || bead_bias_virial_pending) pimd_fix->end_of_step();
 }
 
 void FixPlumed::min_setup(int vflag)
@@ -584,17 +531,12 @@ void FixPlumed::update_atom_data()
     delete[] charges;
     delete[] masses;
     delete[] gatindex;
-    delete[] forces_before_plumed;
 
     nlocal = atom->nlocal;
     const int local_capacity = nlocal > 0 ? nlocal : 1;
     gatindex = new int[local_capacity];
     masses = new double[local_capacity];
     charges = new double[local_capacity];
-    forces_before_plumed = (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN ||
-                            path_integral_mode == PATH_INTEGRAL_CV_MEAN)
-        ? new double[nlocal > 0 ? 3 * nlocal : 1]
-        : nullptr;
     update_gatindex = 1;
   } else {
     for (int i = 0; i < nlocal; i++) {
@@ -631,7 +573,8 @@ void FixPlumed::update_atom_data()
 /* ---------------------------------------------------------------------- */
 
 void FixPlumed::trace_nonfinite_state(const char *stage, const double *force_before,
-                                      bool current_force_is_physical)
+                                      bool current_force_is_physical, const double *force_delta,
+                                      double delta_scale)
 {
   if (!nonfinite_trace_prefix) return;
 
@@ -688,19 +631,21 @@ void FixPlumed::trace_nonfinite_state(const char *stage, const double *force_bef
     for (int i = 0; i < atom->nlocal; ++i) {
       for (int d = 0; d < 3; ++d) {
         const double physical = force_before ? force_before[3 * i + d] : atom->f[i][d];
-        const double delta = force_before ? atom->f[i][d] - physical : 0.0;
+        const double delta = force_delta ? delta_scale * force_delta[3 * i + d]
+                                         : (force_before ? atom->f[i][d] - physical : 0.0);
+        const double total = force_delta ? physical + delta : atom->f[i][d];
         if (!std::isfinite(atom->x[i][d]))
           select_atom_field(i, PLUMED_TRACE_POSITION, d, atom->x[i][d]);
         if (!std::isfinite(atom->v[i][d]))
           select_atom_field(i, PLUMED_TRACE_VELOCITY, d, atom->v[i][d]);
-        if (force_before && !std::isfinite(physical))
+        if ((force_before || force_delta) && !std::isfinite(physical))
           select_atom_field(i, PLUMED_TRACE_PHYSICAL_FORCE, d, physical);
-        if (force_before && !std::isfinite(delta))
+        if ((force_before || force_delta) && !std::isfinite(delta))
           select_atom_field(i, PLUMED_TRACE_FORCE_DELTA, d, delta);
-        if (!std::isfinite(atom->f[i][d]))
+        if (!std::isfinite(total))
           select_atom_field(
               i, current_force_is_physical ? PLUMED_TRACE_PHYSICAL_FORCE : PLUMED_TRACE_TOTAL_FORCE,
-              d, atom->f[i][d]);
+              d, total);
       }
     }
   }
@@ -711,9 +656,11 @@ void FixPlumed::trace_nonfinite_state(const char *stage, const double *force_bef
       local.velocity[d] = atom->v[local_index][d];
       local.physical_force[d] = force_before ? force_before[3 * local_index + d]
                                              : atom->f[local_index][d];
-      local.force_delta[d] =
-          force_before ? atom->f[local_index][d] - force_before[3 * local_index + d] : 0.0;
-      local.total_force[d] = atom->f[local_index][d];
+      local.force_delta[d] = force_delta
+          ? delta_scale * force_delta[3 * local_index + d]
+          : (force_before ? atom->f[local_index][d] - force_before[3 * local_index + d] : 0.0);
+      local.total_force[d] = force_delta ? local.physical_force[d] + local.force_delta[d]
+                                         : atom->f[local_index][d];
     }
   }
 
@@ -882,18 +829,18 @@ void FixPlumed::post_force(int /* vflag */)
 {
   trace_nonfinite_state("pre-plumed", nullptr, true);
 
-  if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN) {
-    post_force_centroid();
+  if (path_integral_mode != PATH_INTEGRAL_OFF) {
+    if (!pimd_registration || !pimd_registration->owner)
+      error->all(FLERR, "Fix plumed PIMD bias registration is no longer valid");
+    const auto coordinates = pimd_registration->owner->bias_coordinates(*pimd_registration);
+    if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN)
+      post_force_centroid(coordinates);
+    else
+      post_force_beads(coordinates);
     return;
   }
 
   update_atom_data();
-
-  if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN || path_integral_mode == PATH_INTEGRAL_CV_MEAN)
-    for (int i = 0; i < nlocal; i++)
-      for (int d = 0; d < 3; d++) forces_before_plumed[3 * i + d] = atom->f[i][d];
-
-  if (path_contraction_flag) prepare_contracted_coordinates();
 
   // set up local virial/box. plumed uses full 3x3 matrices
   double plmd_virial[3][3];
@@ -923,9 +870,9 @@ void FixPlumed::post_force(int /* vflag */)
   p->cmd("setStep", &step);
   int plumedStopCondition = 0;
   p->cmd("setStopFlag", &plumedStopCondition);
-  p->cmd("setPositions", path_contraction_flag ? contracted_positions.data() : &atom->x[0][0]);
+  p->cmd("setPositions", &atom->x[0][0]);
   p->cmd("setBox", &box[0][0]);
-  p->cmd("setForces", path_contraction_flag ? contracted_forces.data() : &atom->f[0][0]);
+  p->cmd("setForces", &atom->f[0][0]);
   p->cmd("setMasses", &masses[0]);
   p->cmd("setCharges", &charges[0]);
   p->cmd("getBias", &bias);
@@ -940,15 +887,6 @@ void FixPlumed::post_force(int /* vflag */)
 
   plumedNeedsEnergy = 0;
   p->cmd("isEnergyNeeded", &plumedNeedsEnergy);
-  if (path_integral_mode == PATH_INTEGRAL_CV_MEAN ||
-      path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) {
-    int energy_requests = plumedNeedsEnergy;
-    MPI_Allreduce(MPI_IN_PLACE, &energy_requests, 1, MPI_INT, MPI_SUM, universe->uworld);
-    if (energy_requests)
-      error->universe_all(
-          FLERR, "Fix plumed path_integral bead modes do not support energy-dependent actions");
-  }
-
   // Pass potential energy and virial if needed
   double *virial_lmp;
   if (plumedNeedsEnergy) {
@@ -1001,28 +939,8 @@ void FixPlumed::post_force(int /* vflag */)
   }
   // do the real calculation:
   p->cmd("performCalc");
-  if (path_contraction_flag) pullback_contracted_forces();
-  trace_nonfinite_state("post-perform-pre-scale", forces_before_plumed, false);
-
-  if (path_integral_mode == PATH_INTEGRAL_CV_MEAN ||
-      path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) {
-    p->cmd("getBias", &bias);
-    MPI_Allreduce(MPI_IN_PLACE, &plumedStopCondition, 1, MPI_INT, MPI_MAX, universe->uworld);
-    const double dynamical_scale = universe->nworlds *
-        (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN ? bead_density_force_scale : 1.0);
-    for (int i = 0; i < nlocal; i++)
-      for (int d = 0; d < 3; d++)
-        atom->f[i][d] = forces_before_plumed[3 * i + d] +
-            dynamical_scale * (atom->f[i][d] - forces_before_plumed[3 * i + d]);
-    if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) {
-      double bead_density_bias = comm->me == 0 ? bias : 0.0;
-      MPI_Allreduce(MPI_IN_PLACE, &bead_density_bias, 1, MPI_DOUBLE, MPI_SUM, universe->uworld);
-      bias = universe->iworld == 0 ? bead_density_force_scale * bead_density_bias : 0.0;
-    } else if (universe->iworld != 0) {
-      bias = 0.0;
-    }
-  }
-  trace_nonfinite_state("post-scale", forces_before_plumed, false);
+  trace_nonfinite_state("post-perform-pre-scale", nullptr, false);
+  trace_nonfinite_state("post-scale", nullptr, false);
   if (plumedStopCondition) timer->force_timeout();
 
   // retransform virial to lammps representation and assign it to this
@@ -1046,12 +964,6 @@ void FixPlumed::post_force(int /* vflag */)
     virial[4] = -plmd_virial[0][2];
     virial[5] = -plmd_virial[1][2];
   }
-  if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN)
-    for (int i = 0; i < 6; i++) virial[i] *= bead_density_force_scale * universe->nworlds;
-  else if (path_integral_mode == PATH_INTEGRAL_CV_MEAN)
-    for (int i = 0; i < 6; i++) virial[i] *= universe->nworlds;
-  if (bead_bias_virial_pending) *bead_bias_virial_pending = 1;
-
   // Ask for the computes in the next time step
   // such that the virial and energy are tallied.
   // This should be changed to something that triggers the
@@ -1062,13 +974,90 @@ void FixPlumed::post_force(int /* vflag */)
 
 /* ---------------------------------------------------------------------- */
 
+void FixPlumed::post_force_beads(const PIMDBiasCoordinates &coordinates)
+{
+  update_atom_data();
+  const int capacity = nlocal > 0 ? 3 * nlocal : 1;
+  bias_positions.resize(capacity);
+  bias_forces.assign(capacity, 0.0);
+  std::vector<double> force_before;
+  if (nonfinite_trace_prefix) force_before.resize(capacity);
+  for (int i = 0; i < nlocal; ++i)
+    for (int d = 0; d < 3; ++d) {
+      bias_positions[3 * i + d] = coordinates.beads[i][d];
+      if (nonfinite_trace_prefix) force_before[3 * i + d] = atom->f[i][d];
+    }
+  if (path_contraction_flag) prepare_contracted_coordinates(coordinates);
+
+  double plmd_virial[3][3] = {};
+  double box[3][3] = {};
+  box[0][0] = domain->h[0];
+  box[1][1] = domain->h[1];
+  box[2][2] = domain->h[2];
+  box[2][1] = domain->h[3];
+  box[2][0] = domain->h[4];
+  box[1][0] = domain->h[5];
+  for (double &value : virial) value = 0.0;
+  if (update->ntimestep > MAXSMALLINT)
+    error->all(FLERR, "Fix plumed can only handle up to 2.1 billion timesteps");
+  int step = int(update->ntimestep);
+  int stop = 0;
+  p->cmd("setStep", &step);
+  p->cmd("setStopFlag", &stop);
+  p->cmd("setPositions",
+         path_contraction_flag ? contracted_positions.data() : bias_positions.data());
+  p->cmd("setBox", &box[0][0]);
+  p->cmd("setForces", path_contraction_flag ? contracted_forces.data() : bias_forces.data());
+  p->cmd("setMasses", masses);
+  p->cmd("setCharges", charges);
+  p->cmd("setVirial", &plmd_virial[0][0]);
+  p->cmd("prepareCalc");
+  plumedNeedsEnergy = 0;
+  p->cmd("isEnergyNeeded", &plumedNeedsEnergy);
+  int energy_requests = plumedNeedsEnergy;
+  MPI_Allreduce(MPI_IN_PLACE, &energy_requests, 1, MPI_INT, MPI_SUM, universe->uworld);
+  if (energy_requests)
+    error->universe_all(
+        FLERR, "Fix plumed path_integral bead modes do not support energy-dependent actions");
+
+  p->cmd(last_pimd_update_step == update->ntimestep ? "performCalcNoUpdate" : "performCalc");
+  last_pimd_update_step = update->ntimestep;
+  if (path_contraction_flag) pullback_contracted_forces();
+  const double *before = nonfinite_trace_prefix ? force_before.data() : nullptr;
+  trace_nonfinite_state("post-perform-pre-scale", before, false, bias_forces.data());
+  p->cmd("getBias", &bias);
+  MPI_Allreduce(MPI_IN_PLACE, &stop, 1, MPI_INT, MPI_MAX, universe->uworld);
+
+  const double scale = path_integral_mode == PATH_INTEGRAL_BIAS_MEAN ? 1.0 / universe->nworlds
+                                                                     : 1.0;
+  if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN) {
+    for (int i = 0; i < 3 * nlocal; ++i) bias_forces[i] *= scale;
+    double path_bias = comm->me == 0 ? bias : 0.0;
+    MPI_Allreduce(MPI_IN_PLACE, &path_bias, 1, MPI_DOUBLE, MPI_SUM, universe->uworld);
+    bias = universe->iworld == 0 ? scale * path_bias : 0.0;
+  } else if (universe->iworld != 0)
+    bias = 0.0;
+
+  const double physical_virial[6] = {-scale * plmd_virial[0][0], -scale * plmd_virial[1][1],
+                                     -scale * plmd_virial[2][2], -scale * plmd_virial[0][1],
+                                     -scale * plmd_virial[0][2], -scale * plmd_virial[1][2]};
+  trace_nonfinite_state("post-scale", before, false, bias_forces.data(), universe->nworlds);
+  const PIMDBiasSubmission submission{coordinates.generation, nlocal, bias_forces.data(), bias,
+                                      physical_virial};
+  pimd_registration->owner->submit_bias(*pimd_registration, submission, virial);
+  if (stop) timer->force_timeout();
+  c_pe->addstep(update->ntimestep + 1);
+  c_press->addstep(update->ntimestep + 1);
+}
+
+/* ---------------------------------------------------------------------- */
+
 // The PIMD integrator refreshes this lift during post_force before PLUMED.
 // Match atoms by global tag, not by their possibly different local ownership.
-void FixPlumed::prepare_contracted_coordinates()
+void FixPlumed::prepare_contracted_coordinates(const PIMDBiasCoordinates &coordinates)
 {
-  int dim = -1;
-  auto **real = static_cast<double **>(pimd_fix->extract("nvt_unwrapped_coordinates", dim));
-  if (!real || dim != 2) error->all(FLERR, "Fix plumed cannot access the lifted PIMD coordinates");
+  const auto *real = coordinates.unwrapped_beads;
+  if (!real && nlocal) error->all(FLERR, "Fix plumed cannot access the lifted PIMD coordinates");
   contraction_mean.assign(3 * natoms, 0.0);
   const int capacity = nlocal > 0 ? 3 * nlocal : 1;
   contracted_positions.resize(capacity);
@@ -1117,15 +1106,14 @@ void FixPlumed::pullback_contracted_forces()
     for (int d = 0; d < 3; ++d) {
       const double increment = path_contraction * contracted_forces[3 * i + d] +
           (1.0 - path_contraction) * contraction_mean[3 * index + d];
-      // The existing bead-mean code applies the engine factor P afterward.
-      atom->f[i][d] = forces_before_plumed[3 * i + d] + increment;
+      bias_forces[3 * i + d] = increment;
     }
   }
 }
 
 /* ---------------------------------------------------------------------- */
 
-void FixPlumed::post_force_centroid()
+void FixPlumed::post_force_centroid(const PIMDBiasCoordinates &coordinates)
 {
   int invalid_atom_count = natoms != int(atom->natoms);
   MPI_Allreduce(MPI_IN_PLACE, &invalid_atom_count, 1, MPI_INT, MPI_SUM, universe->uworld);
@@ -1146,7 +1134,7 @@ void FixPlumed::post_force_centroid()
     for (int i = 0; i < nlocal; i++) {
       const int index = atom->tag[i] - 1;
       for (int d = 0; d < 3; d++) {
-        centroid_positions[3 * i + d] = centroid_coordinates[3 * index + d];
+        centroid_positions[3 * i + d] = coordinates.centroid_by_tag[3 * index + d];
         centroid_forces[3 * i + d] = 0.0;
       }
     }
@@ -1186,7 +1174,8 @@ void FixPlumed::post_force_centroid()
 
   if (plumed_active) {
     try {
-      p->cmd("performCalc");
+      p->cmd(last_pimd_update_step == update->ntimestep ? "performCalcNoUpdate" : "performCalc");
+      last_pimd_update_step = update->ntimestep;
       p->cmd("getBias", &bias);
     } catch (const std::exception &exception) {
       error->universe_one(FLERR, fmt::format("Could not execute PLUMED: {}", exception.what()));
@@ -1206,16 +1195,18 @@ void FixPlumed::post_force_centroid()
   }
   trace_centroid_nonfinite("post-perform-centroid");
 
-  for (int i = 0; i < 6; i++) virial[i] *= universe->nworlds;
-  if (centroid_virial_pending) *centroid_virial_pending = 1;
-
   MPI_Bcast(centroid_forces_all, 3 * natoms, MPI_DOUBLE, 0, universe->uworld);
-  for (int i = 0; i < atom->nlocal; i++) {
-    const int index = atom->tag[i] - 1;
+  bias_forces.assign(coordinates.nlocal > 0 ? 3 * coordinates.nlocal : 1, 0.0);
+  for (int i = 0; i < coordinates.nlocal; i++) {
+    const int index = coordinates.tags[i] - 1;
     for (int d = 0; d < 3; d++)
-      atom->f[i][d] += centroid_forces_all[3 * index + d] * centroid_force_scale;
+      bias_forces[3 * i + d] = centroid_forces_all[3 * index + d] / universe->nworlds;
   }
-  trace_nonfinite_state("post-scale-centroid", nullptr, false);
+  trace_nonfinite_state("post-scale-centroid", nullptr, false, bias_forces.data(),
+                        universe->nworlds);
+  const PIMDBiasSubmission submission{coordinates.generation, coordinates.nlocal,
+                                      bias_forces.data(), bias, virial};
+  pimd_registration->owner->submit_bias(*pimd_registration, submission, virial);
 
   MPI_Bcast(&plumed_stop_condition, 1, MPI_INT, 0, universe->uworld);
   if (plumed_stop_condition) timer->force_timeout();
@@ -1227,19 +1218,13 @@ void FixPlumed::post_force_respa(int vflag, int ilevel, int /* iloop */)
 }
 
 void FixPlumed::min_post_force(int vflag)
-{
-  post_force(vflag);
-}
+{ post_force(vflag); }
 
 void FixPlumed::reset_dt()
-{
-  error->all(FLERR, "Fix plumed is not compatible with changing the timestep");
-}
+{ error->all(FLERR, "Fix plumed is not compatible with changing the timestep"); }
 
 double FixPlumed::compute_scalar()
-{
-  return bias;
-}
+{ return bias; }
 
 void *FixPlumed::extract(const char *name, int &dim)
 {
@@ -1296,14 +1281,12 @@ int FixPlumed::modify_param(int narg, char **arg)
 double FixPlumed::memory_usage()
 {
   double bytes = double((8 + 8 + 4) * atom->nlocal);
-  if (path_integral_mode == PATH_INTEGRAL_BIAS_MEAN || path_integral_mode == PATH_INTEGRAL_CV_MEAN)
-    bytes += double(3 * sizeof(double) * atom->nlocal);
   if (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN) {
     bytes += double(3 * sizeof(double) * natoms);
     if (plumed_active) bytes += double(6 * sizeof(double) * natoms);
   }
   bytes += sizeof(double) *
       (contracted_positions.capacity() + contracted_forces.capacity() +
-       contraction_mean.capacity());
+       contraction_mean.capacity() + bias_positions.capacity() + bias_forces.capacity());
   return bytes;
 }
