@@ -73,10 +73,10 @@ void FixPIMDBNVT::pre_spring_force_estimators()
 
 void FixPIMDBNVT::prepare_coordinates()
 {
-  comm_exec(atom->x);
+  inter_replica_comm(atom->x);
   double **x = atom->x;
-  double *xlast = buf_beads[x_last];
-  double *xnext = buf_beads[x_next];
+  double *xlast = bufbeads[x_last];
+  double *xnext = bufbeads[x_next];
   double ff = fbond * atom->mass[atom->type[0]];
   bosonic_exchange->prepare_with_coordinates(*x, xlast, xnext, beta, -ff);
 }

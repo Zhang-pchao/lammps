@@ -1815,3 +1815,5 @@ bond_oxdna2_fene.cpp
 bond_oxrna2_fene.cpp
 pair_oxdna2_excv.cpp
 pair_oxrna2_excv.cpp 
+pimd_partition.cpp
+pimd_partition.h

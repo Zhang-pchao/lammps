@@ -20,199 +20,66 @@ FixStyle(pimd/langevin,FixPIMDLangevin);
 #ifndef FIX_PIMD_LANGEVIN_H
 #define FIX_PIMD_LANGEVIN_H
 
-#include "fix.h"
+#include "fix_pimd_nve.h"
 
 namespace LAMMPS_NS {
 
-class FixPIMDLangevin : public Fix {
+class FixPIMDLangevin : public FixPIMDNVE {
  public:
-  FixPIMDLangevin(class LAMMPS *, int, char **);
-  ~FixPIMDLangevin() override;
-
-  enum { PIMD, NMPIMD };
-  enum { PHYSICAL, NORMAL };
-  enum { BAOAB, OBABO };
   enum { ISO, ANISO, TRICLINIC };
   enum { PILE_L };
   enum { MTTK, BZP };
   enum { NVE, NVT, NPH, NPT };
-  enum { SINGLE_PROC, MULTI_PROC };
 
-  int setmask() override;
-
-  void init() override;
-  void setup(int) override;
-  void post_force(int) override;
-  void initial_integrate(int) override;
-  void final_integrate() override;
+  FixPIMDLangevin(class LAMMPS *, int, char **);
+  ~FixPIMDLangevin() override;
   void end_of_step() override;
-  void write_restart(FILE *fp) override;
+  void write_restart(FILE *) override;
   void restart(char *, int) override;
-
   double compute_vector(int) override;
   void *extract(const char *, int &) override;
 
  protected:
   FixPIMDLangevin(class LAMMPS *, int, char **, bool);
-
-  // System setting variables
-  int method;                              // PIMD or NMPIMD or CMD
-  int fmmode;                              // physical or normal
-  int np;                                  // number of beads
-  double inverse_np;                       // 1.0/np
-  double normal_mode_centroid_force_scale;    // F_q0/F_centroid on this normal mode
-  double temp;                                // temperature
-  double hbar;                                // Planck's constant
-  double lj_epsilon, lj_sigma, lj_mass;       // LJ unit energy, length, and mass scales
-  double other_planck;
-  double other_mvv2e;
-  double kt;               // k_B * temp
-  double beta, beta_np;    // beta = 1./kBT beta_np = 1./kBT/np
-  int thermostat;          // NHC or PILE_L
-  int barostat;            // BZP
-  int integrator;          // obabo or baoab
-  int ensemble;            // nve or nvt or nph or npt
-  int mapflag;             // should be 1 if number of beads > 1
-  int removecomflag;
-  double masstotal;
-
-  double fixedpoint[3];    // location of dilation fixed-point
-
-  // ring-polymer model
-
-  double omega_np, fbond, spring_energy, sp;
-
-  // fictitious mass
-
-  double fmass, *mass;
-
-  // inter-partition communication
-
-  MPI_Comm rootworld;
-  int me, nprocs, ireplica, nreplica, nprocs_universe;
-  int ntotal, maxlocal;
-
-  int x_last, x_next;
-
-  int cmode;
-  int sizeplan;
-  int maxsend;
-  int *plansend, *planrecv;
-
-  tagint *tagsend, *tagrecv;
-  double *bufsend, *bufrecv, **bufbeads;
-  double **bufsorted, **bufsortedall;
-
-  int *counts, *displacements;
-
-  void comm_init();
-  virtual void prepare_coordinates();
-  void inter_replica_comm(double **ptr);
-  void virtual spring_force();
-
-  /* normal-mode operations */
-
-  double *lam, **M_x2xp, **M_xp2x, **M_f2fp, **M_fp2f;
-  int *modeindex;
-  int defer_normal_mode_force;      // transform forces after all post-force fixes
-  int normal_mode_force_pending;    // Cartesian force still needs transformation
-  int bead_bias_virial_pending;     // bead-mode bias needs current-step estimators
-
-  void reallocate();
-  void nmpimd_init();
-
-  /* opt-in non-finite stage tracing */
+  int thermostat, barostat, ensemble;
+  double fixedpoint[3];
 
   char *nonfinite_trace_prefix;
   int nonfinite_trace_nmax;
-  double **nonfinite_trace_last_x;
-  double **nonfinite_trace_last_v;
-  double **nonfinite_trace_last_f;
+  double **nonfinite_trace_last_x, **nonfinite_trace_last_v, **nonfinite_trace_last_f;
   tagint *nonfinite_trace_last_tag;
   char nonfinite_trace_last_stage[96];
-  void trace_nonfinite_state(const char *, const char *);
+  void trace_nonfinite_state(const char *, const char *) override;
 
-  void nmpimd_transform(double **, double **, double *);
-  void prepare_normal_mode_forces();
-
-  /* Langevin integration */
-
-  double dtv, dtf, dtv2, dtv3;
   double gamma, c1, c2, tau;
   double *tau_k, *c1_k, *c2_k;
-  double pilescale;
-  double Lan_temp;
-  double *_omega_k, *Lan_s, *Lan_c;    // sin(omega_k*dt*0.5), cos(omega_k*dt*0.5)
-
+  double pilescale, Lan_temp;
   class RanMars *random;
-
-  int tstat_flag;    // tstat_flat = 1 if thermostat if used
+  int tstat_flag;
   void langevin_init();
-  void b_step();    // integrate for dt/2 according to B part (v <- v + f * dt/2)
-  void
-  a_step();    // integrate for dt/2 according to A part (non-centroid mode, harmonic force between replicas)
-  void qc_step();    // integrate for dt/2 for the centroid mode (x <- x + v * dt/2)
-  void o_step();     // integrate for dt according to O part (O-U process, for thermostating)
-  void q_step();     // integrate for dt/2 for all the beads (x <- x + v * dt/2)
+  void setup_subclass_state() override;
+  void b_step() override;
+  void qc_step() override;
+  void o_step() override;
 
-  /* Bussi-Zykova-Parrinello barostat */
-
-  int pstat_flag;                      // pstat_flag = 1 if barostat is used
-  int centroid_bias_virial_pending;    // current PLUMED centroid virial needs collecting
-  int pstyle;    // pstyle = ISO or ANISO (will support TRICLINIC in the future)
+  int pstat_flag, pstyle;
   double W, tau_p, Pext, p_hydro, totenthalpy, Vcoeff;
   int pdim;
   int p_flag[6];
-  double p_target[6];
-  double vw[6];               // barostat velocity
-  double ke_tensor[6];        // kinetic energy tensor
-  double c_vir_tensor[6];     // centroid-virial tensor
-  double stress_tensor[6];    // path integral centroid-virial stress tensor
-
+  double p_target[6], vw[6], ke_tensor[6], c_vir_tensor[6], stress_tensor[6];
+  double vol0 = 0.0;
   void baro_init();
   void press_v_step();
   void press_o_step();
-
-  /* centroid-virial estimator computation */
-  double vol0 = 0.0;
-  double **xc, *xcall;
-  int maxxc;
-  int maxunwrap;
-  double **x_unwrap;
-  void reallocate_x_unwrap();
-  void reallocate_xc();
-  void collect_xc();
-  void remove_com_motion();
-  double vir, vir_, centroid_vir;
-  double t_prim, t_vir, t_cv, p_prim, p_vir, p_cv, p_md;
-
-  /* Computes */
-  double pote, tote, totke;
-  double ke_bead, se_bead, pe_bead;
-  double total_spring_energy;
-  char *id_pe;
-  char *id_press;
-  class Compute *c_pe;
-  class Compute *c_press;
-
-  void compute_totke();                    // 1: kinetic energy
-  virtual void compute_spring_energy();    // 2: spring elastic energy
-  void compute_pote();                     // 3: potential energy
-  void compute_tote();                     // 4: total energy: 1+2+3 for all the beads
   void compute_stress_tensor();
-  virtual void compute_t_prim();
-  void compute_t_vir();
-  void compute_t_cv();
-  void compute_p_prim();
-  void compute_p_cv();    // centroid-virial pressure estimator
-  void compute_vir();
-  void compute_xf_vir();
-  void compute_cvir();
+  void compute_cvir() override;
   void compute_totenthalpy();
 
   int size_restart_global();
-  int pack_restart_data(double *list);
+  int pack_restart_data(double *);
 };
+
 }    // namespace LAMMPS_NS
+
 #endif
 #endif

@@ -31,13 +31,11 @@
 #include "math_const.h"
 #include "math_special.h"
 #include "memory.h"
-#include "pimd_partition.h"
 #include "universe.h"
 #include "update.h"
 
 #include <cmath>
 #include <cstring>
-#include <vector>
 
 using namespace LAMMPS_NS;
 using namespace FixConst;
@@ -48,14 +46,11 @@ using MathSpecial::powint;
 /* ---------------------------------------------------------------------- */
 
 FixPIMDNVT::FixPIMDNVT(LAMMPS *lmp, int narg, char **arg) :
-    Fix(lmp, narg, arg), mass(nullptr), tag_send(nullptr), buf_send(nullptr), buf_recv(nullptr),
-    buf_beads(nullptr), plan_send(nullptr), plan_recv(nullptr), comm_ptr(nullptr), lam(nullptr),
-    M_x2xp(nullptr), M_xp2x(nullptr), M_f2fp(nullptr), M_fp2f(nullptr), mode_index(nullptr),
-    nhc_eta(nullptr), nhc_eta_dot(nullptr), nhc_eta_dotdot(nullptr), nhc_eta_mass(nullptr)
+    FixPIMDNVE(lmp, narg, arg, true), nhc_eta(nullptr), nhc_eta_dot(nullptr),
+    nhc_eta_dotdot(nullptr), nhc_eta_mass(nullptr)
 {
-  max_nsend = 0;
-  max_nlocal = 0;
-  size_plan = 0;
+  // Preserve the legacy NVT flags while sharing storage and communication.
+  time_integrate = 0;
   spring_energy = t_sys = virial = 0.0;
 
   method = PIMD;
@@ -138,7 +133,6 @@ FixPIMDNVT::FixPIMDNVT(LAMMPS *lmp, int narg, char **arg) :
   size_vector = 3;
   extvector = -1;
   extlist = new int[3]{1, 0, 1};
-  comm_forward = 3;
 
   atom->add_callback(Atom::GROW);       // Call LAMMPS to allocate memory for per-atom array
   atom->add_callback(Atom::RESTART);    // Call LAMMPS to re-assign restart-data for per-atom array
@@ -154,27 +148,8 @@ FixPIMDNVT::FixPIMDNVT(LAMMPS *lmp, int narg, char **arg) :
 
 FixPIMDNVT::~FixPIMDNVT()
 {
-  delete[] mass;
-  delete[] extlist;
   atom->delete_callback(id, Atom::GROW);
   atom->delete_callback(id, Atom::RESTART);
-
-  memory->destroy(M_x2xp);
-  memory->destroy(M_xp2x);
-  memory->destroy(M_f2fp);
-  memory->destroy(M_fp2f);
-  memory->sfree(lam);
-
-  if (buf_beads)
-    for (int i = 0; i < np; i++) memory->sfree(buf_beads[i]);
-  delete[] buf_beads;
-  delete[] plan_send;
-  delete[] plan_recv;
-  delete[] mode_index;
-
-  memory->sfree(tag_send);
-  memory->sfree(buf_send);
-  memory->sfree(buf_recv);
 
   memory->destroy(array_atom);
   memory->destroy(nhc_eta);
@@ -198,55 +173,9 @@ int FixPIMDNVT::setmask()
 
 void FixPIMDNVT::init()
 {
-  bigint min_natoms, max_natoms;
-  MPI_Allreduce(&atom->natoms, &min_natoms, 1, MPI_LMP_BIGINT, MPI_MIN, universe->uworld);
-  MPI_Allreduce(&atom->natoms, &max_natoms, 1, MPI_LMP_BIGINT, MPI_MAX, universe->uworld);
-  if (min_natoms != max_natoms)
-    error->all(FLERR,
-               fmt::format("Fix {} requires the same number of atoms in every partition", style));
-
-  double cell[9] = {domain->boxlo[0], domain->boxlo[1], domain->boxlo[2],
-                    domain->boxhi[0], domain->boxhi[1], domain->boxhi[2],
-                    domain->xy,       domain->xz,       domain->yz};
-  double min_cell[9], max_cell[9];
-  MPI_Allreduce(cell, min_cell, 9, MPI_DOUBLE, MPI_MIN, universe->uworld);
-  MPI_Allreduce(cell, max_cell, 9, MPI_DOUBLE, MPI_MAX, universe->uworld);
-  int cell_mismatch = 0;
-  for (int i = 0; i < 9; i++)
-    if (min_cell[i] != max_cell[i]) cell_mismatch = 1;
-
-  int cell_flags[8] = {domain->triclinic,      domain->triclinic_general, domain->boundary[0][0],
-                       domain->boundary[0][1], domain->boundary[1][0],    domain->boundary[1][1],
-                       domain->boundary[2][0], domain->boundary[2][1]};
-  int min_flags[8], max_flags[8];
-  MPI_Allreduce(cell_flags, min_flags, 8, MPI_INT, MPI_MIN, universe->uworld);
-  MPI_Allreduce(cell_flags, max_flags, 8, MPI_INT, MPI_MAX, universe->uworld);
-  for (int i = 0; i < 8; i++)
-    if (min_flags[i] != max_flags[i]) cell_mismatch = 1;
-  if (cell_mismatch)
-    error->all(FLERR,
-               fmt::format("Fix {} requires the same simulation cell in every partition", style));
-
-  int min_ntypes, max_ntypes;
-  MPI_Allreduce(&atom->ntypes, &min_ntypes, 1, MPI_INT, MPI_MIN, universe->uworld);
-  MPI_Allreduce(&atom->ntypes, &max_ntypes, 1, MPI_INT, MPI_MAX, universe->uworld);
-  if (min_ntypes != max_ntypes)
-    error->all(FLERR,
-               fmt::format("Fix {} requires the same atom masses in every partition", style));
-
-  std::vector<double> min_mass(atom->ntypes), max_mass(atom->ntypes);
-  MPI_Allreduce(atom->mass + 1, min_mass.data(), atom->ntypes, MPI_DOUBLE, MPI_MIN,
-                universe->uworld);
-  MPI_Allreduce(atom->mass + 1, max_mass.data(), atom->ntypes, MPI_DOUBLE, MPI_MAX,
-                universe->uworld);
-  for (int i = 0; i < atom->ntypes; i++)
-    if (min_mass[i] != max_mass[i])
-      error->all(FLERR,
-                 fmt::format("Fix {} requires the same atom masses in every partition", style));
-
-  if (atom->map_style == Atom::MAP_NONE)
-    error->universe_all(FLERR, fmt::format("Fix {} requires an atom map, see atom_modify", style));
-  PIMDUtils::check_atom_consistency(lmp, style, groupbit);
+  validate_partition_topology(false);
+  // NVT keeps local atom order and does not require consecutive atom IDs.
+  initialize_partition_communication(false);
 
   if (universe->me == 0 && universe->uscreen)
     utils::print(universe->uscreen, "Fix {} initializing Path-Integral ...\n", style);
@@ -289,7 +218,7 @@ void FixPIMDNVT::init()
   dtv = update->dt;
   dtf = 0.5 * update->dt * force->ftm2v;
 
-  comm_init();
+  comm_init(method == PIMD);
 
   // init() runs once per run command, so release the array of the previous one
 
@@ -297,7 +226,7 @@ void FixPIMDNVT::init()
   mass = new double[atom->ntypes + 1];
 
   if (method == CMD || method == NMPIMD)
-    nmpimd_init();
+    init_nvt_normal_modes();
   else
     for (int i = 1; i <= atom->ntypes; i++) mass[i] = atom->mass[i] * inverse_np * fmass;
 
@@ -333,7 +262,7 @@ void FixPIMDNVT::final_integrate()
 
 void FixPIMDNVT::prepare_coordinates()
 {
-  comm_exec(atom->x);
+  inter_replica_comm(atom->x);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -353,17 +282,13 @@ void FixPIMDNVT::post_force(int /*flag*/)
   virial = output_values[1];
 
   if (method == CMD || method == NMPIMD) {
-    /* forward comm for the force on ghost atoms */
+    // The shared ring collector reads owned atoms only; no ghost force copy is needed.
 
-    nmpimd_fill(atom->f);
-
-    /* inter-partition comm */
-
-    comm_exec(atom->f);
+    inter_replica_comm(atom->f);
 
     /* normal-mode transform */
 
-    nmpimd_transform(buf_beads, atom->f, M_f2fp[universe->iworld]);
+    nmpimd_transform(bufbeads, atom->f, M_f2fp[universe->iworld]);
   }
 }
 
@@ -419,13 +344,12 @@ void FixPIMDNVT::nhc_update_x()
   double **v = atom->v;
 
   if (method == CMD || method == NMPIMD) {
-    nmpimd_fill(atom->v);
-    comm_exec(atom->v);
+    inter_replica_comm(atom->v);
 
     /* borrow the space of atom->f to store v in cartisian */
 
     v = atom->f;
-    nmpimd_transform(buf_beads, v, M_xp2x[universe->iworld]);
+    nmpimd_transform(bufbeads, v, M_xp2x[universe->iworld]);
   }
 
   for (int i = 0; i < n; i++) {
@@ -526,7 +450,7 @@ void FixPIMDNVT::nhc_update_v()
    Normal Mode PIMD
 ------------------------------------------------------------------------- */
 
-void FixPIMDNVT::nmpimd_init()
+void FixPIMDNVT::init_nvt_normal_modes()
 {
   // init() calls this once per run, so release what an earlier run allocated
 
@@ -593,29 +517,6 @@ void FixPIMDNVT::nmpimd_init()
 
 /* ---------------------------------------------------------------------- */
 
-void FixPIMDNVT::nmpimd_fill(double **ptr)
-{
-  comm_ptr = ptr;
-  comm->forward_comm(this);
-}
-
-/* ---------------------------------------------------------------------- */
-
-void FixPIMDNVT::nmpimd_transform(double **src, double **des, double *vector)
-{
-  int n = atom->nlocal;
-  int m = 0;
-
-  for (int i = 0; i < n; i++)
-    for (int d = 0; d < 3; d++) {
-      des[i][d] = 0.0;
-      for (int j = 0; j < np; j++) { des[i][d] += (src[j][m] * vector[j]); }
-      m++;
-    }
-}
-
-/* ---------------------------------------------------------------------- */
-
 void FixPIMDNVT::pre_spring_force_estimators()
 {
   vir_estimator();
@@ -646,8 +547,8 @@ void FixPIMDNVT::spring_force()
   int *type = atom->type;
   int nlocal = atom->nlocal;
 
-  double *xlast = buf_beads[x_last];
-  double *xnext = buf_beads[x_next];
+  double *xlast = bufbeads[x_last];
+  double *xnext = bufbeads[x_next];
 
   for (int i = 0; i < nlocal; i++) {
     double delx1 = xlast[0] - x[i][0];
@@ -676,187 +577,12 @@ void FixPIMDNVT::spring_force()
   }
 }
 
-/* ----------------------------------------------------------------------
-   Comm operations
-------------------------------------------------------------------------- */
-
-void FixPIMDNVT::comm_init()
-{
-  if (size_plan) {
-    delete[] plan_send;
-    delete[] plan_recv;
-    delete[] mode_index;
-  }
-
-  if (method == PIMD) {
-    size_plan = 2;
-    plan_send = new int[2];
-    plan_recv = new int[2];
-    mode_index = new int[2];
-
-    int rank_last = universe->me - comm->nprocs;
-    int rank_next = universe->me + comm->nprocs;
-    if (rank_last < 0) rank_last += universe->nprocs;
-    if (rank_next >= universe->nprocs) rank_next -= universe->nprocs;
-
-    plan_send[0] = rank_next;
-    plan_send[1] = rank_last;
-    plan_recv[0] = rank_last;
-    plan_recv[1] = rank_next;
-
-    mode_index[0] = 0;
-    mode_index[1] = 1;
-    x_last = 1;
-    x_next = 0;
-  } else {
-    size_plan = np - 1;
-    plan_send = new int[size_plan];
-    plan_recv = new int[size_plan];
-    mode_index = new int[size_plan];
-
-    for (int i = 0; i < size_plan; i++) {
-      plan_send[i] = universe->me + comm->nprocs * (i + 1);
-      if (plan_send[i] >= universe->nprocs) plan_send[i] -= universe->nprocs;
-
-      plan_recv[i] = universe->me - comm->nprocs * (i + 1);
-      if (plan_recv[i] < 0) plan_recv[i] += universe->nprocs;
-
-      mode_index[i] = (universe->iworld + i + 1) % (universe->nworlds);
-    }
-
-    x_next = (universe->iworld + 1 + universe->nworlds) % (universe->nworlds);
-    x_last = (universe->iworld - 1 + universe->nworlds) % (universe->nworlds);
-  }
-
-  if (buf_beads) {
-    for (int i = 0; i < np; i++) delete[] buf_beads[i];
-    delete[] buf_beads;
-  }
-
-  buf_beads = new double *[np];
-  for (int i = 0; i < np; i++) buf_beads[i] = nullptr;
-  max_nlocal = 0;
-}
-
 /* ---------------------------------------------------------------------- */
 
-void FixPIMDNVT::comm_exec(double **ptr)
+void *FixPIMDNVT::extract(const char *name, int &dim)
 {
-  int nlocal = atom->nlocal;
-
-  if (nlocal > max_nlocal) {
-    max_nlocal = nlocal + 200;
-    int size = sizeof(double) * max_nlocal * 3;
-    buf_recv = (double *) memory->srealloc(buf_recv, size, "FixPIMDNVT:x_recv");
-
-    for (int i = 0; i < np; i++)
-      buf_beads[i] = (double *) memory->srealloc(buf_beads[i], size, "FixPIMDNVT:x_beads[i]");
-  }
-
-  // copy local positions
-
-  if (nlocal) memcpy(buf_beads[universe->iworld], &(ptr[0][0]), sizeof(double) * nlocal * 3);
-
-  // go over comm plans
-
-  for (int iplan = 0; iplan < size_plan; iplan++) {
-    // sendrecv nlocal
-
-    int nsend;
-
-    MPI_Sendrecv(&nlocal, 1, MPI_INT, plan_send[iplan], 0, &nsend, 1, MPI_INT, plan_recv[iplan], 0,
-                 universe->uworld, MPI_STATUS_IGNORE);
-
-    // allocate arrays
-
-    if (nsend > max_nsend) {
-      max_nsend = nsend + 200;
-      tag_send =
-          (tagint *) memory->srealloc(tag_send, sizeof(tagint) * max_nsend, "FixPIMDNVT:tag_send");
-      buf_send = (double *) memory->srealloc(buf_send, sizeof(double) * max_nsend * 3,
-                                             "FixPIMDNVT:x_send");
-    }
-
-    // send tags
-
-    MPI_Sendrecv(atom->tag, nlocal, MPI_LMP_TAGINT, plan_send[iplan], 0, tag_send, nsend,
-                 MPI_LMP_TAGINT, plan_recv[iplan], 0, universe->uworld, MPI_STATUS_IGNORE);
-
-    // wrap positions
-
-    std::vector<int> missing_indices;
-    std::vector<tagint> missing_tags;
-    missing_indices.reserve(nsend);
-    missing_tags.reserve(nsend);
-
-    for (int i = 0; i < nsend; i++) {
-      const int index = atom->map(tag_send[i]);
-      if (index >= 0 && index < nlocal) {
-        buf_send[3 * i] = ptr[index][0];
-        buf_send[3 * i + 1] = ptr[index][1];
-        buf_send[3 * i + 2] = ptr[index][2];
-      } else {
-        missing_indices.push_back(i);
-        missing_tags.push_back(tag_send[i]);
-      }
-    }
-
-    int has_missing_tags = missing_tags.empty() ? 0 : 1;
-    MPI_Allreduce(MPI_IN_PLACE, &has_missing_tags, 1, MPI_INT, MPI_MAX, world);
-
-    std::vector<double> collected_values;
-    if (has_missing_tags)
-      PIMDUtils::collect_atom_vectors(lmp, style, missing_tags, ptr, collected_values);
-
-    for (std::size_t i = 0; i < missing_indices.size(); i++) {
-      const int index = missing_indices[i];
-      buf_send[3 * index] = collected_values[3 * i];
-      buf_send[3 * index + 1] = collected_values[3 * i + 1];
-      buf_send[3 * index + 2] = collected_values[3 * i + 2];
-    }
-
-    // sendrecv x
-
-    MPI_Sendrecv(buf_send, nsend * 3, MPI_DOUBLE, plan_recv[iplan], 0, buf_recv, nlocal * 3,
-                 MPI_DOUBLE, plan_send[iplan], 0, universe->uworld, MPI_STATUS_IGNORE);
-
-    // copy x
-
-    if (nlocal) memcpy(buf_beads[mode_index[iplan]], buf_recv, sizeof(double) * nlocal * 3);
-  }
-}
-
-/* ---------------------------------------------------------------------- */
-
-int FixPIMDNVT::pack_forward_comm(int n, int *list, double *buf, int /*pbc_flag*/, int * /*pbc*/)
-{
-  int i, j, m;
-
-  m = 0;
-
-  for (i = 0; i < n; i++) {
-    j = list[i];
-    buf[m++] = comm_ptr[j][0];
-    buf[m++] = comm_ptr[j][1];
-    buf[m++] = comm_ptr[j][2];
-  }
-
-  return m;
-}
-
-/* ---------------------------------------------------------------------- */
-
-void FixPIMDNVT::unpack_forward_comm(int n, int first, double *buf)
-{
-  int i, m, last;
-
-  m = 0;
-  last = first + n;
-  for (i = first; i < last; i++) {
-    comm_ptr[i][0] = buf[m++];
-    comm_ptr[i][1] = buf[m++];
-    comm_ptr[i][2] = buf[m++];
-  }
+  // Sharing the core does not enable the external-bias contract for legacy NVT.
+  return Fix::extract(name, dim);
 }
 
 /* ----------------------------------------------------------------------

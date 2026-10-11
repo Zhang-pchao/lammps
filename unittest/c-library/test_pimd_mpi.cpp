@@ -2199,3 +2199,50 @@ TEST(PIMD, multirank_repeated_run_initialization)
     }
     lammps_close(handle);
 }
+
+TEST(PIMD, common_core_nve_command_equivalence)
+{
+    int nprocs;
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    ASSERT_EQ(nprocs, 4);
+    for (const char *method : {"pimd", "nmpimd"}) {
+        for (const char *integrator : {"obabo", "baoab"}) {
+            for (const char *mass_mode : {"physical", "normal"}) {
+                if (std::string(method) == "pimd" && std::string(mass_mode) == "normal") continue;
+                for (double fmass : {1.0, 0.5}) {
+                    SCOPED_TRACE(method);
+                    SCOPED_TRACE(integrator);
+                    SCOPED_TRACE(mass_mode);
+                    SCOPED_TRACE(fmass);
+                    std::array<std::array<double, 36>, 2> state{};
+                    std::array<std::array<double, 10>, 2> output{};
+                    for (int variant = 0; variant < 2; ++variant) {
+                        void *lmp = open_two_bead_partition(MPI_COMM_WORLD, "2x2");
+                        ASSERT_NE(lmp, nullptr);
+                        create_two_bead_test_system(lmp, 2, Ownership::ASYMMETRIC);
+                        set_two_bead_initial_velocities(lmp, Ownership::ASYMMETRIC);
+                        lammps_command(lmp, "timestep 0.0001");
+                        lammps_command(lmp, "thermo 0");
+                        std::string command = variant == 0 ?
+                            "fix fpimd all pimd/langevin ensemble nve" : "fix fpimd all pimd/nve";
+                        command += " method " + std::string(method) + " integrator " + integrator +
+                            " fmmode " + mass_mode + " fmass " + std::to_string(fmass) +
+                            " temp 1.0 sp 1.0";
+                        lammps_command(lmp, command.c_str());
+                        lammps_command(lmp, "run 3 post no");
+                        EXPECT_EQ(lammps_has_error(lmp), 0);
+                        state[variant] = collect_two_bead_state(extract_two_atom_state(lmp));
+                        output[variant] = extract_langevin_nvt_global_outputs(lmp);
+                        lammps_close(lmp);
+                    }
+                    // The new command exposes the same deterministic core.  This
+                    // is a refactor parity check, separate from analytic accuracy.
+                    for (std::size_t i = 0; i < state[0].size(); ++i)
+                        EXPECT_DOUBLE_EQ(state[1][i], state[0][i]) << i;
+                    for (std::size_t i = 0; i < output[0].size(); ++i)
+                        EXPECT_DOUBLE_EQ(output[1][i], output[0][i]) << i;
+                }
+            }
+        }
+    }
+}

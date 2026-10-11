@@ -21,16 +21,14 @@ FixStyle(pimd/nvt,FixPIMDNVT);
 #ifndef FIX_PIMD_NVT_H
 #define FIX_PIMD_NVT_H
 
-#include "fix.h"
+#include "fix_pimd_nve.h"
 
 namespace LAMMPS_NS {
 
-class FixPIMDNVT : public Fix {
+class FixPIMDNVT : public FixPIMDNVE {
  public:
   FixPIMDNVT(class LAMMPS *, int, char **);
   ~FixPIMDNVT() override;
-
-  enum { PIMD, NMPIMD, CMD };
 
   int setmask() override;
 
@@ -51,51 +49,16 @@ class FixPIMDNVT : public Fix {
   int size_restart(int) override;
   double compute_vector(int) override;
 
-  int pack_forward_comm(int, int *, double *, int, int *) override;
-  void unpack_forward_comm(int, int, double *) override;
+  void *extract(const char *, int &) override;
 
  protected:
-  int method;
-  int np;
-  double inverse_np;
-
-  /* ring-polymer model */
-
-  double omega_np, fbond, spring_energy, sp, virial;
-  int x_last, x_next;
-  virtual void prepare_coordinates();
+  // Legacy NVT uses its original force/coordinate normalization and per-atom NHC.
+  double virial;
+  void prepare_coordinates() override;
   virtual void pre_spring_force_estimators();
-  virtual void spring_force();
+  void spring_force() override;
   void vir_estimator();
-
-  /* fictitious mass */
-
-  double fmass, *mass;
-
-  /* inter-partition communication */
-
-  int max_nsend;
-  tagint *tag_send;
-  double *buf_send;
-
-  int max_nlocal;
-  double *buf_recv, **buf_beads;
-
-  int size_plan;
-  int *plan_send, *plan_recv;
-  double **comm_ptr;
-
-  void comm_init();
-  void comm_exec(double **);
-
-  /* normal-mode operations */
-
-  double *lam, **M_x2xp, **M_xp2x, **M_f2fp, **M_fp2f;
-  int *mode_index;
-
-  void nmpimd_init();
-  void nmpimd_fill(double **);
-  void nmpimd_transform(double **, double **, double *);
+  void init_nvt_normal_modes();
 
   /* Nose-hoover chain integration */
 
@@ -103,8 +66,7 @@ class FixPIMDNVT : public Fix {
   int nhc_size_one_1, nhc_size_one_2;
   int nhc_nchain;
   bool nhc_ready;
-  double nhc_temp, dtv, dtf, t_sys;
-  double beta;
+  double nhc_temp, t_sys;
 
   double **nhc_eta;        /* coordinates of NH chains for ring-polymer beads */
   double **nhc_eta_dot;    /* velocities of NH chains                         */

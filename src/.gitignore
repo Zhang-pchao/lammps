@@ -1867,6 +1867,8 @@
 /fix_pimd_langevin_bosonic.h
 /fix_alchemy.cpp
 /fix_alchemy.h
+/fix_pimd_nve.cpp
+/fix_pimd_nve.h
 /fix_pimd_nvt.cpp
 /fix_pimd_nvt.h
 /fix_pimd_nvt_bosonic.cpp
@@ -2011,5 +2013,3 @@
 /pair_bondval.h
 /pair_bondval_vec.cpp
 /pair_bondval_vec.h
-pimd_partition.cpp
-pimd_partition.h
