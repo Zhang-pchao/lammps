@@ -14,7 +14,7 @@ import os
 import sys
 import unittest
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -63,6 +63,52 @@ def deepmd_modules(potential):
 
 
 class DeepMDContractTests(unittest.TestCase):
+    def test_default_and_explicit_false_keep_the_original_loader_call(self):
+        for model in ("model.pt", "model.pt2"):
+            for options in ({}, {"no_jit": False}):
+                with self.subTest(model=model, options=options):
+                    potential = FakePotential()
+                    modules = deepmd_modules(potential)
+                    loader = Mock(return_value=potential)
+                    modules["deepmd.infer"].DeepPot = loader
+                    with patch.dict(sys.modules, modules):
+                        backend = DeepMDBackend(model, **options)
+                    loader.assert_called_once_with(model)
+                    self.assertIs(backend.no_jit, False)
+
+    def test_explicit_no_jit_is_forwarded_for_raw_checkpoint(self):
+        potential = FakePotential()
+        modules = deepmd_modules(potential)
+        loader = Mock(return_value=potential)
+        modules["deepmd.infer"].DeepPot = loader
+        with patch.dict(sys.modules, modules):
+            backend = DeepMDBackend("model.pt", no_jit=True)
+        loader.assert_called_once_with("model.pt", no_jit=True)
+        self.assertIs(backend.no_jit, True)
+        self.assertEqual(backend.evaluate(water()).energy, -3.0)
+
+    def test_no_jit_rejects_nonboolean_values_before_import(self):
+        with patch.dict(sys.modules, {"deepmd": None, "deepmd.infer": None}):
+            for value in (0, 1, np.bool_(True), "true", None, []):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, "no_jit"):
+                    DeepMDBackend("model.pt", no_jit=value)
+
+    def test_no_jit_rejects_compiled_or_nonraw_files_before_import(self):
+        with patch.dict(sys.modules, {"deepmd": None, "deepmd.infer": None}):
+            for model in ("model.pt2", "model.pte", "model.pth", "model.pb", "model.PT", "model"):
+                with self.subTest(model=model), self.assertRaisesRegex(ValueError, "raw PyTorch"):
+                    DeepMDBackend(model, no_jit=True)
+
+    def test_no_jit_loader_error_propagates_without_fallback(self):
+        failure = RuntimeError("Explicit raw loader failed")
+        modules = deepmd_modules(FakePotential())
+        loader = Mock(side_effect=failure)
+        modules["deepmd.infer"].DeepPot = loader
+        with patch.dict(sys.modules, modules), self.assertRaises(RuntimeError) as caught:
+            DeepMDBackend("model.pt", no_jit=True)
+        self.assertIs(caught.exception, failure)
+        loader.assert_called_once_with("model.pt", no_jit=True)
+
     def test_type_map_boundary_and_conditions_are_passed_separately(self):
         potential = FakePotential(conditioned=True, frame=1, atomic=2)
         with patch.dict(sys.modules, deepmd_modules(potential)):

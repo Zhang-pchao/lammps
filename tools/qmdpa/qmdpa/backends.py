@@ -33,15 +33,24 @@ class DeepMDBackend:
     from ``fparam``. Frame parameters are a vector. Atomic parameters are
     either one uniform vector or an (atoms, parameters) array in input order.
     A separate provider should be used when full and QM parameter sets differ.
+
+    Explicit no_jit=True disables scripting only for raw PyTorch .pt files.
+    It does not enforce deterministic execution or change compiled archives.
+    Global runtime controls remain the caller's responsibility.
     """
 
-    def __init__(self, model, *, charge_spin=None, fparam=None, aparam=None):
+    def __init__(self, model, *, charge_spin=None, fparam=None, aparam=None, no_jit=False):
+        if type(no_jit) is not bool:
+            raise ValueError("no_jit must be true or false")
+        self.model = str(Path(model))
+        if no_jit and Path(self.model).suffix != ".pt":
+            raise ValueError("no_jit=True requires a raw PyTorch .pt checkpoint")
+        self.no_jit = no_jit
         try:
             from deepmd.infer import DeepPot
         except ImportError as exc:
             raise ImportError("DeePMD-kit is required for the DeePMD backend") from exc
-        self.model = str(Path(model))
-        self._potential = DeepPot(self.model)
+        self._potential = DeepPot(self.model, no_jit=True) if self.no_jit else DeepPot(self.model)
         self.type_map = tuple(self._potential.get_type_map())
         if not self.type_map or len(set(self.type_map)) != len(self.type_map):
             raise ValueError("The model must provide a nonempty, unique element type map")

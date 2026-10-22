@@ -135,6 +135,13 @@ cannot change. `terms.environment`, `terms.embedded` and `terms.cross` expose
 the independent contributions, while `evaluate()` returns only `terms.total`.
 The caller owns provider lifetimes. Periodic geometries are unsupported.
 
+For raw PyTorch checkpoints, `DeepMDBackend(..., no_jit=True)` explicitly
+passes the official no-scripting option and rejects compiled archive inputs.
+Its default is false, preserving existing callers. This option alone does not
+make inference deterministic: the application must declare and verify its
+PyTorch/CUDA runtime policy before loading a model. An already compiled AOT
+archive cannot be made deterministic by this option or by a runtime flag.
+
 This standalone calculator is separate from the subtractive CLI/LAMMPS bridge
 below. It does not enable electrostatic dynamics. A future all-atom adapter
 must supply the entire additive energy and forces with native pair energy zero,
