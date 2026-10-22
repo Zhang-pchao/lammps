@@ -83,6 +83,7 @@ class _Session:
                 "ecutwfc": self.settings["ecutwfc"],
                 "scf_thr": self.settings["scf_thr"],
                 "scf_nmax": self.settings["scf_nmax"],
+                "ks_solver": self.settings["ks_solver"],
                 "nspin": 1,
                 "smearing_method": "fixed",
                 "symmetry": -1,

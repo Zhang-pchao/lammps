@@ -36,6 +36,7 @@ _DEFAULTS = {
     "ecutwfc": 60.0,
     "scf_thr": 1e-9,
     "scf_nmax": 100,
+    "ks_solver": "cg",
     "charge": 0,
     "multiplicity": 1,
     "timeout_seconds": 120.0,
@@ -99,6 +100,12 @@ def validate_abacus_settings(settings, base_dir):
             raise ValueError(
                 "ABACUS currently requires neutral singlets (charge=0, multiplicity=1)"
             )
+    if not isinstance(result["ks_solver"], str) or result["ks_solver"] not in (
+        "cg",
+        "dav",
+        "dav_subspace",
+    ):
+        raise ValueError("ks_solver must be cg, dav or dav_subspace")
     for key in ("ecutwfc", "scf_thr", "timeout_seconds"):
         result[key] = _number(result[key], key)
     if type(result["scf_nmax"]) is not int or result["scf_nmax"] <= 0:
@@ -162,6 +169,7 @@ class AbacusBackend:
         ecutwfc=60,
         scf_thr=1e-9,
         scf_nmax=100,
+        ks_solver="cg",
         charge=0,
         multiplicity=1,
         timeout_seconds=120,
@@ -184,6 +192,7 @@ class AbacusBackend:
                 "ecutwfc": ecutwfc,
                 "scf_thr": scf_thr,
                 "scf_nmax": scf_nmax,
+                "ks_solver": ks_solver,
                 "charge": charge,
                 "multiplicity": multiplicity,
                 "timeout_seconds": timeout_seconds,

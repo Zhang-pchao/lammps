@@ -219,6 +219,7 @@ class AbacusSettingsTests(AbacusTestCase):
         self.assertEqual(result["ecutwfc"], 60)
         self.assertEqual(result["scf_thr"], 1e-9)
         self.assertEqual(result["scf_nmax"], 100)
+        self.assertEqual(result["ks_solver"], "cg")
         self.assertEqual(result["timeout_seconds"], 120)
         self.assertEqual((result["charge"], result["multiplicity"]), (0, 1))
 
@@ -234,6 +235,15 @@ class AbacusSettingsTests(AbacusTestCase):
         ):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 self.resolve({**self.settings, **extra})
+
+    def test_solver_selection_is_explicit_and_strict(self):
+        for solver in ("cg", "dav", "dav_subspace"):
+            with self.subTest(solver=solver):
+                resolved = self.resolve({**self.settings, "ks_solver": solver})
+                self.assertEqual(resolved["ks_solver"], solver)
+        for solver in (None, True, 1, [], {}, "CG", "", "lapack", "auto"):
+            with self.subTest(solver=solver), self.assertRaisesRegex(ValueError, "ks_solver"):
+                self.resolve({**self.settings, "ks_solver": solver})
 
     def test_invalid_numerical_parameters_are_rejected(self):
         for key in ("ecutwfc", "scf_thr", "timeout_seconds"):
@@ -628,6 +638,7 @@ class AbacusWorkerAdapterTests(AbacusTestCase):
                 "ecutwfc": 60.0,
                 "scf_thr": 1e-9,
                 "scf_nmax": 100,
+                "ks_solver": "cg",
                 "nspin": 1,
                 "smearing_method": "fixed",
                 "symmetry": -1,
@@ -650,6 +661,23 @@ class AbacusWorkerAdapterTests(AbacusTestCase):
                 (Path(profile["pseudo_dir"]) / f"{symbol}.upf").read_bytes(),
                 (self.directory / f"{symbol}.upf").read_bytes(),
             )
+
+    def test_selected_solver_reaches_the_official_socket(self):
+        for solver in ("dav", "dav_subspace"):
+            with self.subTest(solver=solver):
+                runtime = self.directory / solver
+                runtime.mkdir()
+                session = _Session(
+                    {
+                        "settings": self.resolve({**self.settings, "ks_solver": solver}),
+                        "directory": str(runtime),
+                        "unixsocket": "qmdpa-" + "b" * 32,
+                    }
+                )
+                try:
+                    self.assertEqual(session.calculator.kwargs["inp"]["ks_solver"], solver)
+                finally:
+                    session.close()
 
     def test_reused_calculator_preserves_offset_cell_order_and_result_units(self):
         calculator = self.session.calculator

@@ -107,9 +107,15 @@ pseudopotential. These values illustrate the schema, not a qualified protocol.
   "ecutwfc": 60.0,
   "scf_thr": 1e-9,
   "scf_nmax": 100,
+  "ks_solver": "cg",
   "timeout_seconds": 120.0
 }
 ```
+
+`ks_solver` explicitly selects the official PW eigensolver: `cg` (default),
+`dav`, or `dav_subspace`. There is no automatic solver fallback. A different
+solver changes restart identity and requires fresh numerical qualification;
+support in this interface does not guarantee convergence of a given input.
 
 The executable and pseudopotential digests, cell, offset, resolved settings and
 ASE/abacuslite source identities enter the restart identity. Atom IDs and element
