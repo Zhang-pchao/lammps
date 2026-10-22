@@ -1,6 +1,6 @@
 # Fixed-region QM/DPA coupling
 
-This tool adds an isolated molecular QM correction to a DeePMD potential in
+This tool adds a molecular QM-region correction to a DeePMD potential in
 LAMMPS: `E_hybrid = E_DP(full) + E_QM(region) - E_DP(region)`. It uses the public
 LAMMPS library and `fix external` interfaces. The same subtraction implementation
 is used for standalone validation and LAMMPS dynamics.
@@ -8,7 +8,10 @@ is used for standalone validation and LAMMPS dynamics.
 ## Installation
 
 Use Python 3.10 or newer, NumPy, a shared LAMMPS build with EXTRA-FIX and the
-DeePMD pair style, and matching DeePMD/PySCF installations. MPI runs also need
+DeePMD pair style, and matching DeePMD and QM-backend installations. PySCF is the
+default QM backend. The experimental ABACUS backend additionally requires ASE,
+the official `abacuslite.AbacusSocketIO` interface, and a compatible serial
+ABACUS executable with socket support. MPI runs also need
 mpi4py built against the MPI library used by LAMMPS. From this directory:
 
 ```bash
@@ -51,8 +54,10 @@ The JSON schema requires `schema_version: 1`, `data_file` (atomic-style LAMMPS
 data), `model`, `model_sha256`, `type_symbols` (LAMMPS types in order), `periodic`
 (true or false), `region`, `qm`, `timestep_fs`, and `steps`. Paths are relative to
 the configuration. `region` contains `atom_ids`, corresponding `symbols`, and
-`molecules` (lists partitioning those IDs into complete molecules). `qm` contains
-PySCF settings such as `xc`, `basis`, `charge`, `multiplicity`, `conv_tol`,
+`molecules` (lists partitioning those IDs into complete molecules).
+`qm.engine` selects `pyscf` (also the default when omitted) or `abacus`. Unknown
+engines and settings are rejected. For PySCF, `qm` contains settings such as
+`xc`, `basis`, `charge`, `multiplicity`, `conv_tol`,
 `conv_tol_grad` (positive or `null`), `grid_level`, `grid_response` (a JSON
 boolean, default `true`), and `threads`. The optional orbital-gradient threshold
 controls SCF independently of the energy-change threshold. `null` preserves the
@@ -74,6 +79,54 @@ physical settings, coupling source/dependency identity, step, recomputed energy/
 and velocities. Output directories must be new. Generated artifacts are not
 source files and should not be committed.
 
+## Experimental ABACUS backend
+
+ABACUS uses a persistent official socket calculator for a neutral singlet region
+(`charge: 0`, `multiplicity: 1`). Nonperiodic region coordinates receive the same
+fixed offset on every call and are evaluated in an explicitly declared finite
+periodic supercell. This is a molecular supercell approximation, with fixed
+PW/PBE, Gamma sampling and fixed occupations. It does not establish convergence
+with vacuum size, cutoff or SCF settings. ABACUS force, dynamics and restart
+qualification remains pending; process-contract tests do not supply that evidence.
+
+An example `qm` object is shown below. Paths are relative to the run configuration;
+replace each SHA256 placeholder with the full digest of the actual binary or
+pseudopotential. These values illustrate the schema, not a qualified protocol.
+
+```json
+{
+  "engine": "abacus",
+  "executable": "software/abacus",
+  "executable_sha256": "<binary-sha256>",
+  "pseudopotentials": {
+    "H": {"path": "pseudopotentials/H.upf", "sha256": "<H-upf-sha256>"},
+    "O": {"path": "pseudopotentials/O.upf", "sha256": "<O-upf-sha256>"}
+  },
+  "supercell_angstrom": [12.0, 12.0, 12.0],
+  "coordinate_offset_angstrom": [6.0, 6.0, 6.0],
+  "ecutwfc": 60.0,
+  "scf_thr": 1e-9,
+  "scf_nmax": 100,
+  "timeout_seconds": 120.0
+}
+```
+
+The executable and pseudopotential digests, cell, offset, resolved settings and
+ASE/abacuslite source identities enter the restart identity. Atom IDs and element
+order stay fixed within a session. The driver supplies a fresh output directory;
+`directory` is not a QM setting. Native ABACUS must resolve its own runtime
+libraries: its launch removes inherited `LD_PRELOAD` and `LD_LIBRARY_PATH` and
+sets OpenMP, OpenBLAS and MKL thread counts to one without changing the caller.
+
+On POSIX systems, the worker and native ABACUS share a private process group.
+Requests have a deadline, including first-call initialization. A timeout,
+unconverged SCF or invalid response permanently invalidates that backend and
+terminates the group; previous forces are never returned. A separate watchdog
+also detects loss of the parent while initialization, evaluation or close is
+blocked, removes the session's unique socket and terminates its own group.
+Close is idempotent and cleanup errors cannot replace the original evaluation
+error. Failure diagnostics and native logs remain in the output directory.
+
 ## Scope and failure semantics
 
 - Fixed complete-molecule membership is an input contract. No covalent cuts,
@@ -83,7 +136,7 @@ source files and should not be committed.
   during a run. Fixed-cell triclinic image mapping is supported.
 - Only `units metal`, fixed cells and NVE are implemented by the CLI. Correction
   virial and full hybrid pressure are not qualified; do not use NPT.
-- PySCF failures and invalid model output never reuse previous forces. Callback
+- QM failures and invalid model output never reuse previous forces. Callback
   errors stop the run and invalidate its in-memory failed segment. A ctypes
   callback cannot unwind LAMMPS mid-step safely. Use only the last accepted
   checkpoint; do not attach automatic LAMMPS dumps/restarts to such segments.

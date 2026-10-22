@@ -29,22 +29,82 @@ def _positive_integer(value, name, *, allow_zero=False):
     return value
 
 
-def software_identity():
+def software_identity(*, qm_engine="pyscf"):
     """Identify the implementation and numerical dependencies for restart checks."""
     digest = hashlib.sha256()
     for source in sorted(Path(__file__).parent.glob("*.py")):
         digest.update(source.name.encode() + b"\0" + source.read_bytes())
     versions = {}
-    for name in ("numpy", "deepmd-kit", "pyscf"):
+    names = ("numpy", "deepmd-kit", "pyscf")
+    if qm_engine == "abacus":
+        names += ("ase", "abacuslite")
+    for name in names:
         try:
             versions[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             versions[name] = None
+    package_sources = {}
+    if qm_engine == "abacus":
+        for name in ("ase", "abacuslite"):
+            try:
+                distribution = importlib.metadata.distribution(name)
+            except importlib.metadata.PackageNotFoundError:
+                package_sources[name] = None
+                continue
+            source_digest = hashlib.sha256()
+            for entry in sorted(distribution.files or (), key=str):
+                if str(entry).endswith(".py"):
+                    source_digest.update(str(entry).encode() + b"\0")
+                    source_digest.update(Path(distribution.locate_file(entry)).read_bytes())
+            package_sources[name] = source_digest.hexdigest()
     return {
+        "backend_package_sources": package_sources,
         "coupling_sha256": digest.hexdigest(),
         "python": platform.python_version(),
         "packages": versions,
     }
+
+
+def _pyscf_settings(qm):
+    """Validate molecular settings without importing the optional provider."""
+    qm_defaults = {
+        "xc": "pbe",
+        "basis": "def2-svp",
+        "charge": 0,
+        "multiplicity": 1,
+        "conv_tol": 1e-9,
+        "conv_tol_grad": None,
+        "max_cycle": 100,
+        "grid_level": 3,
+        "grid_response": True,
+        "threads": None,
+    }
+    if not isinstance(qm, dict) or set(qm).difference(qm_defaults):
+        raise ValueError("qm contains unsupported PySCF configuration keys")
+    qm = {**qm_defaults, **qm}
+    for key in ("xc", "basis"):
+        if not isinstance(qm[key], str) or not qm[key].strip():
+            raise ValueError(f"qm.{key} must be a nonempty string")
+    if type(qm["charge"]) is not int:
+        raise ValueError("qm.charge must be an integer")
+    for key in ("multiplicity", "max_cycle"):
+        _positive_integer(qm[key], f"qm.{key}")
+    _positive_integer(qm["grid_level"], "qm.grid_level", allow_zero=True)
+    if type(qm["grid_response"]) is not bool:
+        raise ValueError("qm.grid_response must be true or false")
+    if qm["threads"] is not None:
+        _positive_integer(qm["threads"], "qm.threads")
+    if isinstance(qm["conv_tol"], bool) or not np.isfinite(qm["conv_tol"]) or qm["conv_tol"] <= 0:
+        raise ValueError("qm.conv_tol must be finite and positive")
+    grad_tol = qm["conv_tol_grad"]
+    if grad_tol is not None and (
+        isinstance(grad_tol, bool)
+        or not isinstance(grad_tol, (int, float))
+        or not np.isfinite(grad_tol)
+        or grad_tol <= 0
+    ):
+        raise ValueError("qm.conv_tol_grad must be finite and positive or null")
+    return qm
 
 
 def load_config(path):
@@ -118,44 +178,22 @@ def load_config(path):
             or value[1] < 1
         ):
             raise ValueError(f"{key} requires integer charge and positive multiplicity")
-    qm_defaults = {
-        "xc": "pbe",
-        "basis": "def2-svp",
-        "charge": 0,
-        "multiplicity": 1,
-        "conv_tol": 1e-9,
-        "conv_tol_grad": None,
-        "max_cycle": 100,
-        "grid_level": 3,
-        "grid_response": True,
-        "threads": None,
-    }
     qm = config["qm"]
-    if not isinstance(qm, dict) or set(qm).difference(qm_defaults):
-        raise ValueError("qm contains unsupported PySCF configuration keys")
-    qm = {**qm_defaults, **qm}
-    for key in ("xc", "basis"):
-        if not isinstance(qm[key], str) or not qm[key].strip():
-            raise ValueError(f"qm.{key} must be a nonempty string")
-    if type(qm["charge"]) is not int:
-        raise ValueError("qm.charge must be an integer")
-    for key in ("multiplicity", "max_cycle"):
-        _positive_integer(qm[key], f"qm.{key}")
-    _positive_integer(qm["grid_level"], "qm.grid_level", allow_zero=True)
-    if type(qm["grid_response"]) is not bool:
-        raise ValueError("qm.grid_response must be true or false")
-    if qm["threads"] is not None:
-        _positive_integer(qm["threads"], "qm.threads")
-    if isinstance(qm["conv_tol"], bool) or not np.isfinite(qm["conv_tol"]) or qm["conv_tol"] <= 0:
-        raise ValueError("qm.conv_tol must be finite and positive")
-    grad_tol = qm["conv_tol_grad"]
-    if grad_tol is not None and (
-        isinstance(grad_tol, bool)
-        or not isinstance(grad_tol, (int, float))
-        or not np.isfinite(grad_tol)
-        or grad_tol <= 0
-    ):
-        raise ValueError("qm.conv_tol_grad must be finite and positive or null")
+    if not isinstance(qm, dict):
+        raise ValueError("qm must be an object")
+    engine = qm.get("engine", "pyscf")
+    if engine == "pyscf":
+        qm = _pyscf_settings({key: value for key, value in qm.items() if key != "engine"})
+        qm["engine"] = engine
+    elif engine == "abacus":
+        from .abacus import validate_abacus_settings
+
+        qm = validate_abacus_settings(qm, path.parent)
+        missing = set(region["symbols"]).difference(qm["pseudopotentials"])
+        if missing:
+            raise ValueError(f"Missing QM pseudopotentials for {sorted(missing)}")
+    else:
+        raise ValueError("qm.engine must be pyscf or abacus")
     config["qm"] = qm
     state = config.get("region_charge_spin")
     if state is not None and state != [qm["charge"], qm["multiplicity"]]:
@@ -178,7 +216,7 @@ def load_config(path):
             raise ValueError("temperature_K must be finite and positive")
         config["temperature_K"] = temperature
         _positive_integer(config["velocity_seed"], "velocity_seed")
-    config["software"] = software_identity()
+    config["software"] = software_identity(qm_engine=engine)
     physics = {
         key: config.get(key)
         for key in (

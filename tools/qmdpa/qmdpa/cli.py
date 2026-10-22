@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-from .backends import DeepMDBackend, PySCFBackend
+from .backends import DeepMDBackend, make_qm_backend
 from .config import file_digest, load_config
 from .core import SubtractiveCalculator
 from .lammps import ExternalCoupling
@@ -38,6 +38,7 @@ def run(config_path, output, *, restart=None):
         lmp.close()
         raise RuntimeError("An MPI run requires mpi4py linked to the same MPI implementation")
     output_created = False
+    qm_backend = None
     try:
         config = _root_call(comm, lambda: load_config(config_path))
         output = Path(output).resolve()
@@ -83,10 +84,11 @@ def run(config_path, output, *, restart=None):
         calculator = None
 
         def make_calculator():
-            nonlocal calculator
+            nonlocal calculator, qm_backend
+            qm_backend = make_qm_backend(config["qm"], directory=output / "abacus")
             calculator = SubtractiveCalculator(
                 DeepMDBackend(config["model"], charge_spin=config.get("region_charge_spin")),
-                PySCFBackend(**config["qm"]),
+                qm_backend,
             )
 
         _root_call(comm, make_calculator)
@@ -172,7 +174,12 @@ def run(config_path, output, *, restart=None):
                 pass  # Preserve the original error if diagnostic I/O also failed.
         raise
     finally:
-        lmp.close()
+        try:
+            close = getattr(qm_backend, "close", None)
+            if callable(close):
+                close()
+        finally:
+            lmp.close()
 
 
 def main(argv=None):
