@@ -235,7 +235,10 @@ native library stack; the configuration does not fingerprint every linked
 native dependency. The native box, atom IDs/types, zero native interactions and
 all force shapes are checked at the callback.
 
-This interface remains experimental until real assembly, MPI, failure and
-restart checks pass for the declared deployment. Standalone finite-water
-derivatives do not establish dynamics, physical water accuracy, periodic
-embedding, oxide transfer, or mutual polarization.
+A finite three-water raw-model regression passes native energy/all-atom-force
+assembly, serial/two-rank SCF-failure rejection, and 20 versus 10+10 restarted
+steps in both modes. This is a bounded 5 fs integration screen, not timestep
+convergence, long-time dynamics or physical water qualification. Targeted native
+sorting/migration evidence, periodic embedding, oxide transfer and mutual
+polarization remain separate requirements. Portable inputs and detailed gates
+are maintained in the companion qm-dpa repository's benchmarks/water directory.
