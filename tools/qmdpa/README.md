@@ -56,7 +56,7 @@ velocities on a fresh run only. Otherwise the input data velocities are used.
 
 Each successful segment writes an accepted frame, a native LAMMPS restart, and a
 checksummed companion checkpoint. A restart verifies the model, input identity,
-physical settings, step, recomputed energy/forces, and restored positions/images
+physical settings, coupling source/dependency identity, step, recomputed energy/forces, and restored positions/images
 and velocities. Output directories must be new. Generated artifacts are not
 source files and should not be committed.
 

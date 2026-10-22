@@ -4,7 +4,9 @@
 """Portable run configuration, file identity, and physical-setting validation."""
 
 import hashlib
+import importlib.metadata
 import json
+import platform
 import re
 from pathlib import Path
 
@@ -25,6 +27,24 @@ def _positive_integer(value, name, *, allow_zero=False):
     if isinstance(value, bool) or not isinstance(value, int) or value < (0 if allow_zero else 1):
         raise ValueError(f"{name} must be a {'nonnegative' if allow_zero else 'positive'} integer")
     return value
+
+
+def software_identity():
+    """Identify the implementation and numerical dependencies for restart checks."""
+    digest = hashlib.sha256()
+    for source in sorted(Path(__file__).parent.glob("*.py")):
+        digest.update(source.name.encode() + b"\0" + source.read_bytes())
+    versions = {}
+    for name in ("numpy", "deepmd-kit", "pyscf"):
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = None
+    return {
+        "coupling_sha256": digest.hexdigest(),
+        "python": platform.python_version(),
+        "packages": versions,
+    }
 
 
 def load_config(path):
@@ -146,10 +166,12 @@ def load_config(path):
             raise ValueError("temperature_K must be finite and positive")
         config["temperature_K"] = temperature
         _positive_integer(config["velocity_seed"], "velocity_seed")
+    config["software"] = software_identity()
     physics = {
         key: config.get(key)
         for key in (
             "model_sha256",
+            "software",
             "data_sha256",
             "type_symbols",
             "periodic",
