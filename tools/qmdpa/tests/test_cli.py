@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from qmdpa.cli import _write_manifest
 from qmdpa.config import file_digest, load_config
 from qmdpa.runtime import (
     _compare_restart,
@@ -229,6 +230,26 @@ class ConfigTests(unittest.TestCase):
         restart.write_bytes(b"corrupted restart fixture")
         with self.assertRaisesRegex(ValueError, "checksum"):
             _validate_restart(path, loaded)
+
+
+class ManifestTests(unittest.TestCase):
+    def test_restart_paths_are_canonical_json_strings_and_fresh_run_is_null(self):
+        with TemporaryDirectory(prefix="qmdpa-manifest-tests-") as temporary:
+            directory = Path(temporary).resolve()
+            (directory / "checkpoints").mkdir()
+            checkpoint = directory / "checkpoint.json"
+            checkpoint.write_text("{}\n")
+            unnormalized = directory / "checkpoints" / ".." / checkpoint.name
+            config = {"physics_sha256": "accepted-configuration"}
+            for restart in (unnormalized, str(unnormalized), None):
+                with self.subTest(restart=restart):
+                    _write_manifest(directory, config, world_size=np.int64(2), restart=restart)
+                    manifest = json.loads((directory / "manifest.json").read_text())
+                    self.assertEqual(
+                        manifest["restart_from"], None if restart is None else str(checkpoint)
+                    )
+                    self.assertEqual(manifest["configuration"], config)
+                    self.assertEqual(manifest["world_size"], 2)
 
 
 class RestartTests(unittest.TestCase):

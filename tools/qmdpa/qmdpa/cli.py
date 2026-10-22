@@ -16,6 +16,18 @@ from .region import FixedRegion
 from .runtime import _compare_restart, _frame, _quoted, _root_call, _validate_restart
 
 
+def _write_manifest(output, config, *, world_size, restart):
+    """Record JSON-safe provenance for a fresh run or accepted checkpoint."""
+    manifest = {
+        "configuration": config,
+        "world_size": int(world_size),
+        "restart_from": None if restart is None else str(Path(restart).resolve()),
+        "status": "started",
+        "pressure": "not qualified",
+    }
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
 def run(config_path, output, *, restart=None):
     """Run additional steps; each successful sample has a matching restart pair."""
     from lammps import lammps
@@ -86,18 +98,11 @@ def run(config_path, output, *, restart=None):
         )
         _root_call(
             comm,
-            lambda: (output / "manifest.json").write_text(
-                json.dumps(
-                    {
-                        "configuration": config,
-                        "world_size": int(lmp.extract_setting("world_size")),
-                        "restart_from": restart,
-                        "status": "started",
-                        "pressure": "not qualified",
-                    },
-                    indent=2,
-                )
-                + "\n"
+            lambda: _write_manifest(
+                output,
+                config,
+                world_size=lmp.extract_setting("world_size"),
+                restart=restart,
             ),
         )
         coupling.run(0)
