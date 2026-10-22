@@ -2,7 +2,7 @@
 # https://www.lammps.org/, Sandia National Laboratories
 # SPDX-License-Identifier: GPL-2.0-only
 # Author: Pengchao Zhang <pczhang1997@gmail.com>
-"""Bounded POSIX supervision of a persistent official ABACUS/ASE socket session.
+"""Bounded POSIX supervision of explicit ABACUS/ASE socket or cold FileIO sessions.
 
 The molecular input is evaluated in an explicit finite periodic supercell.
 Coordinates use an explicit fixed-offset or arithmetic-centroid mapping.
@@ -36,6 +36,7 @@ _ELEMENTS = set(
 )
 _DEFAULTS = {
     "engine": "abacus",
+    "execution_mode": "socket",
     "ecutwfc": 60.0,
     "scf_thr": 1e-9,
     "scf_nmax": 100,
@@ -99,6 +100,11 @@ def validate_abacus_settings(settings, base_dir):
     result = {**_DEFAULTS, **settings}
     if result["engine"] != "abacus":
         raise ValueError("ABACUS settings require engine='abacus'")
+    if not isinstance(result["execution_mode"], str) or result["execution_mode"] not in (
+        "socket",
+        "fileio",
+    ):
+        raise ValueError("execution_mode must be socket or fileio")
     for key, expected in (("charge", 0), ("multiplicity", 1)):
         if type(result[key]) is not int or result[key] != expected:
             raise ValueError(
@@ -172,20 +178,14 @@ def map_abacus_coordinates(geometry, settings):
 def _worker_command(owner_pid, unixsocket):
     # The owner and socket identity must be available before initialization, so
     # an owner dying between Popen and the first request cannot leave a worker.
-    return [
-        sys.executable,
-        "-u",
-        "-m",
-        "qmdpa.abacus_worker",
-        "--owner-pid",
-        str(owner_pid),
-        "--unixsocket",
-        unixsocket,
-    ]
+    command = [sys.executable, "-u", "-m", "qmdpa.abacus_worker", "--owner-pid", str(owner_pid)]
+    if unixsocket is not None:
+        command += ["--unixsocket", unixsocket]
+    return command
 
 
 class AbacusBackend:
-    """One fixed-state ABACUS process, with bounded requests and cleanup.
+    """Fixed electronic settings, with bounded requests and owned process cleanup.
 
     POSIX process groups contain the worker and the serial ABACUS executable.
     Any failed evaluation permanently invalidates this instance. ``close`` is
@@ -202,6 +202,7 @@ class AbacusBackend:
         supercell_angstrom,
         coordinate_offset_angstrom,
         coordinate_gauge="fixed-offset",
+        execution_mode="socket",
         ecutwfc=60,
         scf_thr=1e-9,
         scf_nmax=100,
@@ -226,6 +227,7 @@ class AbacusBackend:
                 "supercell_angstrom": supercell_angstrom,
                 "coordinate_offset_angstrom": coordinate_offset_angstrom,
                 "coordinate_gauge": coordinate_gauge,
+                "execution_mode": execution_mode,
                 "ecutwfc": ecutwfc,
                 "scf_thr": scf_thr,
                 "scf_nmax": scf_nmax,
@@ -246,7 +248,13 @@ class AbacusBackend:
         self._request_id = 0
         self._buffer = b""
         self._last_request = None
-        self._socket_name = "qmdpa-" + uuid.uuid4().hex
+        self._socket_name = "qmdpa-" + uuid.uuid4().hex if execution_mode == "socket" else None
+        self._active_directory = self.directory
+        self._workers = []
+        self._common_interface = None
+        self._last_lifecycle = None
+        if execution_mode == "fileio":
+            (self.directory / "evaluations").mkdir()
         self._statistics = {
             "successful_evaluations": 0,
             "failed_evaluations": 0,
@@ -256,17 +264,58 @@ class AbacusBackend:
 
     @property
     def statistics(self):
-        """Evaluation wall time includes first-request worker initialization."""
+        """Wall time includes worker initialization and cold per-evaluation cleanup."""
         return dict(self._statistics)
 
-    def _record(self, name, value):
-        (self.directory / name).write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+    def _record(self, name, value, *, directory=None):
+        ((directory or self.directory) / name).write_text(
+            json.dumps(value, indent=2, allow_nan=False) + "\n"
+        )
 
     def _diagnostic(self, name, value):
         try:
             self._record(name, value)
+            if name == "cleanup.json" and self._active_directory != self.directory:
+                self._record(name, value, directory=self._active_directory)
         except (OSError, TypeError, ValueError):
             pass  # Preserve the original calculation error even on a full filesystem.
+
+    def _record_workers(self):
+        self._record(
+            "worker.json",
+            {
+                "execution_mode": "fileio",
+                "interface": self._common_interface,
+                "workers": self._workers,
+            },
+        )
+
+    def _begin_fileio(self):
+        if self._process is not None:
+            raise RuntimeError("Previous FileIO worker has not been closed")
+        relative = f"evaluations/{len(self._workers) + 1:06d}"
+        directory = self.directory / relative
+        # Allocation failure belongs to this attempt, never the previous worker.
+        self._active_directory = self.directory
+        self._request_id = 0
+        self._buffer = b""
+        self._last_request = {"op": "create_evaluation_directory", "directory": str(directory)}
+        self._last_lifecycle = None
+        directory.mkdir(exist_ok=False)
+        self._active_directory = directory
+        self._workers.append({"directory": relative, "sha256": None, "lifecycle_sha256": None})
+        self._record_workers()
+
+    def _finish_fileio(self, deadline):
+        response = self._exchange({"op": "close"}, deadline)
+        if response.get("status") != "closed":
+            raise ValueError("ABACUS FileIO worker did not confirm closure")
+        self._wait_without_reaping(self._process, deadline)
+        self._stop_process()
+        if self._last_lifecycle != {"closed": True, "returncode": 0, "cleanup_error": None}:
+            raise RuntimeError("ABACUS FileIO worker did not exit and clean up successfully")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("ABACUS FileIO request deadline expired during cleanup")
 
     def _exchange(self, request, deadline):
         if time.monotonic() >= deadline:
@@ -315,7 +364,7 @@ class AbacusBackend:
         for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
             env[name] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        self._log = (self.directory / "worker.stderr.log").open("xb")
+        self._log = (self._active_directory / "worker.stderr.log").open("xb")
         self._process = subprocess.Popen(
             _worker_command(os.getpid(), self._socket_name),
             stdin=subprocess.PIPE,
@@ -331,21 +380,33 @@ class AbacusBackend:
             {
                 "op": "initialize",
                 "settings": self._settings,
-                "directory": str(self.directory),
+                "directory": str(self._active_directory),
                 "unixsocket": self._socket_name,
             },
             deadline,
         )
         if response.get("status") != "ready":
             raise ValueError("ABACUS worker did not confirm initialization")
+        interface = response.get("interface")
         self._record(
             "worker.json",
-            {
-                "pid": self._process.pid,
-                "unixsocket": self._socket_name,
-                "interface": response.get("interface"),
-            },
+            {"pid": self._process.pid, "unixsocket": self._socket_name, "interface": interface},
+            directory=self._active_directory,
         )
+        if self._settings["execution_mode"] == "fileio":
+            self._workers[-1]["sha256"] = _digest(self._active_directory / "worker.json")
+            self._record_workers()
+            if response.get("execution_mode") != "fileio" or not isinstance(interface, dict):
+                raise ValueError(
+                    "ABACUS FileIO worker did not identify its execution mode/interface"
+                )
+            _identity(
+                interface.get("path"), interface.get("sha256"), self.directory, "ABACUS interface"
+            )
+            if self._common_interface is not None and self._common_interface != interface:
+                raise ValueError("ABACUS FileIO interface changed between evaluations")
+            self._common_interface = interface
+            self._record_workers()
 
     @staticmethod
     def _exited_without_reaping(process):
@@ -364,15 +425,32 @@ class AbacusBackend:
 
     def _stop_process(self):
         """Never let cleanup replace a calculation exception."""
+        process, errors = self._process, []
         try:
-            self._terminate_group()
+            errors = self._terminate_group()
         except Exception as exc:
-            self._diagnostic("cleanup.json", {"error": f"{type(exc).__name__}: {exc}"})
+            errors = [f"{type(exc).__name__}: {exc}"]
+            self._diagnostic("cleanup.json", {"errors": errors})
         finally:
-            # Do not poll here: it can reap the group leader before a later
-            # cleanup attempt has signaled the remaining native descendants.
+            # Do not poll here: it can release ownership before group signaling.
             if self._process is not None and self._process.returncode is not None:
                 self._process = None
+            if self._settings["execution_mode"] == "fileio" and process is not None:
+                lifecycle = {
+                    "closed": process.returncode is not None,
+                    "returncode": process.returncode,
+                    "cleanup_error": "; ".join(errors) if errors else None,
+                }
+                self._last_lifecycle = lifecycle
+                try:
+                    self._record("lifecycle.json", lifecycle, directory=self._active_directory)
+                    self._workers[-1]["lifecycle_sha256"] = _digest(
+                        self._active_directory / "lifecycle.json"
+                    )
+                    self._record_workers()
+                except Exception as exc:  # noqa: BLE001 - preserve the first calculation error
+                    lifecycle["cleanup_error"] = f"Failed to record worker lifecycle: {exc}"
+                    self._diagnostic("cleanup.json", {"error": lifecycle["cleanup_error"]})
 
     def _terminate_group(self):
         errors = []
@@ -420,12 +498,14 @@ class AbacusBackend:
                     errors.append(str(exc))
         if self._log is not None:
             self._log.close()
-        try:
-            Path("/tmp/ipi_" + self._socket_name).unlink(missing_ok=True)
-        except OSError as exc:
-            errors.append(str(exc))
+        if self._socket_name is not None:
+            try:
+                Path("/tmp/ipi_" + self._socket_name).unlink(missing_ok=True)
+            except OSError as exc:
+                errors.append(str(exc))
         if errors:
             self._diagnostic("cleanup.json", {"errors": errors})
+        return errors
 
     def evaluate(self, geometry):
         from .core import Evaluation, EvaluationError
@@ -445,6 +525,8 @@ class AbacusBackend:
                 raise ValueError("An input element has no declared pseudopotential")
             self._identity = identity
             deadline = started + self._settings["timeout_seconds"]
+            if self._settings["execution_mode"] == "fileio":
+                self._begin_fileio()
             if self._process is None:
                 self._start(deadline)
             response = self._exchange(
@@ -467,6 +549,8 @@ class AbacusBackend:
             result = Evaluation(response["energy_ev"], response["forces_ev_per_angstrom"])
             if result.forces.shape != geometry.positions.shape:
                 raise ValueError("ABACUS force count differs from the input atoms")
+            if self._settings["execution_mode"] == "fileio":
+                self._finish_fileio(deadline)
             self._statistics["successful_evaluations"] += 1
             return result
         except Exception as exc:

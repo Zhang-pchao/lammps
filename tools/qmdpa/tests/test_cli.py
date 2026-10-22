@@ -138,9 +138,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(first["qm"]["pseudopotentials"]["H"]["path"], str(pseudo))
         explicit_default = deepcopy(self.config)
         explicit_default["qm"]["ks_solver"] = "cg"
+        explicit_default["qm"]["execution_mode"] = "socket"
         explicit_default["qm"]["coordinate_gauge"] = "fixed-offset"
         self.assertEqual(first["physics_sha256"], self.load(explicit_default)["physics_sha256"])
         for key, value in (
+            ("execution_mode", "fileio"),
             ("ecutwfc", 80.0),
             ("scf_thr", 1e-11),
             ("ks_solver", "dav"),
@@ -152,6 +154,12 @@ class ConfigTests(unittest.TestCase):
             candidate = deepcopy(self.config)
             candidate["qm"][key] = value
             self.assertNotEqual(first["physics_sha256"], self.load(candidate)["physics_sha256"])
+        cold = deepcopy(self.config)
+        cold["qm"]["execution_mode"] = "fileio"
+        checkpoint = self.directory / "socket-checkpoint.json"
+        checkpoint.write_text(json.dumps({"physics_sha256": first["physics_sha256"]}))
+        with self.assertRaisesRegex(ValueError, "physics configuration differs"):
+            _validate_restart(checkpoint, self.load(cold))
         pseudo.write_bytes(b"different pseudopotential")
         with self.assertRaisesRegex(ValueError, "SHA256|checksum|digest"):
             self.load()

@@ -10,8 +10,8 @@ is used for standalone validation and LAMMPS dynamics.
 Use Python 3.10 or newer, NumPy, a shared LAMMPS build with EXTRA-FIX and the
 DeePMD pair style, and matching DeePMD and QM-backend installations. PySCF is the
 default QM backend. The experimental ABACUS backend additionally requires ASE,
-the official `abacuslite.AbacusSocketIO` interface, and a compatible serial
-ABACUS executable with socket support. MPI runs also need
+the official `abacuslite` interface and a compatible serial ABACUS executable.
+The default socket mode additionally requires native socket support. MPI runs also need
 mpi4py built against the MPI library used by LAMMPS. From this directory:
 
 ```bash
@@ -81,8 +81,12 @@ source files and should not be committed.
 
 ## Experimental ABACUS backend
 
-ABACUS uses a persistent official socket calculator for a neutral singlet region
-(`charge: 0`, `multiplicity: 1`). Nonperiodic region coordinates use an explicit
+ABACUS uses an explicitly selected official ASE calculator for a neutral singlet
+region (`charge: 0`, `multiplicity: 1`). `execution_mode` accepts `socket` (default)
+or `fileio`. Socket mode retains one native session. FileIO mode starts a fresh
+Python worker, ASE calculator and native process for every evaluation, including
+repeated identical coordinates. It uses no saved density or wavefunction restart,
+and it never switches modes after a failure. Nonperiodic region coordinates use an explicit
 mapping and are evaluated in an explicitly declared finite periodic supercell.
 The default mapping retains the same fixed offset on every call.
 This is a molecular supercell approximation, with fixed
@@ -97,6 +101,7 @@ pseudopotential. These values illustrate the schema, not a qualified protocol.
 ```json
 {
   "engine": "abacus",
+  "execution_mode": "socket",
   "executable": "software/abacus",
   "executable_sha256": "<binary-sha256>",
   "pseudopotentials": {
@@ -113,6 +118,13 @@ pseudopotential. These values illustrate the schema, not a qualified protocol.
   "timeout_seconds": 120.0
 }
 ```
+
+Changing `execution_mode` changes the restart identity and requires a fresh run.
+Cold FileIO discards electronic continuation and repeats initialization, so it
+trades startup cost for a fresh calculation on every call. A repeated-geometry
+pilot alone does not qualify the provider, hybrid dynamics, or physical accuracy.
+The production path still needs its own force-gradient, translation, ordering,
+nonconvergence, hybrid and restart checks. No parallel or GPU speedup is implied.
 
 `coordinate_gauge` accepts exactly `fixed-offset` (default) or
 `arithmetic-centroid`. The default evaluates `X_i = R_i + offset`. The explicit
@@ -146,13 +158,36 @@ libraries: its launch removes inherited `LD_PRELOAD` and `LD_LIBRARY_PATH` and
 sets OpenMP, OpenBLAS and MKL thread counts to one without changing the caller.
 
 On POSIX systems, the worker and native ABACUS share a private process group.
-Requests have a deadline, including first-call initialization. A timeout,
+Requests have one deadline, including initialization. In FileIO mode the same
+deadline also covers native evaluation, result validation, worker closure and
+successful cleanup; it is never reset between these stages. Failure cleanup can
+use the existing bounded process-group termination grace. A timeout,
 unconverged SCF or invalid response permanently invalidates that backend and
 terminates the group; previous forces are never returned. A separate watchdog
 also detects loss of the parent while initialization, evaluation or close is
-blocked, removes the session's unique socket and terminates its own group.
+blocked and terminates its own group. It removes the unique socket in socket
+mode; FileIO mode creates no socket.
 Close is idempotent and cleanup errors cannot replace the original evaluation
 error. Failure diagnostics and native logs remain in the output directory.
+
+FileIO preserves each attempted evaluation in `evaluations/000001`, `000002`,
+and so on. Each contains copied pseudopotentials, `calculation/` native inputs
+and logs, `worker.json` with the owned PID and interface identity, and
+`lifecycle.json` with `closed`, `returncode` and `cleanup_error`. Successful native
+results also create `result.json` with raw energy/forces, original and mapped
+coordinates, SCF evidence and input/log hashes. No extra unit conversion, force
+projection or energy offset is applied.
+
+The root `worker.json` records `execution_mode: fileio`, a common validated
+`interface`, and an ordered `workers` list. Each entry gives the relative
+`directory`, the child `worker.json` `sha256`, and `lifecycle_sha256`. An unfinished
+or failed initialization may leave a null digest; this is incomplete evidence,
+not a successful worker. A successful evaluation requires a closed worker,
+return code zero and no cleanup error. Failed calculations remain failures even
+if their workers close correctly. The root `failure.json` preserves the first
+calculation error; cleanup diagnostics cannot replace it. Socket mode retains
+its existing root worker record format. No single PID represents all cold
+workers, and a downstream verifier must inspect every listed worker.
 
 ## Scope and failure semantics
 

@@ -2,7 +2,7 @@
 # https://www.lammps.org/, Sandia National Laboratories
 # SPDX-License-Identifier: GPL-2.0-only
 # Author: Pengchao Zhang <pczhang1997@gmail.com>
-"""Private JSON-lines worker around official abacuslite.AbacusSocketIO.
+"""Private JSON-lines worker around official ABACUS socket and FileIO calculators.
 
 The supervising process owns the deadline and process group. In particular,
 third-party socket accept and close operations cannot block the parent. This
@@ -27,116 +27,134 @@ from pathlib import Path
 from .abacus import _MAX_MESSAGE, _digest, map_abacus_coordinates, validate_abacus_settings
 
 
-class _Session:
-    def __init__(self, request):
-        from abacuslite import AbacusProfile, AbacusSocketIO
+def _calculator_arguments(request):
+    """Freeze native inputs and share the same physical settings in both modes."""
+    from abacuslite import AbacusProfile
 
-        directory = Path(request["directory"])
-        self.settings = validate_abacus_settings(request["settings"], directory)
+    directory = Path(request["directory"])
+    settings = validate_abacus_settings(request["settings"], directory)
+    pp_directory = directory / "pseudopotentials"
+    pp_directory.mkdir()
+    potentials = {}
+    for symbol, item in settings["pseudopotentials"].items():
+        target = pp_directory / f"{symbol}.upf"
+        shutil.copyfile(item["path"], target)
+        if _digest(target) != item["sha256"]:
+            raise ValueError("Pseudopotential changed while preparing the worker")
+        potentials[symbol] = target.name
+    # Native ABACUS resolves its own libraries, independently of LAMMPS/Torch.
+    command = shlex.join(
+        [
+            "env",
+            "-u",
+            "LD_PRELOAD",
+            "-u",
+            "LD_LIBRARY_PATH",
+            "OMP_NUM_THREADS=1",
+            "OPENBLAS_NUM_THREADS=1",
+            "MKL_NUM_THREADS=1",
+            settings["executable"],
+        ]
+    )
+    return settings, {
+        "profile": AbacusProfile(command=command, pseudo_dir=str(pp_directory)),
+        "directory": directory / "calculation",
+        "pseudopotentials": potentials,
+        "kpts": {
+            "mode": "mp-sampling",
+            "gamma-centered": True,
+            "nk": [1, 1, 1],
+            "kshift": [0, 0, 0],
+        },
+        "inp": {
+            "calculation": "scf",
+            "basis_type": "pw",
+            "dft_functional": "PBE",
+            "ecutwfc": settings["ecutwfc"],
+            "scf_thr": settings["scf_thr"],
+            "scf_nmax": settings["scf_nmax"],
+            "ks_solver": settings["ks_solver"],
+            "nspin": 1,
+            "smearing_method": "fixed",
+            "symmetry": -1,
+            "cal_force": 1,
+            "cal_stress": 0,
+        },
+    }
+
+
+def _geometry_and_atoms(request, settings):
+    from ase import Atoms
+
+    from .core import Geometry
+
+    data = request["geometry"]
+    geometry = Geometry(tuple(data["atom_ids"]), tuple(data["symbols"]), data["positions_angstrom"])
+    if any(symbol not in settings["pseudopotentials"] for symbol in geometry.symbols):
+        raise ValueError("Missing element pseudopotential")
+    atoms = Atoms(
+        symbols=geometry.symbols,
+        positions=map_abacus_coordinates(geometry, settings),
+        cell=settings["supercell_angstrom"],
+        pbc=True,
+    )
+    return geometry, atoms
+
+
+def _evaluation_response(geometry, calculator):
+    from .core import Evaluation
+
+    # Official ASE supplies eV and eV/Angstrom in the original atom order.
+    result = Evaluation(calculator.results["energy"], calculator.results["forces"])
+    if result.forces.shape != geometry.positions.shape:
+        raise ValueError("ABACUS force count differs from the requested geometry")
+    return {
+        "status": "ok",
+        "atom_ids": list(geometry.atom_ids),
+        "symbols": list(geometry.symbols),
+        "scf_converged": True,
+        "energy_ev": result.energy,
+        "forces_ev_per_angstrom": result.forces.tolist(),
+    }
+
+
+def _interface(calculator_type):
+    source = Path(inspect.getfile(calculator_type)).resolve()
+    return {"path": str(source), "sha256": _digest(source)}
+
+
+class _Session:
+    """Default persistent native socket session."""
+
+    def __init__(self, request):
+        from abacuslite import AbacusSocketIO
+
         name = request["unixsocket"]
-        if re.fullmatch(r"qmdpa-[0-9a-f]{32}", name) is None:
+        if not isinstance(name, str) or re.fullmatch(r"qmdpa-[0-9a-f]{32}", name) is None:
             raise ValueError("Invalid private ABACUS socket name")
-        # Freeze the bytes actually passed to ABACUS, without changing originals.
-        pp_directory = directory / "pseudopotentials"
-        pp_directory.mkdir()
-        potentials = {}
-        for symbol, item in self.settings["pseudopotentials"].items():
-            target = pp_directory / f"{symbol}.upf"
-            shutil.copyfile(item["path"], target)
-            if _digest(target) != item["sha256"]:
-                raise ValueError("Pseudopotential changed while preparing the worker")
-            potentials[symbol] = target.name
-        # The native binary has its own validated runtime search path. Do not
-        # inject the parent LAMMPS/Torch compiler libraries into ABACUS.
-        command = shlex.join(
-            [
-                "env",
-                "-u",
-                "LD_PRELOAD",
-                "-u",
-                "LD_LIBRARY_PATH",
-                "OMP_NUM_THREADS=1",
-                "OPENBLAS_NUM_THREADS=1",
-                "MKL_NUM_THREADS=1",
-                self.settings["executable"],
-            ]
-        )
-        profile = AbacusProfile(command=command, pseudo_dir=str(pp_directory))
-        self.log = (directory / "socket.log").open("w")
+        self.settings, arguments = _calculator_arguments(request)
+        self.log = (Path(request["directory"]) / "socket.log").open("w")
         self.calculator = AbacusSocketIO(
-            profile=profile,
-            directory=directory / "calculation",
-            unixsocket=name,
-            timeout=self.settings["timeout_seconds"],
-            log=self.log,
-            pseudopotentials=potentials,
-            kpts={
-                "mode": "mp-sampling",
-                "gamma-centered": True,
-                "nk": [1, 1, 1],
-                "kshift": [0, 0, 0],
-            },
-            inp={
-                "calculation": "scf",
-                "basis_type": "pw",
-                "dft_functional": "PBE",
-                "ecutwfc": self.settings["ecutwfc"],
-                "scf_thr": self.settings["scf_thr"],
-                "scf_nmax": self.settings["scf_nmax"],
-                "ks_solver": self.settings["ks_solver"],
-                "nspin": 1,
-                "smearing_method": "fixed",
-                "symmetry": -1,
-                "cal_force": 1,
-                "cal_stress": 0,
-            },
+            **arguments, unixsocket=name, timeout=self.settings["timeout_seconds"], log=self.log
         )
         self.identity = None
-        source = Path(inspect.getfile(AbacusSocketIO)).resolve()
-        self.interface = {"path": str(source), "sha256": _digest(source)}
+        self.interface = _interface(AbacusSocketIO)
 
     def evaluate(self, request):
-        from ase import Atoms
         from ase.calculators.calculator import all_changes
 
-        from .core import Evaluation, Geometry
-
-        data = request["geometry"]
-        geometry = Geometry(
-            tuple(data["atom_ids"]), tuple(data["symbols"]), data["positions_angstrom"]
-        )
+        geometry, atoms = _geometry_and_atoms(request, self.settings)
         identity = (geometry.atom_ids, geometry.symbols)
         if self.identity is not None and identity != self.identity:
             raise ValueError("ABACUS atom IDs and symbols changed during the session")
-        if any(symbol not in self.settings["pseudopotentials"] for symbol in geometry.symbols):
-            raise ValueError("Missing element pseudopotential")
         changes = all_changes if self.identity is None else ["positions"]
         self.identity = identity
-        positions = map_abacus_coordinates(geometry, self.settings)
-        atoms = Atoms(
-            symbols=geometry.symbols,
-            positions=positions,
-            cell=self.settings["supercell_angstrom"],
-            pbc=True,
-        )
         self.calculator.calculate(
             atoms=atoms, properties=["energy", "forces"], system_changes=changes
         )
         if self.calculator.last_scf_converged is not True:
             raise RuntimeError("ABACUS SCF did not report convergence for this frame")
-        # Official ASE socket conversion supplies eV and eV/Angstrom and maps
-        # grouped species back to the original input order. Do not convert twice.
-        result = Evaluation(self.calculator.results["energy"], self.calculator.results["forces"])
-        if result.forces.shape != geometry.positions.shape:
-            raise ValueError("ABACUS force count differs from the requested geometry")
-        return {
-            "status": "ok",
-            "atom_ids": list(geometry.atom_ids),
-            "symbols": list(geometry.symbols),
-            "scf_converged": True,
-            "energy_ev": result.energy,
-            "forces_ev_per_angstrom": result.forces.tolist(),
-        }
+        return _evaluation_response(geometry, self.calculator)
 
     def close(self):
         try:
@@ -145,16 +163,81 @@ class _Session:
             self.log.close()
 
 
+class _FileIOSession:
+    """Exactly one cold native calculation in a fresh isolated worker."""
+
+    def __init__(self, request):
+        from abacuslite import Abacus
+
+        if request.get("unixsocket") is not None:
+            raise ValueError("ABACUS FileIO must not create a socket")
+        self.settings, arguments = _calculator_arguments(request)
+        self.directory = Path(request["directory"])
+        self.calculation = arguments["directory"]
+        self.calculation.mkdir(exist_ok=False)
+        self.calculator = Abacus(**arguments)
+        self.interface = _interface(Abacus)
+        self.evaluated = False
+
+    def evaluate(self, request):
+        from ase.calculators.calculator import all_changes
+
+        if self.evaluated:
+            raise RuntimeError("A FileIO worker accepts exactly one evaluation")
+        self.evaluated = True
+        geometry, atoms = _geometry_and_atoms(request, self.settings)
+        self.calculator.calculate(
+            atoms=atoms, properties=["energy", "forces"], system_changes=all_changes
+        )
+        logs = list(self.calculation.glob("OUT.*/running_scf.log"))
+        if len(logs) != 1:
+            raise RuntimeError("Expected exactly one fresh ABACUS FileIO SCF log")
+        log = logs[0].read_text()
+        if log.count("#SCF IS CONVERGED#") != 1 or "!!SCF IS NOT CONVERGED!!" in log:
+            raise RuntimeError("ABACUS SCF did not report convergence for this frame")
+        residuals = re.findall(r"Electron density deviation\s*=\s*([-+\d.eE]+)", log)
+        iterations = re.findall(r"#ELEC ITER#\s*(\d+)", log)
+        if not residuals or not iterations:
+            raise RuntimeError("ABACUS FileIO log omitted SCF residual or iteration evidence")
+        residual, iteration = float(residuals[-1]), int(iterations[-1])
+        if (
+            not 0 <= residual <= self.settings["scf_thr"]
+            or not 0 < iteration <= self.settings["scf_nmax"]
+        ):
+            raise RuntimeError("ABACUS FileIO SCF evidence exceeds the declared limits")
+        response = _evaluation_response(geometry, self.calculator)
+        evidence = {
+            "positions_angstrom": geometry.positions.tolist(),
+            "native_positions_angstrom": atoms.positions.tolist(),
+            "scf_log": str(logs[0].relative_to(self.directory)),
+            "scf_log_sha256": _digest(logs[0]),
+            "terminal_density_deviation": residual,
+            "scf_iterations": iteration,
+            "input_sha256": {
+                name: _digest(self.calculation / name) for name in ("INPUT", "STRU", "KPT")
+            },
+        }
+        (self.directory / "result.json").write_text(
+            json.dumps({**response, "evidence": evidence}, indent=2, allow_nan=False) + "\n"
+        )
+        return response
+
+    def close(self):
+        # ASE FileIO waits for its native subprocess. The parent supervises
+        # the whole process group when calculation or shutdown raises/blocks.
+        pass
+
+
 def _start_owner_watchdog(owner_pid, unixsocket):
     """Bound orphan lifetime even while third-party accept/SCF/close blocks."""
     pid = os.getpid()
     if owner_pid <= 0 or owner_pid == pid:
         raise ValueError("ABACUS worker requires its original parent PID")
-    if re.fullmatch(r"qmdpa-[0-9a-f]{32}", unixsocket) is None:
+    if unixsocket is not None and re.fullmatch(r"qmdpa-[0-9a-f]{32}", unixsocket) is None:
         raise ValueError("Invalid private ABACUS socket name")
     if os.getpgrp() != pid or os.getsid(0) != pid:
         raise RuntimeError("ABACUS worker must own a separate process group and session")
-    socket_path = Path("/tmp/ipi_" + unixsocket)
+    socket_path = Path("/tmp/ipi_" + unixsocket) if unixsocket is not None else None
 
     pause = threading.Event()
 
@@ -163,7 +246,8 @@ def _start_owner_watchdog(owner_pid, unixsocket):
             # Reparenting detects death even if the old PID has been reused.
             if os.getppid() != owner_pid:
                 try:
-                    socket_path.unlink(missing_ok=True)
+                    if socket_path is not None:
+                        socket_path.unlink(missing_ok=True)
                 except OSError:
                     pass
                 # Never signal a group unless this process is still its leader
@@ -183,7 +267,7 @@ def _start_owner_watchdog(owner_pid, unixsocket):
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--owner-pid", required=True, type=int)
-    cli.add_argument("--unixsocket", required=True)
+    cli.add_argument("--unixsocket")
     args = cli.parse_args()
     _start_owner_watchdog(args.owner_pid, args.unixsocket)
     # Reserve the protocol descriptor before importing third-party libraries.
@@ -212,8 +296,16 @@ def main():
                     if operation == "initialize" and session is None:
                         if request.get("unixsocket") != args.unixsocket:
                             raise ValueError("ABACUS initialization changed the owned socket")
-                        session = _Session(request)
+                        mode = request["settings"].get("execution_mode", "socket")
+                        if mode == "socket":
+                            session = _Session(request)
+                        elif mode == "fileio":
+                            session = _FileIOSession(request)
+                        else:
+                            raise ValueError("Unknown ABACUS execution mode")
                         response = {"status": "ready", "interface": session.interface}
+                        if mode == "fileio":
+                            response["execution_mode"] = mode
                     elif operation == "evaluate" and session is not None:
                         response = session.evaluate(request)
                     elif operation == "close" and session is not None:

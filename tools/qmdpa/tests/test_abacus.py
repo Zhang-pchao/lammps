@@ -22,10 +22,11 @@ from unittest.mock import patch
 import numpy as np
 
 from qmdpa.abacus import AbacusBackend, map_abacus_coordinates, validate_abacus_settings
-from qmdpa.abacus_worker import _Session
+from qmdpa.abacus_worker import _FileIOSession, _Session
 from qmdpa.core import EvaluationError, Geometry
 
 FAKE_WORKER = r"""
+import hashlib
 import json
 import os
 import signal
@@ -43,7 +44,15 @@ for line in sys.stdin:
     response = {'id': request['id']}
     if request['op'] == 'initialize':
         response['status'] = 'ready'
+        if request['settings'].get('execution_mode') == 'fileio':
+            source = Path(log_path).parent / 'fake-interface.py'
+            response.update(execution_mode='fileio', interface={
+                'path': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()})
+        if mode == 'combined-deadline':
+            time.sleep(0.1)
     elif request['op'] == 'close':
+        if mode == 'combined-deadline':
+            time.sleep(0.1)
         if mode == 'close-hang':
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             time.sleep(3600)
@@ -52,6 +61,8 @@ for line in sys.stdin:
         break
     elif request['op'] == 'evaluate':
         calls += 1
+        if mode == 'combined-deadline':
+            time.sleep(0.1)
         if mode == 'exit':
             os._exit(7)
         if mode == 'timeout':
@@ -76,6 +87,11 @@ for line in sys.stdin:
             response['energy_ev'] = float('nan')
         if mode == 'scf-failure' and calls > 1:
             response['scf_converged'] = False
+        if mode == 'cold-second-scf-failure':
+            evaluations = sum(json.loads(line)['request']['op'] == 'evaluate'
+                              for line in Path(log_path).read_text().splitlines())
+            if evaluations > 1:
+                response['scf_converged'] = False
     else:
         response.update(status='error', error='unexpected operation')
     print(json.dumps(response), flush=True)
@@ -83,6 +99,7 @@ for line in sys.stdin:
 
 
 OWNER_DEATH_WORKER = r"""
+import hashlib
 import json
 import os
 import signal
@@ -97,8 +114,9 @@ from qmdpa import abacus_worker
 class BlockingSession:
     def __init__(self, request):
         self.directory = Path(request['directory'])
-        self.socket_path = '/tmp/ipi_' + request['unixsocket']
-        self.interface = {}
+        self.socket_path = '/tmp/ipi_' + request['unixsocket'] if request['unixsocket'] else None
+        source = Path(__file__).resolve()
+        self.interface = {'path': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}
 
     def evaluate(self, request):
         ready = self.directory / 'native-ready.json'
@@ -110,8 +128,9 @@ class BlockingSession:
             "time.sleep(300)"
         )
         self.child = subprocess.Popen([sys.executable, '-u', '-c', native, str(ready)])
-        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.socket.bind(self.socket_path)
+        if self.socket_path:
+            self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.socket.bind(self.socket_path)
         deadline = time.monotonic() + 3
         while not ready.is_file():
             if time.monotonic() >= deadline:
@@ -124,6 +143,7 @@ class BlockingSession:
         pass
 
 abacus_worker._Session = BlockingSession
+abacus_worker._FileIOSession = BlockingSession
 raise SystemExit(abacus_worker.main())
 """
 
@@ -142,8 +162,10 @@ from qmdpa.core import Geometry
 case = json.loads(Path(sys.argv[1]).read_text())
 runtime = Path(case['runtime'])
 def command(owner_pid, unixsocket):
-    return [sys.executable, '-u', case['worker_script'],
-            '--owner-pid', str(owner_pid), '--unixsocket', unixsocket]
+    value = [sys.executable, '-u', case['worker_script'], '--owner-pid', str(owner_pid)]
+    if unixsocket is not None:
+        value += ['--unixsocket', unixsocket]
+    return value
 abacus._worker_command = command
 backend = abacus.AbacusBackend(**case['settings'], directory=runtime)
 original_popen = subprocess.Popen
@@ -151,14 +173,14 @@ def record_child(*args, **kwargs):
     process = original_popen(*args, **kwargs)
     (runtime / 'owned.json').write_text(json.dumps({
         'worker_pid': process.pid,
-        'socket_path': '/tmp/ipi_' + backend._socket_name,
+        'socket_path': '/tmp/ipi_' + backend._socket_name if backend._socket_name else None,
     }))
     return process
 subprocess.Popen = record_child
 
 def exit_when_ready():
     deadline = time.monotonic() + 5
-    while not (runtime / 'owner-may-exit').is_file():
+    while not list(runtime.rglob('owner-may-exit')):
         if time.monotonic() >= deadline:
             os._exit(11)
         time.sleep(0.01)
@@ -214,6 +236,7 @@ class AbacusSettingsTests(AbacusTestCase):
         result = self.resolve()
         self.assertEqual(self.settings, original)
         self.assertEqual(result["engine"], "abacus")
+        self.assertEqual(result["execution_mode"], "socket")
         self.assertEqual(result["executable"], str(self.executable))
         self.assertEqual(result["pseudopotentials"]["H"]["path"], str(self.directory / "H.upf"))
         self.assertEqual(result["ecutwfc"], 60)
@@ -236,6 +259,17 @@ class AbacusSettingsTests(AbacusTestCase):
         ):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 self.resolve({**self.settings, **extra})
+
+    def test_execution_mode_default_and_strict_explicit_selection(self):
+        self.assertEqual(
+            self.resolve(), self.resolve({**self.settings, "execution_mode": "socket"})
+        )
+        self.assertEqual(
+            self.resolve({**self.settings, "execution_mode": "fileio"})["execution_mode"], "fileio"
+        )
+        for value in (None, True, 1, [], {}, "FILEIO", "", "auto", "fallback"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "execution_mode"):
+                self.resolve({**self.settings, "execution_mode": value})
 
     def test_solver_selection_is_explicit_and_strict(self):
         for solver in ("cg", "dav", "dav_subspace"):
@@ -526,12 +560,20 @@ class AbacusProcessTests(AbacusTestCase):
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Uses Linux process state")
     def test_owner_death_kills_worker_native_descendant_and_unique_socket(self):
-        runtime = self.directory / "run-owner-death"
+        self._assert_owner_death("socket")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Uses Linux process state")
+    def test_cold_owner_death_kills_worker_and_native_descendant_without_socket(self):
+        self._assert_owner_death("fileio")
+
+    def _assert_owner_death(self, execution_mode):
+        runtime = self.directory / f"run-owner-death-{execution_mode}"
         script = self.directory / "owner-death-worker.py"
         script.write_text(OWNER_DEATH_WORKER)
         settings = self.resolve()
         settings.pop("engine")
         settings["timeout_seconds"] = 30
+        settings["execution_mode"] = execution_mode
         case = self.directory / "owner-death-case.json"
         case.write_text(
             json.dumps(
@@ -562,11 +604,16 @@ class AbacusProcessTests(AbacusTestCase):
             try:
                 self.assertEqual(harness.wait(timeout=7), 23, output.read_text())
                 owned = json.loads((runtime / "owned.json").read_text())
-                native = json.loads((runtime / "native-ready.json").read_text())
+                native_directory = (
+                    runtime / "evaluations/000001" if execution_mode == "fileio" else runtime
+                )
+                native = json.loads((native_directory / "native-ready.json").read_text())
                 pids = (owned["worker_pid"], native["pid"])
-                socket_path = Path(owned["socket_path"])
+                socket_path = Path(owned["socket_path"]) if owned["socket_path"] else None
                 deadline = time.monotonic() + 5
-                while any(running(pid) for pid in pids) or socket_path.exists():
+                while any(running(pid) for pid in pids) or (
+                    socket_path is not None and socket_path.exists()
+                ):
                     if time.monotonic() >= deadline:
                         self.fail("Owner-death watchdog left a running process or socket")
                     time.sleep(0.02)
@@ -579,7 +626,8 @@ class AbacusProcessTests(AbacusTestCase):
                         os.killpg(owned["worker_pid"], signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    Path(owned["socket_path"]).unlink(missing_ok=True)
+                    if owned["socket_path"]:
+                        Path(owned["socket_path"]).unlink(missing_ok=True)
                 if harness.poll() is None:
                     os.killpg(harness.pid, signal.SIGKILL)
                 harness.wait(timeout=2)
@@ -843,6 +891,286 @@ class AbacusWorkerAdapterTests(AbacusTestCase):
                 self.session.calculator.last_scf_converged = status
                 with self.assertRaisesRegex(RuntimeError, "SCF did not report convergence"):
                     self.session.evaluate(request)
+
+
+@unittest.skipUnless(os.name == "posix", "The ABACUS process supervisor requires POSIX")
+class AbacusFileIOProcessTests(AbacusTestCase):
+    backend = AbacusProcessTests.backend
+    messages = staticmethod(AbacusProcessTests.messages)
+
+    def setUp(self):
+        super().setUp()
+        self.settings["execution_mode"] = "fileio"
+        (self.directory / "fake-interface.py").write_text("# Stable mock official interface\n")
+
+    def test_every_evaluation_uses_a_fresh_worker_and_checked_manifest(self):
+        backend, path, log = self.backend()
+        first = backend.evaluate(water())
+        repeated = backend.evaluate(water())
+        displaced = backend.evaluate(water(displacement=0.02))
+        self.assertEqual(first.energy, repeated.energy)
+        self.assertNotEqual(first.energy, displaced.energy)
+        self.assertIsNone(backend._process)
+        messages = self.messages(log)
+        self.assertEqual(
+            [row["request"]["op"] for row in messages], ["initialize", "evaluate", "close"] * 3
+        )
+        self.assertEqual([row["request"]["id"] for row in messages], [1, 2, 3] * 3)
+        self.assertEqual(len({row["pid"] for row in messages}), 3)
+        manifest_bytes = (path / "worker.json").read_bytes()
+        manifest = json.loads(manifest_bytes)
+        self.assertNotIn("pid", manifest)
+        self.assertEqual(manifest["execution_mode"], "fileio")
+        self.assertEqual(
+            [item["directory"] for item in manifest["workers"]],
+            [f"evaluations/{i:06d}" for i in (1, 2, 3)],
+        )
+        for item in manifest["workers"]:
+            directory = path / item["directory"]
+            for key, name in (("sha256", "worker.json"), ("lifecycle_sha256", "lifecycle.json")):
+                self.assertEqual(
+                    item[key], hashlib.sha256((directory / name).read_bytes()).hexdigest()
+                )
+            worker = json.loads((directory / "worker.json").read_text())
+            self.assertIsNone(worker["unixsocket"])
+            self.assertEqual(worker["interface"], manifest["interface"])
+            self.assertEqual(
+                json.loads((directory / "lifecycle.json").read_text()),
+                {"closed": True, "returncode": 0, "cleanup_error": None},
+            )
+        backend.close()
+        backend.close()
+        self.assertEqual((path / "worker.json").read_bytes(), manifest_bytes)
+        self.assertEqual(backend.statistics["successful_evaluations"], 3)
+
+    def test_second_scf_failure_keeps_first_result_and_never_restarts(self):
+        backend, path, log = self.backend("cold-second-scf-failure")
+        backend.evaluate(water())
+        with self.assertRaises(EvaluationError) as first:
+            backend.evaluate(water(displacement=0.02))
+        count = len(self.messages(log))
+        with self.assertRaises(EvaluationError) as second:
+            backend.evaluate(water())
+        self.assertEqual(str(first.exception), str(second.exception))
+        self.assertEqual(len(self.messages(log)), count)
+        self.assertEqual(backend.statistics["successful_evaluations"], 1)
+        self.assertEqual(backend.statistics["failed_evaluations"], 1)
+        self.assertTrue((path / "failure.json").is_file())
+        workers = json.loads((path / "worker.json").read_text())["workers"]
+        self.assertEqual(len(workers), 2)
+        lifecycle = json.loads((path / workers[-1]["directory"] / "lifecycle.json").read_text())
+        self.assertTrue(lifecycle["closed"])
+        self.assertIsNone(lifecycle["cleanup_error"])
+
+    def test_one_deadline_includes_start_calculation_and_close(self):
+        for mode in ("combined-deadline", "close-hang"):
+            with self.subTest(mode=mode):
+                backend, path, _ = self.backend(mode, timeout=0.25)
+                started = time.monotonic()
+                with self.assertRaises(EvaluationError):
+                    backend.evaluate(water())
+                self.assertLess(time.monotonic() - started, 4)
+                self.assertEqual(backend.statistics["successful_evaluations"], 0)
+                self.assertIsNone(backend._process)
+                self.assertTrue((path / "failure.json").is_file())
+                backend.close()
+
+    def test_changed_interface_stops_before_the_next_calculation(self):
+        backend, path, log = self.backend()
+        backend.evaluate(water())
+        (self.directory / "fake-interface.py").write_text("# Changed interface\n")
+        with self.assertRaisesRegex(EvaluationError, "interface changed"):
+            backend.evaluate(water())
+        self.assertEqual(sum(row["request"]["op"] == "evaluate" for row in self.messages(log)), 1)
+        self.assertTrue((path / "failure.json").is_file())
+
+    def test_lifecycle_record_failure_cannot_accept_valid_forces(self):
+        backend, path, _ = self.backend()
+        original = backend._record
+
+        def fail_lifecycle(name, value, **kwargs):
+            if name == "lifecycle.json":
+                raise OSError("simulated lifecycle disk failure")
+            return original(name, value, **kwargs)
+
+        with (
+            patch.object(backend, "_record", side_effect=fail_lifecycle),
+            self.assertRaises(EvaluationError),
+        ):
+            backend.evaluate(water())
+        self.assertIsNone(backend._process)
+        self.assertEqual(backend.statistics["successful_evaluations"], 0)
+        self.assertTrue((path / "cleanup.json").is_file())
+        self.assertTrue((path / "evaluations/000001/cleanup.json").is_file())
+
+    def test_existing_evaluation_directory_is_not_overwritten(self):
+        backend, path, log = self.backend()
+        directory = path / "evaluations/000001"
+        directory.mkdir()
+        sentinel = directory / "sentinel"
+        sentinel.write_text("retained")
+        with self.assertRaises(EvaluationError):
+            backend.evaluate(water())
+        self.assertEqual(sentinel.read_text(), "retained")
+        self.assertFalse(log.exists())
+
+    def test_second_directory_collision_preserves_previous_worker_evidence(self):
+        backend, path, log = self.backend()
+        backend.evaluate(water())
+        previous = path / "evaluations/000001"
+        evidence = {item: item.read_bytes() for item in previous.rglob("*") if item.is_file()}
+        manifest = (path / "worker.json").read_bytes()
+        messages = self.messages(log)
+        attempted = path / "evaluations/000002"
+        attempted.mkdir()
+        sentinel = attempted / "sentinel"
+        sentinel.write_text("retained")
+        with self.assertRaises(EvaluationError):
+            backend.evaluate(water(displacement=0.02))
+        failure = json.loads((path / "failure.json").read_text())
+        self.assertEqual(
+            failure["request"],
+            {"op": "create_evaluation_directory", "directory": str(attempted)},
+        )
+        self.assertEqual((path / "worker.json").read_bytes(), manifest)
+        self.assertEqual(self.messages(log), messages)
+        self.assertEqual({item: item.read_bytes() for item in evidence}, evidence)
+        self.assertEqual(sentinel.read_text(), "retained")
+        self.assertEqual(set(attempted.iterdir()), {sentinel})
+        self.assertIsNone(backend._last_lifecycle)
+        self.assertEqual(backend.statistics["successful_evaluations"], 1)
+        self.assertEqual(backend.statistics["failed_evaluations"], 1)
+
+
+class _FakeFileIO(_FakeSocketIO):
+    def calculate(self, **kwargs):
+        super().calculate(**kwargs)
+        directory = self.kwargs["directory"]
+        output = directory / "OUT.ABACUS"
+        output.mkdir()
+        for name in ("INPUT", "STRU", "KPT"):
+            (directory / name).write_text("mock native input\n")
+        (output / "running_scf.log").write_text(
+            "#ELEC ITER# 3\nElectron density deviation = 1e-12\n#SCF IS CONVERGED#\n"
+        )
+
+
+class AbacusFileIOAdapterTests(AbacusTestCase):
+    def setUp(self):
+        super().setUp()
+        modules = {
+            name: ModuleType(name)
+            for name in ("abacuslite", "ase", "ase.calculators", "ase.calculators.calculator")
+        }
+        modules["abacuslite"].AbacusProfile = _FakeProfile
+        modules["abacuslite"].Abacus = _FakeFileIO
+        modules["ase"].Atoms = _FakeAtoms
+        self.all_changes = [
+            "positions",
+            "numbers",
+            "cell",
+            "pbc",
+            "initial_charges",
+            "initial_magmoms",
+        ]
+        modules["ase.calculators.calculator"].all_changes = self.all_changes
+        replacement = patch.dict(sys.modules, modules)
+        replacement.start()
+        self.addCleanup(replacement.stop)
+        self.settings["execution_mode"] = "fileio"
+        self.settings["coordinate_gauge"] = "arithmetic-centroid"
+
+    def session(self, name="fileio"):
+        directory = self.directory / name
+        directory.mkdir()
+        return _FileIOSession(
+            {"settings": self.resolve(), "directory": str(directory), "unixsocket": None}
+        )
+
+    def test_official_fileio_contract_and_raw_evidence(self):
+        session = self.session()
+        geometry = water(symbols=("H", "O", "H"))
+        response = session.evaluate(AbacusWorkerAdapterTests.request(geometry))
+        call = session.calculator.calls[0]
+        self.assertEqual(call["system_changes"], self.all_changes)
+        self.assertEqual(call["properties"], ["energy", "forces"])
+        self.assertNotIn("unixsocket", session.calculator.kwargs)
+        self.assertNotIn("socket_driver", session.calculator.kwargs["inp"])
+        self.assertEqual(session.calculator.kwargs["inp"]["ks_solver"], "cg")
+        np.testing.assert_array_equal(
+            call["atoms"].positions,
+            geometry.positions - geometry.positions.mean(axis=0) + [5, 6, 7],
+        )
+        np.testing.assert_array_equal(
+            response["forces_ev_per_angstrom"], session.calculator.results["forces"]
+        )
+        self.assertGreater(np.linalg.norm(np.sum(response["forces_ev_per_angstrom"], axis=0)), 0)
+        result = json.loads((session.directory / "result.json").read_text())
+        self.assertEqual(result["evidence"]["scf_iterations"], 3)
+        self.assertEqual(result["evidence"]["terminal_density_deviation"], 1e-12)
+        self.assertEqual(result["atom_ids"], list(geometry.atom_ids))
+        self.assertEqual(result["symbols"], list(geometry.symbols))
+        self.assertEqual(
+            result["evidence"]["scf_log_sha256"],
+            hashlib.sha256(
+                (session.directory / result["evidence"]["scf_log"]).read_bytes()
+            ).hexdigest(),
+        )
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            session.evaluate(AbacusWorkerAdapterTests.request(geometry))
+        self.assertEqual(len(session.calculator.calls), 1)
+        session.close()
+        session.close()
+
+    def test_missing_or_unconverged_scf_and_invalid_results_fail_closed(self):
+        for index, mode in enumerate(
+            (
+                "missing-log",
+                "unconverged",
+                "multiple",
+                "residual",
+                "iterations",
+                "nonfinite",
+                "bad-shape",
+                "missing-input",
+            )
+        ):
+            with self.subTest(mode=mode):
+                session = self.session(str(index))
+                original = session.calculator.calculate
+
+                def corrupt(original=original, session=session, mode=mode, **kwargs):
+                    original(**kwargs)
+                    log = session.calculation / "OUT.ABACUS/running_scf.log"
+                    if mode == "missing-log":
+                        log.unlink()
+                    elif mode == "unconverged":
+                        log.write_text(
+                            log.read_text().replace(
+                                "#SCF IS CONVERGED#", "!!SCF IS NOT CONVERGED!!"
+                            )
+                        )
+                    elif mode == "multiple":
+                        log.write_text(log.read_text() + "#SCF IS CONVERGED#\n")
+                    elif mode == "residual":
+                        log.write_text(log.read_text().replace("1e-12", "1e-4"))
+                    elif mode == "iterations":
+                        log.write_text(log.read_text().replace("ITER# 3", "ITER# 101"))
+                    elif mode == "nonfinite":
+                        session.calculator.results["energy"] = float("nan")
+                    elif mode == "bad-shape":
+                        session.calculator.results["forces"] = [[0, 0, 0]]
+                    elif mode == "missing-input":
+                        (session.calculation / "STRU").unlink()
+
+                with (
+                    patch.object(session.calculator, "calculate", side_effect=corrupt),
+                    self.assertRaises((ValueError, RuntimeError, OSError)),
+                ):
+                    session.evaluate(AbacusWorkerAdapterTests.request(water()))
+                self.assertFalse((session.directory / "result.json").exists())
+                with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                    session.evaluate(AbacusWorkerAdapterTests.request(water()))
 
 
 if __name__ == "__main__":
