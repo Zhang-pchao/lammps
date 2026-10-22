@@ -24,7 +24,7 @@ import threading
 import traceback
 from pathlib import Path
 
-from .abacus import _MAX_MESSAGE, _digest, validate_abacus_settings
+from .abacus import _MAX_MESSAGE, _digest, map_abacus_coordinates, validate_abacus_settings
 
 
 class _Session:
@@ -112,7 +112,7 @@ class _Session:
             raise ValueError("Missing element pseudopotential")
         changes = all_changes if self.identity is None else ["positions"]
         self.identity = identity
-        positions = geometry.positions + self.settings["coordinate_offset_angstrom"]
+        positions = map_abacus_coordinates(geometry, self.settings)
         atoms = Atoms(
             symbols=geometry.symbols,
             positions=positions,

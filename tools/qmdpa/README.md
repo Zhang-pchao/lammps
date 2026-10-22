@@ -82,9 +82,10 @@ source files and should not be committed.
 ## Experimental ABACUS backend
 
 ABACUS uses a persistent official socket calculator for a neutral singlet region
-(`charge: 0`, `multiplicity: 1`). Nonperiodic region coordinates receive the same
-fixed offset on every call and are evaluated in an explicitly declared finite
-periodic supercell. This is a molecular supercell approximation, with fixed
+(`charge: 0`, `multiplicity: 1`). Nonperiodic region coordinates use an explicit
+mapping and are evaluated in an explicitly declared finite periodic supercell.
+The default mapping retains the same fixed offset on every call.
+This is a molecular supercell approximation, with fixed
 PW/PBE, Gamma sampling and fixed occupations. It does not establish convergence
 with vacuum size, cutoff or SCF settings. ABACUS force, dynamics and restart
 qualification remains pending; process-contract tests do not supply that evidence.
@@ -104,6 +105,7 @@ pseudopotential. These values illustrate the schema, not a qualified protocol.
   },
   "supercell_angstrom": [12.0, 12.0, 12.0],
   "coordinate_offset_angstrom": [6.0, 6.0, 6.0],
+  "coordinate_gauge": "fixed-offset",
   "ecutwfc": 60.0,
   "scf_thr": 1e-9,
   "scf_nmax": 100,
@@ -112,12 +114,31 @@ pseudopotential. These values illustrate the schema, not a qualified protocol.
 }
 ```
 
+`coordinate_gauge` accepts exactly `fixed-offset` (default) or
+`arithmetic-centroid`. The default evaluates `X_i = R_i + offset`. The explicit
+centroid mode evaluates `X_i = R_i - mean(R) + offset` on every call, with an
+equal-weight mean over every atom supplied to the provider. The offset is then
+the target centroid, often the cell center. This operation uses no atomic masses,
+wrapping, or separate per-molecule shifts, and leaves the input coordinates intact.
+
+These mappings define different finite-grid energy functions. Native ABACUS
+removes the equal-weight mean force when external fields are absent. For
+`E_g(R) = E_native(R - mean(R) + offset)`, the chain rule gives
+`F_i = F_raw_i - mean(F_raw)`, matching that native projection when the raw force
+is the energy derivative. The adapter passes the native energy and forces
+through unchanged; it adds no force projection. The centroid contract is limited
+to the complete fixed neutral singlet molecular set evaluated without external
+fields or charge embedding. It does not establish periodic embedding or vacuum
+convergence. Changing the mode changes restart identity and requires fresh full
+finite-difference, translation, and dynamics qualification; choosing the mode
+does not itself qualify a calculation.
+
 `ks_solver` explicitly selects the official PW eigensolver: `cg` (default),
 `dav`, or `dav_subspace`. There is no automatic solver fallback. A different
 solver changes restart identity and requires fresh numerical qualification;
 support in this interface does not guarantee convergence of a given input.
 
-The executable and pseudopotential digests, cell, offset, resolved settings and
+The executable and pseudopotential digests, cell, offset, coordinate gauge, resolved settings and
 ASE/abacuslite source identities enter the restart identity. Atom IDs and element
 order stay fixed within a session. The driver supplies a fresh output directory;
 `directory` is not a QM setting. Native ABACUS must resolve its own runtime

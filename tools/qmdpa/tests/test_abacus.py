@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from qmdpa.abacus import AbacusBackend, validate_abacus_settings
+from qmdpa.abacus import AbacusBackend, map_abacus_coordinates, validate_abacus_settings
 from qmdpa.abacus_worker import _Session
 from qmdpa.core import EvaluationError, Geometry
 
@@ -220,6 +220,7 @@ class AbacusSettingsTests(AbacusTestCase):
         self.assertEqual(result["scf_thr"], 1e-9)
         self.assertEqual(result["scf_nmax"], 100)
         self.assertEqual(result["ks_solver"], "cg")
+        self.assertEqual(result["coordinate_gauge"], "fixed-offset")
         self.assertEqual(result["timeout_seconds"], 120)
         self.assertEqual((result["charge"], result["multiplicity"]), (0, 1))
 
@@ -244,6 +245,40 @@ class AbacusSettingsTests(AbacusTestCase):
         for solver in (None, True, 1, [], {}, "CG", "", "lapack", "auto"):
             with self.subTest(solver=solver), self.assertRaisesRegex(ValueError, "ks_solver"):
                 self.resolve({**self.settings, "ks_solver": solver})
+
+    def test_coordinate_gauge_is_explicit_and_strict(self):
+        for gauge in ("fixed-offset", "arithmetic-centroid"):
+            with self.subTest(gauge=gauge):
+                self.assertEqual(
+                    self.resolve({**self.settings, "coordinate_gauge": gauge})["coordinate_gauge"],
+                    gauge,
+                )
+        for gauge in (None, True, 1, [], {}, "FIXED-OFFSET", "", "mass-weighted", "auto"):
+            with self.subTest(gauge=gauge), self.assertRaisesRegex(ValueError, "coordinate_gauge"):
+                self.resolve({**self.settings, "coordinate_gauge": gauge})
+
+    def test_coordinate_mapping_does_not_wrap_or_modify_inputs(self):
+        value = Geometry((1, 2, 3), ("O", "H", "H"), [[-50, 2, 3], [40, 4, 5], [0, 6, 7]])
+        original = value.positions.copy()
+        settings = self.resolve({**self.settings, "coordinate_gauge": "arithmetic-centroid"})
+        mapped = map_abacus_coordinates(value, settings)
+        np.testing.assert_allclose(mapped.mean(axis=0), [5, 6, 7], atol=1e-14, rtol=0)
+        np.testing.assert_allclose(mapped[1] - mapped[0], original[1] - original[0])
+        self.assertLess(mapped[0, 0], 0)
+        self.assertGreater(mapped[1, 0], settings["supercell_angstrom"][0])
+        mapped[0, 0] = 123
+        np.testing.assert_array_equal(value.positions, original)
+
+    def test_coordinate_mapping_rejects_periodic_and_nonfinite_output(self):
+        for gauge in ("fixed-offset", "arithmetic-centroid"):
+            settings = self.resolve({**self.settings, "coordinate_gauge": gauge})
+            with self.subTest(gauge=gauge), self.assertRaisesRegex(ValueError, "nonperiodic"):
+                map_abacus_coordinates(water(cell=np.eye(3) * 20), settings)
+        largest = np.finfo(float).max
+        value = Geometry((1, 2), ("H", "H"), np.full((2, 3), largest))
+        settings = self.resolve({**self.settings, "coordinate_gauge": "arithmetic-centroid"})
+        with self.assertRaisesRegex(ValueError, "must be finite"):
+            map_abacus_coordinates(value, settings)
 
     def test_invalid_numerical_parameters_are_rejected(self):
         for key in ("ecutwfc", "scf_thr", "timeout_seconds"):
@@ -321,6 +356,19 @@ class AbacusProcessTests(AbacusTestCase):
         backend.close()
         backend.close()
         self.assertEqual(sum(row["request"]["op"] == "close" for row in self.messages(log)), 1)
+
+    def test_explicit_centroid_setting_reaches_worker_with_unmapped_input(self):
+        self.settings["coordinate_gauge"] = "arithmetic-centroid"
+        backend, _, log = self.backend()
+        value = water()
+        backend.evaluate(value)
+        messages = self.messages(log)
+        self.assertEqual(
+            messages[0]["request"]["settings"]["coordinate_gauge"], "arithmetic-centroid"
+        )
+        self.assertEqual(
+            messages[1]["request"]["geometry"]["positions_angstrom"], value.positions.tolist()
+        )
 
     def test_periodic_and_unknown_element_inputs_do_not_launch_a_worker(self):
         for label, geometry in (
@@ -560,6 +608,25 @@ class _FakeSocketIO:
         self.closed = True
 
 
+class _PolynomialSocketIO(_FakeSocketIO):
+    """Independent finite-grid energy with the native equal-weight force projection."""
+
+    def calculate(self, **kwargs):
+        super().calculate(**kwargs)
+        atoms = kwargs["atoms"]
+        x = atoms.positions - [4.6, 5.8, 6.7]
+        weight = np.array([{"O": 2.3, "H": 0.7}[symbol] for symbol in atoms.symbols])[:, None]
+        quadratic = np.array([0.7, 1.1, 1.6])
+        cubic = np.array([0.2, -0.15, 0.1])
+        linear = np.array([0.3, -0.2, 0.4])
+        energy = np.sum(weight * (quadratic * x**2 / 2 + cubic * x**3 / 3) + linear * x)
+        self.raw_forces = -weight * (quadratic * x + cubic * x**2) - linear
+        self.results = {
+            "energy": float(energy),
+            "forces": self.raw_forces - self.raw_forces.mean(axis=0),
+        }
+
+
 class _FakeAtoms:
     def __init__(self, *, symbols, positions, cell, pbc):
         self.symbols = tuple(symbols)
@@ -610,6 +677,70 @@ class AbacusWorkerAdapterTests(AbacusTestCase):
                 "positions_angstrom": geometry.positions.tolist(),
             }
         }
+
+    def centroid_session(self, name):
+        runtime = self.directory / name
+        runtime.mkdir()
+        session = _Session(
+            {
+                "settings": self.resolve(
+                    {**self.settings, "coordinate_gauge": "arithmetic-centroid"}
+                ),
+                "directory": str(runtime),
+                "unixsocket": "qmdpa-" + "c" * 32,
+            }
+        )
+        self.addCleanup(session.close)
+        return session
+
+    def test_centroid_maps_equal_weights_and_passes_native_results_unchanged(self):
+        session = self.centroid_session("centroid-pass-through")
+        value = water(symbols=("H", "O", "H"))
+        result = session.evaluate(self.request(value))
+        actual = session.calculator.calls[0]["atoms"].positions
+        expected = value.positions - value.positions.mean(axis=0) + [5, 6, 7]
+        np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(
+            result["forces_ev_per_angstrom"], session.calculator.results["forces"]
+        )
+        self.assertGreater(np.linalg.norm(np.sum(result["forces_ev_per_angstrom"], axis=0)), 0)
+        self.assertEqual(result["energy_ev"], session.calculator.results["energy"])
+
+    def test_centroid_worker_energy_derivative_translation_and_permutation(self):
+        with patch("abacuslite.AbacusSocketIO", _PolynomialSocketIO):
+            session = self.centroid_session("centroid-polynomial")
+            permuted_session = self.centroid_session("permuted-polynomial")
+        value = water(symbols=("H", "O", "H"))
+        original = value.positions.copy()
+        first = session.evaluate(self.request(value))
+        forces = np.asarray(first["forces_ev_per_angstrom"])
+        self.assertGreater(np.max(np.abs(session.calculator.raw_forces.mean(axis=0))), 0.1)
+        for step in (1e-4, 3e-5):
+            differences = np.zeros((3, 3))
+            for atom in range(3):
+                for axis in range(3):
+                    energies = []
+                    for sign in (1, -1):
+                        positions = value.positions.copy()
+                        positions[atom, axis] += sign * step
+                        displaced = Geometry(value.atom_ids, value.symbols, positions)
+                        energies.append(session.evaluate(self.request(displaced))["energy_ev"])
+                    differences[atom, axis] = -(energies[0] - energies[1]) / (2 * step)
+            with self.subTest(step=step):
+                np.testing.assert_allclose(forces, differences, atol=1e-8, rtol=0)
+        translated = Geometry(value.atom_ids, value.symbols, value.positions + [1.37, -2.19, 0.43])
+        shifted = session.evaluate(self.request(translated))
+        self.assertAlmostEqual(first["energy_ev"], shifted["energy_ev"], places=12)
+        np.testing.assert_allclose(forces, shifted["forces_ev_per_angstrom"], atol=1e-12, rtol=0)
+        reverse = value.select(tuple(reversed(value.atom_ids)))
+        permuted = permuted_session.evaluate(self.request(reverse))
+        self.assertEqual(permuted["atom_ids"], list(reverse.atom_ids))
+        self.assertEqual(permuted["symbols"], list(reverse.symbols))
+        self.assertAlmostEqual(first["energy_ev"], permuted["energy_ev"], places=12)
+        np.testing.assert_allclose(
+            forces, permuted["forces_ev_per_angstrom"][::-1], atol=1e-12, rtol=0
+        )
+        np.testing.assert_array_equal(value.positions, original)
 
     def test_official_adapter_receives_fixed_physics_and_native_environment(self):
         options = self.session.calculator.kwargs

@@ -138,12 +138,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(first["qm"]["pseudopotentials"]["H"]["path"], str(pseudo))
         explicit_default = deepcopy(self.config)
         explicit_default["qm"]["ks_solver"] = "cg"
+        explicit_default["qm"]["coordinate_gauge"] = "fixed-offset"
         self.assertEqual(first["physics_sha256"], self.load(explicit_default)["physics_sha256"])
         for key, value in (
             ("ecutwfc", 80.0),
             ("scf_thr", 1e-11),
             ("ks_solver", "dav"),
             ("ks_solver", "dav_subspace"),
+            ("coordinate_gauge", "arithmetic-centroid"),
             ("supercell_angstrom", [14.0, 14.0, 14.0]),
             ("coordinate_offset_angstrom", [6.1, 6.0, 6.0]),
         ):

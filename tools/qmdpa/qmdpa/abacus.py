@@ -5,8 +5,9 @@
 """Bounded POSIX supervision of a persistent official ABACUS/ASE socket session.
 
 The molecular input is evaluated in an explicit finite periodic supercell.
-Coordinates receive one fixed offset; no recentering, stress or cell relaxation
-is implied. ASE and abacuslite are imported only in the isolated worker.
+Coordinates use an explicit fixed-offset or arithmetic-centroid mapping.
+Stress and cell relaxation are excluded. ASE and abacuslite are imported only
+in the isolated worker.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ import time
 import uuid
 from pathlib import Path
 
+import numpy as np
+
 _ELEMENTS = set(
     "H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni "
     "Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe "
@@ -37,6 +40,7 @@ _DEFAULTS = {
     "scf_thr": 1e-9,
     "scf_nmax": 100,
     "ks_solver": "cg",
+    "coordinate_gauge": "fixed-offset",
     "charge": 0,
     "multiplicity": 1,
     "timeout_seconds": 120.0,
@@ -106,6 +110,11 @@ def validate_abacus_settings(settings, base_dir):
         "dav_subspace",
     ):
         raise ValueError("ks_solver must be cg, dav or dav_subspace")
+    if not isinstance(result["coordinate_gauge"], str) or result["coordinate_gauge"] not in (
+        "fixed-offset",
+        "arithmetic-centroid",
+    ):
+        raise ValueError("coordinate_gauge must be fixed-offset or arithmetic-centroid")
     for key in ("ecutwfc", "scf_thr", "timeout_seconds"):
         result[key] = _number(result[key], key)
     if type(result["scf_nmax"]) is not int or result["scf_nmax"] <= 0:
@@ -132,6 +141,32 @@ def validate_abacus_settings(settings, base_dir):
         )
         result["pseudopotentials"][symbol] = {"path": path, "sha256": digest}
     return result
+
+
+def map_abacus_coordinates(geometry, settings):
+    """Map the complete finite molecular set using validated ABACUS settings.
+
+    The centroid is the equal-weight arithmetic mean of every supplied atom,
+    independent of elements or masses. The offset is the centroid's target
+    when centering is explicit. No wrapping or force transformation is done.
+    """
+    if geometry.periodic:
+        raise ValueError("ABACUS coordinate mapping requires nonperiodic input geometry")
+    gauge = settings["coordinate_gauge"]
+    with np.errstate(over="ignore", invalid="ignore"):
+        if gauge == "fixed-offset":
+            positions = geometry.positions + settings["coordinate_offset_angstrom"]
+        elif gauge == "arithmetic-centroid":
+            positions = (
+                geometry.positions
+                - geometry.positions.mean(axis=0)
+                + settings["coordinate_offset_angstrom"]
+            )
+        else:
+            raise ValueError("coordinate_gauge must be fixed-offset or arithmetic-centroid")
+    if not np.isfinite(positions).all():
+        raise ValueError("Mapped ABACUS coordinates must be finite")
+    return positions
 
 
 def _worker_command(owner_pid, unixsocket):
@@ -166,6 +201,7 @@ class AbacusBackend:
         pseudopotentials,
         supercell_angstrom,
         coordinate_offset_angstrom,
+        coordinate_gauge="fixed-offset",
         ecutwfc=60,
         scf_thr=1e-9,
         scf_nmax=100,
@@ -189,6 +225,7 @@ class AbacusBackend:
                 "pseudopotentials": pseudopotentials,
                 "supercell_angstrom": supercell_angstrom,
                 "coordinate_offset_angstrom": coordinate_offset_angstrom,
+                "coordinate_gauge": coordinate_gauge,
                 "ecutwfc": ecutwfc,
                 "scf_thr": scf_thr,
                 "scf_nmax": scf_nmax,
