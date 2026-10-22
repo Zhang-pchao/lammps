@@ -1,0 +1,57 @@
+{
+  "origin": "Project-generated regression geometry; no literature or experimental authority",
+  "companion_fixture": {
+    "repository": "qm-dpa",
+    "path": "benchmarks/water/dimer.json",
+    "sha256": "293936b79fc7ecc887942f6e5056e3485d95982526a2e295bf460d946d75d592"
+  },
+  "relation": "Atom IDs, elements, Cartesian coordinates, and QM membership are unchanged from the companion fixture.",
+  "data_file": {
+    "name": "water-dimer.data",
+    "sha256": "9216788c645f533bc9ebb6e4daa6360e84004961267b3068cc14eeb4f1c45e18",
+    "units": "metal",
+    "atom_style": "atomic",
+    "periodic": false
+  },
+  "additions": {
+    "masses_amu": {
+      "O": 15.999,
+      "H": 1.008
+    },
+    "image_flags": "all zero; both molecules intact",
+    "velocities_angstrom_per_ps": [
+      [
+        0.01,
+        0.02,
+        -0.01
+      ],
+      [
+        0.08,
+        -0.05,
+        0.03
+      ],
+      [
+        -0.04,
+        0.06,
+        -0.02
+      ],
+      [
+        -0.01,
+        -0.02,
+        0.01
+      ],
+      [
+        -0.08,
+        0.05,
+        -0.03
+      ],
+      [
+        0.04,
+        -0.06,
+        0.02
+      ]
+    ],
+    "velocity_design": "Arbitrary small paired velocities; zero total linear momentum; not a thermal sample"
+  },
+  "scientific_qualification": "not_established"
+}

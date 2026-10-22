@@ -1,0 +1,31 @@
+Generated water dimer for QM/DPA integration regression; units metal
+
+6 atoms
+2 atom types
+
+-12.0 16.0 xlo xhi
+-12.0 12.0 ylo yhi
+-12.0 12.0 zlo zhi
+
+Masses
+
+1 15.999 # O
+2 1.008 # H
+
+Atoms # atomic
+
+1 1 0 0 0 0 0 0
+2 2 0.963 0 0 0 0 0
+3 2 -0.244 0.928 0.035 0 0 0
+4 1 2.9 0.18 0.11 0 0 0
+5 2 3.237 1.08 0.14 0 0 0
+6 2 3.492 -0.541 0.295 0 0 0
+
+Velocities
+
+1 0.01 0.02 -0.01
+2 0.08 -0.05 0.03
+3 -0.04 0.06 -0.02
+4 -0.01 -0.02 0.01
+5 -0.08 0.05 -0.03
+6 0.04 -0.06 0.02

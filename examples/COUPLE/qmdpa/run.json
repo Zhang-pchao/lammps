@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "data_file": "water-dimer.data",
+  "model": "REPLACE_WITH_TARGET_GPU_EXPORTED_MODEL.pt2",
+  "model_sha256": "REPLACE_WITH_64_HEX_SHA256_OF_PT2",
+  "type_symbols": ["O", "H"],
+  "periodic": false,
+  "region": {
+    "atom_ids": [1, 2, 3],
+    "symbols": ["O", "H", "H"],
+    "molecules": [[1, 2, 3]]
+  },
+  "full_charge_spin": [0, 1],
+  "region_charge_spin": [0, 1],
+  "qm": {
+    "xc": "pbe",
+    "basis": "def2-svp",
+    "charge": 0,
+    "multiplicity": 1,
+    "conv_tol": 1e-10,
+    "max_cycle": 100,
+    "grid_level": 4,
+    "threads": 4
+  },
+  "timestep_fs": 0.25,
+  "steps": 10,
+  "sample_interval": 1
+}

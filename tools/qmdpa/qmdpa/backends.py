@@ -1,0 +1,178 @@
+# LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
+# https://www.lammps.org/, Sandia National Laboratories
+# SPDX-License-Identifier: GPL-2.0-only
+# Author: Pengchao Zhang <pczhang1997@gmail.com>
+"""Optional real DeePMD and PySCF providers for the subtractive calculator."""
+
+from __future__ import annotations
+
+import operator
+from pathlib import Path
+
+import numpy as np
+
+from .core import Evaluation, EvaluationError, Geometry, _readonly_array
+
+
+def _integer(value, name, minimum=None):
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be an integer")
+    try:
+        number = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if minimum is not None and number < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return number
+
+
+class DeepMDBackend:
+    """Evaluate one DeePMD model, preserving the input atom order.
+
+    ``charge_spin`` is the explicit [charge, multiplicity] condition, separate
+    from ``fparam``. Frame parameters are a vector. Atomic parameters are
+    either one uniform vector or an (atoms, parameters) array in input order.
+    A separate provider should be used when full and QM parameter sets differ.
+    """
+
+    def __init__(self, model, *, charge_spin=None, fparam=None, aparam=None):
+        try:
+            from deepmd.infer import DeepPot
+        except ImportError as exc:
+            raise ImportError("DeePMD-kit is required for the DeePMD backend") from exc
+        self.model = str(Path(model))
+        self._potential = DeepPot(self.model)
+        self.type_map = tuple(self._potential.get_type_map())
+        if not self.type_map or len(set(self.type_map)) != len(self.type_map):
+            raise ValueError("The model must provide a nonempty, unique element type map")
+        self._types = {symbol: index for index, symbol in enumerate(self.type_map)}
+        self.charge_spin = None
+        if charge_spin is not None:
+            self.charge_spin = _readonly_array(charge_spin, "Charge and multiplicity")
+            if self.charge_spin.shape != (2,):
+                raise ValueError("charge_spin must contain charge and multiplicity")
+            if not self._potential.has_chg_spin_ebd():
+                raise ValueError("This model does not accept a charge_spin condition")
+        elif self._potential.has_chg_spin_ebd():
+            raise ValueError("An explicit charge_spin condition is required for this model")
+        dimension = self._potential.get_dim_fparam()
+        self.fparam = None if fparam is None else _readonly_array(fparam, "Frame parameters")
+        if self.fparam is not None and (dimension == 0 or self.fparam.shape != (dimension,)):
+            raise ValueError(f"fparam must be a vector of the model's {dimension} parameters")
+        if self.fparam is None and dimension and not self._potential.has_default_fparam():
+            raise ValueError("The model requires explicit frame parameters")
+        dimension = self._potential.get_dim_aparam()
+        self.aparam = None if aparam is None else _readonly_array(aparam, "Atomic parameters")
+        if self.aparam is not None and (
+            dimension == 0 or self.aparam.ndim not in (1, 2) or self.aparam.shape[-1] != dimension
+        ):
+            raise ValueError(f"aparam must have {dimension} parameters per atom")
+        if self.aparam is None and dimension:
+            raise ValueError("The model requires explicit atomic parameters")
+
+    def evaluate(self, geometry: Geometry) -> Evaluation:
+        try:
+            atom_types = [self._types[symbol] for symbol in geometry.symbols]
+        except KeyError as exc:
+            raise ValueError(f"Element {exc.args[0]} is not present in the model type map") from exc
+        if self.aparam is not None and self.aparam.ndim == 2:
+            if self.aparam.shape[0] != len(geometry.atom_ids):
+                raise ValueError("Atomic parameter rows must match the evaluated atoms")
+        kwargs = {}
+        if self.charge_spin is not None:
+            kwargs["charge_spin"] = self.charge_spin.reshape(1, -1)
+        if self.fparam is not None:
+            kwargs["fparam"] = self.fparam
+        if self.aparam is not None:
+            kwargs["aparam"] = self.aparam
+        cell = None if geometry.cell is None else geometry.cell.reshape(1, 9)
+        try:
+            output = self._potential.eval(
+                geometry.positions.reshape(1, -1, 3), cell, atom_types, **kwargs
+            )
+            energy = np.asarray(output[0])
+            forces = np.asarray(output[1])
+            if energy.size != 1 or forces.shape != (1, len(geometry.atom_ids), 3):
+                raise ValueError("Unexpected DeePMD energy or force shape")
+            return Evaluation(float(energy.reshape(-1)[0]), forces[0])
+        except Exception as exc:
+            raise EvaluationError(f"DeePMD evaluation failed: {exc}") from exc
+
+
+class PySCFBackend:
+    """Isolated molecular DFT with checked SCF convergence and analytic forces.
+
+    Multiplicity is converted to PySCF's ``spin = N_alpha - N_beta``.
+    A supplied thread count sets PySCF's process-wide thread count once during
+    construction. No SCF restart or previous-frame force fallback is used.
+    """
+
+    def __init__(
+        self,
+        *,
+        xc="pbe",
+        basis="def2-svp",
+        charge=0,
+        multiplicity=1,
+        conv_tol=1e-9,
+        max_cycle=100,
+        grid_level=3,
+        threads=None,
+    ):
+        self.charge = _integer(charge, "Charge")
+        self.multiplicity = _integer(multiplicity, "Multiplicity", 1)
+        self.max_cycle = _integer(max_cycle, "Maximum SCF cycles", 1)
+        self.grid_level = _integer(grid_level, "Integration grid level", 0)
+        if not isinstance(xc, str) or not xc.strip():
+            raise ValueError("The density functional must be a nonempty string")
+        if not isinstance(basis, str) or not basis.strip():
+            raise ValueError("The basis must be a nonempty string")
+        self.xc = xc
+        self.basis = basis
+        self.conv_tol = float(conv_tol)
+        if not np.isfinite(self.conv_tol) or self.conv_tol <= 0.0:
+            raise ValueError("SCF convergence tolerance must be finite and positive")
+        if threads is not None:
+            threads = _integer(threads, "Thread count", 1)
+        try:
+            from pyscf import dft, gto, lib
+            from pyscf.data import nist
+        except ImportError as exc:
+            raise ImportError("PySCF is required for the molecular QM backend") from exc
+        self._dft = dft
+        self._gto = gto
+        self._hartree_ev = nist.HARTREE2EV
+        self._bohr_angstrom = nist.BOHR
+        self.threads = threads
+        if threads is not None:
+            lib.num_threads(threads)
+
+    def evaluate(self, geometry: Geometry) -> Evaluation:
+        if geometry.periodic:
+            raise ValueError("The PySCF molecular backend requires an isolated geometry")
+        try:
+            molecule = self._gto.M(
+                atom=list(zip(geometry.symbols, geometry.positions.tolist())),
+                unit="Angstrom",
+                basis=self.basis,
+                charge=self.charge,
+                spin=self.multiplicity - 1,
+                verbose=0,
+            )
+            method = self._dft.RKS(molecule) if molecule.spin == 0 else self._dft.UKS(molecule)
+            method.xc = self.xc
+            method.conv_tol = self.conv_tol
+            method.max_cycle = self.max_cycle
+            method.grids.level = self.grid_level
+            energy = method.kernel()
+            if not method.converged:
+                raise EvaluationError(f"PySCF SCF did not converge within {self.max_cycle} cycles")
+            gradient = method.nuc_grad_method().kernel()
+            forces = -np.asarray(gradient) * (self._hartree_ev / self._bohr_angstrom)
+            if forces.shape != geometry.positions.shape:
+                raise EvaluationError("PySCF gradient count does not match the input atoms")
+            return Evaluation(float(energy) * self._hartree_ev, forces)
+        except EvaluationError:
+            raise
+        except Exception as exc:
+            raise EvaluationError(f"PySCF evaluation failed: {exc}") from exc
