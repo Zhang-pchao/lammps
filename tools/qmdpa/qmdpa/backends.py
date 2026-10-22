@@ -106,7 +106,9 @@ class PySCFBackend:
     A supplied thread count sets PySCF's process-wide thread count once during
     construction. ``grid_response`` explicitly includes the numerical
     integration grid response in DFT gradients by default. No SCF restart or
-    previous-frame force fallback is used.
+    previous-frame force fallback is used. ``conv_tol_grad`` optionally controls
+    the SCF orbital-gradient stopping criterion independently of energy change;
+    None retains the PySCF default.
     """
 
     def __init__(
@@ -117,6 +119,7 @@ class PySCFBackend:
         charge=0,
         multiplicity=1,
         conv_tol=1e-9,
+        conv_tol_grad=None,
         max_cycle=100,
         grid_level=3,
         grid_response=True,
@@ -135,6 +138,14 @@ class PySCFBackend:
             raise ValueError("The basis must be a nonempty string")
         self.xc = xc
         self.basis = basis
+        if conv_tol_grad is not None and (
+            isinstance(conv_tol_grad, bool)
+            or not isinstance(conv_tol_grad, (int, float))
+            or not np.isfinite(conv_tol_grad)
+            or conv_tol_grad <= 0.0
+        ):
+            raise ValueError("SCF orbital-gradient tolerance must be finite and positive or None")
+        self.conv_tol_grad = conv_tol_grad
         self.conv_tol = float(conv_tol)
         if not np.isfinite(self.conv_tol) or self.conv_tol <= 0.0:
             raise ValueError("SCF convergence tolerance must be finite and positive")
@@ -168,6 +179,8 @@ class PySCFBackend:
             method = self._dft.RKS(molecule) if molecule.spin == 0 else self._dft.UKS(molecule)
             method.xc = self.xc
             method.conv_tol = self.conv_tol
+            if self.conv_tol_grad is not None:
+                method.conv_tol_grad = self.conv_tol_grad
             method.max_cycle = self.max_cycle
             method.grids.level = self.grid_level
             energy = method.kernel()

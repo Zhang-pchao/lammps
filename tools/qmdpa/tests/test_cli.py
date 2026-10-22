@@ -146,6 +146,18 @@ class ConfigTests(unittest.TestCase):
         self.assertIs(disabled["qm"]["grid_response"], False)
         self.assertNotEqual(explicit["physics_sha256"], disabled["physics_sha256"])
 
+    def test_orbital_gradient_tolerance_is_optional_and_changes_restart_identity(self):
+        implicit = self.load()
+        self.assertIsNone(implicit["qm"]["conv_tol_grad"])
+        self.config["qm"]["conv_tol_grad"] = None
+        self.assertEqual(implicit["physics_sha256"], self.load()["physics_sha256"])
+        self.config["qm"]["conv_tol_grad"] = 1e-7
+        explicit = self.load()
+        self.assertEqual(explicit["qm"]["conv_tol_grad"], 1e-7)
+        self.assertNotEqual(implicit["physics_sha256"], explicit["physics_sha256"])
+        self.config["qm"]["conv_tol_grad"] = 1e-8
+        self.assertNotEqual(explicit["physics_sha256"], self.load()["physics_sha256"])
+
     def test_region_dp_and_qm_electronic_states_must_match(self):
         for state in ([1, 1], [0, 2]):
             config = deepcopy(self.config)
@@ -184,6 +196,12 @@ class ConfigTests(unittest.TestCase):
             ("charge", 0.5),
             ("multiplicity", 0),
             ("conv_tol", float("nan")),
+            ("conv_tol_grad", True),
+            ("conv_tol_grad", 0),
+            ("conv_tol_grad", -1),
+            ("conv_tol_grad", float("inf")),
+            ("conv_tol_grad", float("nan")),
+            ("conv_tol_grad", "1e-7"),
             ("max_cycle", 0),
             ("grid_level", True),
             ("grid_response", 0),

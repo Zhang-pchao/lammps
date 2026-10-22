@@ -53,7 +53,12 @@ data), `model`, `model_sha256`, `type_symbols` (LAMMPS types in order), `periodi
 the configuration. `region` contains `atom_ids`, corresponding `symbols`, and
 `molecules` (lists partitioning those IDs into complete molecules). `qm` contains
 PySCF settings such as `xc`, `basis`, `charge`, `multiplicity`, `conv_tol`,
-`grid_level`, `grid_response` (a JSON boolean, default `true`), and `threads`.
+`conv_tol_grad` (positive or `null`), `grid_level`, `grid_response` (a JSON
+boolean, default `true`), and `threads`. The optional orbital-gradient threshold
+controls SCF independently of the energy-change threshold. `null` preserves the
+PySCF default, normally `sqrt(conv_tol)`; energy convergence alone does not bound
+nuclear-force error. Use an explicit value for a qualified dynamics protocol and
+compare forces against a tighter reference on identical geometries.
 The resolved grid-response setting is saved in the manifest and restart physics
 identity. Changing it requires a fresh run. Numerical results obtained before
 this explicit policy must be revalidated with finite differences and NVE; the

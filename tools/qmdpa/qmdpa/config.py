@@ -124,6 +124,7 @@ def load_config(path):
         "charge": 0,
         "multiplicity": 1,
         "conv_tol": 1e-9,
+        "conv_tol_grad": None,
         "max_cycle": 100,
         "grid_level": 3,
         "grid_response": True,
@@ -147,6 +148,14 @@ def load_config(path):
         _positive_integer(qm["threads"], "qm.threads")
     if isinstance(qm["conv_tol"], bool) or not np.isfinite(qm["conv_tol"]) or qm["conv_tol"] <= 0:
         raise ValueError("qm.conv_tol must be finite and positive")
+    grad_tol = qm["conv_tol_grad"]
+    if grad_tol is not None and (
+        isinstance(grad_tol, bool)
+        or not isinstance(grad_tol, (int, float))
+        or not np.isfinite(grad_tol)
+        or grad_tol <= 0
+    ):
+        raise ValueError("qm.conv_tol_grad must be finite and positive or null")
     config["qm"] = qm
     state = config.get("region_charge_spin")
     if state is not None and state != [qm["charge"], qm["multiplicity"]]:

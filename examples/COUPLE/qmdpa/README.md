@@ -45,7 +45,8 @@ qmdpa run "$WORK_DIR/run.json" --output "$WORK_DIR/first-10"
 ```
 
 The template runs 10 additional NVE steps at 0.25 fs, saving each accepted step.
-PBE/def2-SVP, SCF tolerance `1e-10`, grid level 4, and explicit
+PBE/def2-SVP, SCF energy tolerance `1e-10`, orbital-gradient tolerance `1e-7`,
+grid level 4, and explicit
 `grid_response: true` are engineering settings; they do not reproduce OMol25's
 training reference method. Grid response includes
 the integration-grid contribution in the DFT gradient and is part of the saved

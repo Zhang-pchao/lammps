@@ -114,10 +114,13 @@ class FakeSCF:
         self.converged = converged
         self.grids = SimpleNamespace(level=None)
         self.gradient_called = False
+        self.conv_tol_grad = None
+        self.orbital_gradient_tolerance_used = None
         self.gradient_response_used = None
         self.gradient = SimpleNamespace(grid_response=None, kernel=self.gradient_kernel)
 
     def kernel(self):
+        self.orbital_gradient_tolerance_used = self.conv_tol_grad
         return -1.5
 
     def nuc_grad_method(self):
@@ -183,6 +186,23 @@ class PySCFContractTests(unittest.TestCase):
         for value in (0, 1, "true", "false", None):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "grid_response"):
                 PySCFBackend(grid_response=value)
+
+    def test_explicit_orbital_gradient_tolerance_reaches_scf_before_kernel(self):
+        for multiplicity in (1, 2):
+            for tolerance in (None, 1e-7):
+                with self.subTest(multiplicity=multiplicity, tolerance=tolerance):
+                    method = FakeSCF()
+                    method.conv_tol_grad = 2e-5
+                    with patch.dict(sys.modules, pyscf_modules(method, {})):
+                        backend = PySCFBackend(multiplicity=multiplicity, conv_tol_grad=tolerance)
+                    backend.evaluate(water())
+                    expected = 2e-5 if tolerance is None else tolerance
+                    self.assertEqual(method.orbital_gradient_tolerance_used, expected)
+
+    def test_invalid_orbital_gradient_tolerances_are_rejected_before_backend_import(self):
+        for tolerance in (True, 0, -1, float("inf"), float("nan"), "1e-7"):
+            with self.subTest(tolerance=tolerance), self.assertRaisesRegex(ValueError, "tolerance"):
+                PySCFBackend(conv_tol_grad=tolerance)
 
     def test_unconverged_scf_never_returns_a_gradient(self):
         method = FakeSCF(converged=False)
