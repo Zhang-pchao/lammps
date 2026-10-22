@@ -47,6 +47,76 @@ def software_identity():
     }
 
 
+def validate_region(region):
+    """Validate explicitly declared whole-molecule membership without loading a backend."""
+    if not isinstance(region, dict):
+        raise ValueError("region must be a mapping")
+    if set(region) != {"atom_ids", "symbols", "molecules"}:
+        raise ValueError("region requires atom_ids, symbols, and complete molecules")
+    FixedRegion(tuple(region["atom_ids"]), tuple(region["symbols"]))
+    molecules = region["molecules"]
+    if (
+        not isinstance(molecules, list)
+        or not molecules
+        or any(not isinstance(molecule, list) or not molecule for molecule in molecules)
+    ):
+        raise ValueError("region.molecules must contain nonempty lists of atom IDs")
+    members = [atom for molecule in molecules for atom in molecule]
+    if any(type(atom) is not int or atom <= 0 for atom in members):
+        raise ValueError("molecule atom IDs must be positive integers")
+    if sorted(members) != sorted(region["atom_ids"]):
+        raise ValueError("region.molecules must partition the declared region IDs exactly")
+
+
+def validate_qm(qm, *, electrostatic=False):
+    """Resolve supported finite PySCF settings without importing PySCF."""
+    qm_defaults = {
+        "xc": "pbe",
+        "basis": "def2-svp",
+        "charge": 0,
+        "multiplicity": 1,
+        "conv_tol": 1e-9,
+        "conv_tol_grad": None,
+        "max_cycle": 100,
+        "grid_level": 3,
+        "grid_response": True,
+        "threads": None,
+    }
+    if electrostatic:
+        qm_defaults.update(nlc_grid_level=None, include_qm_dipole=False)
+    if not isinstance(qm, dict) or set(qm).difference(qm_defaults):
+        raise ValueError("qm contains unsupported PySCF configuration keys")
+    qm = {**qm_defaults, **qm}
+    for key in ("xc", "basis"):
+        if not isinstance(qm[key], str) or not qm[key].strip():
+            raise ValueError(f"qm.{key} must be a nonempty string")
+    if type(qm["charge"]) is not int:
+        raise ValueError("qm.charge must be an integer")
+    for key in ("multiplicity", "max_cycle"):
+        _positive_integer(qm[key], f"qm.{key}")
+    _positive_integer(qm["grid_level"], "qm.grid_level", allow_zero=True)
+    if type(qm["grid_response"]) is not bool:
+        raise ValueError("qm.grid_response must be true or false")
+    if qm["threads"] is not None:
+        _positive_integer(qm["threads"], "qm.threads")
+    if isinstance(qm["conv_tol"], bool) or not np.isfinite(qm["conv_tol"]) or qm["conv_tol"] <= 0:
+        raise ValueError("qm.conv_tol must be finite and positive")
+    grad_tol = qm["conv_tol_grad"]
+    if grad_tol is not None and (
+        isinstance(grad_tol, bool)
+        or not isinstance(grad_tol, (int, float))
+        or not np.isfinite(grad_tol)
+        or grad_tol <= 0
+    ):
+        raise ValueError("qm.conv_tol_grad must be finite and positive or null")
+    if electrostatic:
+        if qm["nlc_grid_level"] is not None:
+            _positive_integer(qm["nlc_grid_level"], "qm.nlc_grid_level", allow_zero=True)
+        if type(qm["include_qm_dipole"]) is not bool:
+            raise ValueError("qm.include_qm_dipole must be true or false")
+    return qm
+
+
 def load_config(path):
     """Resolve declared files and validate the deliberately small run schema."""
     path = Path(path).resolve()
@@ -93,22 +163,7 @@ def load_config(path):
         )
     ):
         raise ValueError("type_symbols must map each LAMMPS atom type to an element")
-    region = config["region"]
-    if set(region) != {"atom_ids", "symbols", "molecules"}:
-        raise ValueError("region requires atom_ids, symbols, and complete molecules")
-    FixedRegion(tuple(region["atom_ids"]), tuple(region["symbols"]))
-    molecules = region["molecules"]
-    if (
-        not isinstance(molecules, list)
-        or not molecules
-        or any(not isinstance(molecule, list) or not molecule for molecule in molecules)
-    ):
-        raise ValueError("region.molecules must contain nonempty lists of atom IDs")
-    members = [atom for molecule in molecules for atom in molecule]
-    if any(type(atom) is not int or atom <= 0 for atom in members):
-        raise ValueError("molecule atom IDs must be positive integers")
-    if sorted(members) != sorted(region["atom_ids"]):
-        raise ValueError("region.molecules must partition the declared region IDs exactly")
+    validate_region(config["region"])
     for key in ("full_charge_spin", "region_charge_spin"):
         value = config.get(key)
         if value is not None and (
@@ -118,45 +173,7 @@ def load_config(path):
             or value[1] < 1
         ):
             raise ValueError(f"{key} requires integer charge and positive multiplicity")
-    qm_defaults = {
-        "xc": "pbe",
-        "basis": "def2-svp",
-        "charge": 0,
-        "multiplicity": 1,
-        "conv_tol": 1e-9,
-        "conv_tol_grad": None,
-        "max_cycle": 100,
-        "grid_level": 3,
-        "grid_response": True,
-        "threads": None,
-    }
-    qm = config["qm"]
-    if not isinstance(qm, dict) or set(qm).difference(qm_defaults):
-        raise ValueError("qm contains unsupported PySCF configuration keys")
-    qm = {**qm_defaults, **qm}
-    for key in ("xc", "basis"):
-        if not isinstance(qm[key], str) or not qm[key].strip():
-            raise ValueError(f"qm.{key} must be a nonempty string")
-    if type(qm["charge"]) is not int:
-        raise ValueError("qm.charge must be an integer")
-    for key in ("multiplicity", "max_cycle"):
-        _positive_integer(qm[key], f"qm.{key}")
-    _positive_integer(qm["grid_level"], "qm.grid_level", allow_zero=True)
-    if type(qm["grid_response"]) is not bool:
-        raise ValueError("qm.grid_response must be true or false")
-    if qm["threads"] is not None:
-        _positive_integer(qm["threads"], "qm.threads")
-    if isinstance(qm["conv_tol"], bool) or not np.isfinite(qm["conv_tol"]) or qm["conv_tol"] <= 0:
-        raise ValueError("qm.conv_tol must be finite and positive")
-    grad_tol = qm["conv_tol_grad"]
-    if grad_tol is not None and (
-        isinstance(grad_tol, bool)
-        or not isinstance(grad_tol, (int, float))
-        or not np.isfinite(grad_tol)
-        or grad_tol <= 0
-    ):
-        raise ValueError("qm.conv_tol_grad must be finite and positive or null")
-    config["qm"] = qm
+    qm = config["qm"] = validate_qm(config["qm"])
     state = config.get("region_charge_spin")
     if state is not None and state != [qm["charge"], qm["multiplicity"]]:
         raise ValueError("Region DP and QM electronic states must match in this driver")

@@ -28,7 +28,7 @@ def _write_manifest(output, config, *, world_size, restart):
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-def run(config_path, output, *, restart=None):
+def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupling):
     """Run additional steps; each successful sample has a matching restart pair."""
     from lammps import lammps
 
@@ -39,7 +39,7 @@ def run(config_path, output, *, restart=None):
         raise RuntimeError("An MPI run requires mpi4py linked to the same MPI implementation")
     output_created = False
     try:
-        config = _root_call(comm, lambda: load_config(config_path))
+        config = _root_call(comm, lambda: config_loader(config_path))
         output = Path(output).resolve()
         _root_call(comm, lambda: output.mkdir(parents=True, exist_ok=False))
         output_created = True
@@ -60,10 +60,7 @@ def run(config_path, output, *, restart=None):
             lmp.command(f"read_data {_quoted(config['data_file'])}")
         else:
             lmp.command(f"read_restart {_quoted(previous['restart_path'])}")
-        condition = config.get("full_charge_spin")
-        suffix = "" if condition is None else " charge_spin " + " ".join(map(str, condition))
-        lmp.command(f"pair_style deepmd {_quoted(config['model'])}{suffix}")
-        lmp.command("pair_coeff * * " + " ".join(config["type_symbols"]))
+        setup_pair(lmp, config)
         lmp.commands_list(
             [
                 "neighbor 2.0 bin",
@@ -80,22 +77,7 @@ def run(config_path, output, *, restart=None):
                 f"velocity all create {config['temperature_K']} {config['velocity_seed']} "
                 "mom yes rot yes dist gaussian"
             )
-        calculator = None
-
-        def make_calculator():
-            nonlocal calculator
-            calculator = SubtractiveCalculator(
-                DeepMDBackend(config["model"], charge_spin=config.get("region_charge_spin")),
-                PySCFBackend(**config["qm"]),
-            )
-
-        _root_call(comm, make_calculator)
-        region = FixedRegion(
-            tuple(config["region"]["atom_ids"]), tuple(config["region"]["symbols"])
-        )
-        coupling = ExternalCoupling(
-            lmp, region, calculator, comm=comm, type_symbols=tuple(config["type_symbols"])
-        )
+        coupling = make_coupling(lmp, comm, config)
         _root_call(
             comm,
             lambda: _write_manifest(
@@ -173,6 +155,43 @@ def run(config_path, output, *, restart=None):
         raise
     finally:
         lmp.close()
+
+
+def _mechanical_pair(lmp, config):
+    condition = config.get("full_charge_spin")
+    suffix = "" if condition is None else " charge_spin " + " ".join(map(str, condition))
+    lmp.command(f"pair_style deepmd {_quoted(config['model'])}{suffix}")
+    lmp.command("pair_coeff * * " + " ".join(config["type_symbols"]))
+
+
+def _mechanical_coupling(lmp, comm, config):
+    calculator = None
+
+    def make_calculator():
+        nonlocal calculator
+        calculator = SubtractiveCalculator(
+            DeepMDBackend(config["model"], charge_spin=config.get("region_charge_spin")),
+            PySCFBackend(**config["qm"]),
+        )
+
+    _root_call(comm, make_calculator)
+    region = FixedRegion(tuple(config["region"]["atom_ids"]), tuple(config["region"]["symbols"]))
+    coupling = ExternalCoupling(
+        lmp, region, calculator, comm=comm, type_symbols=tuple(config["type_symbols"])
+    )
+    return coupling
+
+
+def run(config_path, output, *, restart=None):
+    """Run the established mechanical Hamiltonian with accepted-state checkpoints."""
+    return _run(
+        config_path,
+        output,
+        restart=restart,
+        config_loader=load_config,
+        setup_pair=_mechanical_pair,
+        make_coupling=_mechanical_coupling,
+    )
 
 
 def main(argv=None):

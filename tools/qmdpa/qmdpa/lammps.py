@@ -5,7 +5,7 @@
 
 import numpy as np
 
-from .core import EvaluationError
+from .core import EvaluationError, _evaluate
 from .region import box_matrix, unwrap
 
 
@@ -35,6 +35,8 @@ class ExternalCoupling:
     for verifying that the region symbols agree with the LAMMPS type mapping.
     """
 
+    _calculator_kind = "subtractive"
+
     def __init__(self, lmp, region, calculator, *, fix_id="qmdpa", comm=None, type_symbols=None):
         if not fix_id.isidentifier():
             raise ValueError("fix_id must be an identifier")
@@ -53,7 +55,7 @@ class ExternalCoupling:
         if self.comm.size != world_size:
             raise ValueError("The communicator size does not match the LAMMPS instance")
         if self.comm.rank == 0 and calculator is None:
-            raise ValueError("rank zero requires a subtractive calculator")
+            raise ValueError(f"rank zero requires a {self._calculator_kind} calculator")
         self.type_symbols = None if type_symbols is None else tuple(type_symbols)
         if self.type_symbols is not None and (
             not self.type_symbols or any(not isinstance(s, str) or not s for s in self.type_symbols)
@@ -110,7 +112,13 @@ class ExternalCoupling:
             [self.lmp.decode_image_flags(int(image_flags[row])) for row in selected],
             dtype=np.int64,
         ).reshape(-1, 3)
-        return selected_ids, unwrap(xyz[selected], images, self._cell)
+        return selected_ids, self._prepare_positions(xyz[selected], images)
+
+    def _prepare_positions(self, positions, images):
+        return unwrap(positions, images, self._cell)
+
+    def _evaluate_geometry(self, geometry):
+        return self.calculator.correction(geometry)
 
     def _stop(self, step, error, forces):
         """Invalidate the segment and request return from the native run loop."""
@@ -147,7 +155,7 @@ class ExternalCoupling:
                 if errors:
                     raise EvaluationError("; ".join(errors))
                 geometry = self.region.assemble([data for _, data in packets])
-                correction = self.calculator.correction(geometry)
+                correction = self._evaluate_geometry(geometry)
                 result = (None, correction.energy, correction.forces)
             except Exception as exc:
                 result = (f"{type(exc).__name__}: {exc}", 0.0, None)
@@ -191,3 +199,91 @@ class ExternalCoupling:
             self.failure = f"LAMMPS stopped at step {final}; requested step {start + steps}"
             raise EvaluationError(self.failure)
         return self.last_correction
+
+
+class AdditiveExternalCoupling(ExternalCoupling):
+    """Publish all-atom additive energy and forces through fix external.
+
+    The supplied FixedRegion must cover every atom and fix its element identity.
+    LAMMPS must use a nonperiodic fixed box, pair_style zero, no bonded or kspace
+    styles, and an explicit type_symbols mapping. These conditions are checked
+    at construction and each callback. Owned native forces must be exactly zero
+    before this fix adds its forces; nonzero image flags are rejected.
+
+    The caller must use only NVE integration and no additional force or energy
+    fixes. Native-style and pre-callback force checks cannot classify arbitrary
+    fixes that execute later. This class never creates or changes the integrator.
+    Use run() and accepted checkpoints with the same failure protocol as the
+    subtractive bridge; a failed in-memory step must be discarded.
+    """
+
+    _calculator_kind = "additive"
+
+    def __init__(
+        self,
+        lmp,
+        region,
+        calculator,
+        *,
+        type_symbols,
+        fix_id="qmdpa_additive",
+        comm=None,
+    ):
+        if type_symbols is None:
+            raise ValueError("All-atom additive coupling requires explicit type_symbols")
+        type_symbols = tuple(type_symbols)
+        self._validate_native_assembly(lmp, region, type_symbols)
+        super().__init__(
+            lmp, region, calculator, fix_id=fix_id, comm=comm, type_symbols=type_symbols
+        )
+
+    @staticmethod
+    def _validate_native_assembly(lmp, region, type_symbols):
+        if any(lmp.extract_box()[5]):
+            raise ValueError("All-atom additive coupling requires nonperiodic boundaries")
+        if lmp.extract_global("pair_style") != "zero":
+            raise ValueError("All-atom additive coupling requires exactly pair_style zero")
+        for name in (
+            "bond_style",
+            "angle_style",
+            "dihedral_style",
+            "improper_style",
+            "kspace_style",
+        ):
+            if lmp.extract_global(name) not in (None, "none"):
+                raise ValueError(f"All-atom additive coupling requires no native {name}")
+        if lmp.extract_global("natoms") != len(region.atom_ids):
+            raise ValueError("The additive fixed region must cover the complete LAMMPS atom count")
+        if lmp.extract_global("ntypes") != len(type_symbols):
+            raise ValueError("type_symbols must cover every declared LAMMPS atom type")
+
+    @property
+    def last_energy(self):
+        """Total additive potential energy from the last successful callback."""
+        return self.last_correction
+
+    def _prepare_positions(self, positions, images):
+        if np.any(images != 0):
+            raise ValueError("Nonperiodic additive atoms must have zero image flags")
+        return positions
+
+    def _local_packet(self, nlocal, tags, positions):
+        self._validate_native_assembly(self.lmp, self.region, self.type_symbols)
+        ids, xyz = super()._local_packet(nlocal, tags, positions)
+        if len(ids) != nlocal:
+            unexpected = sorted(
+                {int(atom) for atom in np.asarray(tags).reshape(-1)} - self._members
+            )
+            raise ValueError(f"Unexpected atoms outside the additive fixed region: {unexpected}")
+        if nlocal:
+            native = np.asarray(self.lmp.numpy.extract_atom("f"))
+            if native.ndim != 2 or native.shape[1] != 3 or native.shape[0] < nlocal:
+                raise ValueError("Native force array must cover every owned atom")
+            if not np.isfinite(native[:nlocal]).all() or np.any(native[:nlocal] != 0):
+                raise ValueError(
+                    "Native forces must be finite and exactly zero before additive forces"
+                )
+        return ids, xyz
+
+    def _evaluate_geometry(self, geometry):
+        return _evaluate(self.calculator, geometry)

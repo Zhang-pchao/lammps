@@ -199,3 +199,43 @@ source files and should not be committed.
   model minus an isolated-region model need not cancel even when IDs coincide.
 - Passing numerical tests or completing a trajectory does not establish physical
   suitability of a pretrained model for water or a reaction boundary.
+
+
+## Finite electrostatic additive dynamics
+
+The separate experimental entry point is:
+
+```bash
+python -m qmdpa.additive_cli CONFIG.json --output FRESH_DIRECTORY
+python -m qmdpa.additive_cli CONFIG.json --output NEW_DIRECTORY --restart CHECKPOINT.json
+```
+
+It supplies the entire potential
+`E_DPA(M) + E_QM_emb(Q; q_M) + E_LJ(Q, M)` through an all-atom
+`fix external` callback with `pair_style zero`. The original mechanical
+command and energy definition are unchanged. Both commands use the same
+accepted-frame, collective failure, and checksum-verified restart code.
+
+The configuration declares `hamiltonian: finite-electrostatic-additive`,
+nonperiodic whole-molecule `qm_region` and `environment_region`, all fixed
+environment charges (and optional Gaussian radii) with a source, the
+environment charge/spin, and every directional cross LJ parameter with a
+source. Cross mixing and cutoffs are unsupported. The fixed-charge sum must
+match the environment model charge. No charge response or additional
+environment Coulomb term is included.
+
+Only the explicit `torch-raw-deterministic-v1` inference profile is currently
+supported by this driver. It requires an original `.pt` model, `no_jit=True`,
+strict Torch deterministic algorithms, TF32 off, and disabled DeePMD compiled
+or custom inference paths. Conflicting environment flags fail before backend
+loading; policy changes fail before accepting the force call. There is no AOT
+fallback. These inputs, model/data hashes and software identity participate in
+restart checks. Restart qualification is limited to the same externally frozen
+native library stack; the configuration does not fingerprint every linked
+native dependency. The native box, atom IDs/types, zero native interactions and
+all force shapes are checked at the callback.
+
+This interface remains experimental until real assembly, MPI, failure and
+restart checks pass for the declared deployment. Standalone finite-water
+derivatives do not establish dynamics, physical water accuracy, periodic
+embedding, oxide transfer, or mutual polarization.
