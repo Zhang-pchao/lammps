@@ -40,6 +40,60 @@ corrections only, maps current local atom tags on every callback, and uses the
 LAMMPS communicator. Supply the calculator on rank zero. Call its `run()` method
 so failures caught inside a ctypes callback are re-raised by the driver.
 
+## Standalone electrostatic embedding
+
+`PySCFElectrostaticBackend` evaluates a finite QM system in caller-supplied fixed
+external charges using official PySCF `qmmm`. Given nonperiodic `Geometry` objects
+`qm` and `environment`, a charge array `fixed_charges_e` in environment atom-ID
+order, and a nonempty `charge_source` describing its provenance:
+
+```python
+from qmdpa.embedding import FixedEmbeddingCharges, PySCFElectrostaticBackend
+
+charges = FixedEmbeddingCharges(
+    environment.atom_ids, fixed_charges_e, source=charge_source
+)
+provider = PySCFElectrostaticBackend(
+    charges,
+    xc="pbe",
+    basis="def2-svp",
+    conv_tol=1e-12,
+    conv_tol_grad=1e-8,
+    grid_level=4,
+    nlc_grid_level=4,
+    grid_response=True,
+)
+result = provider.evaluate(qm, environment)
+energy_ev = result.energy_ev
+qm_forces = result.qm_forces_ev_per_angstrom
+environment_forces = result.environment_forces_ev_per_angstrom
+```
+
+The energy includes QM internal energy and QM interactions with the external
+charges. Both force arrays are in eV/Angstrom, with orders recorded in
+`result.qm_atom_ids` and `result.environment_atom_ids`. Pass both current
+geometries on every call; membership, symbols and order remain fixed. SCF failure
+raises an error without reusing a previous result. Charges are in electron units;
+optional `radii_angstrom` sets Gaussian charge widths with exponent
+`zeta = 1 / radius**2`. Charges and widths must be independent of coordinates.
+
+`nlc_grid_level=None` preserves PySCF's nonlocal-correlation grid default;
+ordinary and nonlocal grids are controlled separately. `dict(result.diagnostics)`
+records the method, convergence settings, grids and charge provenance.
+`include_qm_dipole=True` additionally records the QM-only dipole, excluding
+external charges, about the zero Bohr origin; charged-QM dipoles depend on origin.
+The settings above are example inputs, not a qualified dynamics protocol.
+
+This provider is separate from the CLI and `SubtractiveCalculator`. It supplies
+neither environment internal energy nor QM/environment short-range interactions,
+and has no DPA cross-interaction coupling. Inserting its energy into the isolated
+QM subtraction can double-count interactions and requires a separate energy
+model. Periodic electrostatics, coordinate-dependent charges, virtual sites and
+adaptive regions are outside its scope. Finite molecular tests do not qualify
+oxide interfaces, OMat24 model suitability, or hybrid dynamics. Real embedding
+force tests are opt-in with `QMDPA_REAL_EMBEDDING_TESTS=1` for
+`tests/test_embedding.py`.
+
 ## Command line
 
 ```bash
