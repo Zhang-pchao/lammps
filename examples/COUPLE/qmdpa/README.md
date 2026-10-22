@@ -45,9 +45,14 @@ qmdpa run "$WORK_DIR/run.json" --output "$WORK_DIR/first-10"
 ```
 
 The template runs 10 additional NVE steps at 0.25 fs, saving each accepted step.
-PBE/def2-SVP, SCF tolerance `1e-10`, and grid level 4 are engineering settings;
-they do not reproduce OMol25's training reference method. The explicit initial
-velocities are used because the configuration does not request random velocity
+PBE/def2-SVP, SCF tolerance `1e-10`, grid level 4, and explicit
+`grid_response: true` are engineering settings; they do not reproduce OMol25's
+training reference method. Grid response includes
+the integration-grid contribution in the DFT gradient and is part of the saved
+run/restart identity. Earlier finite-difference or dynamics results using the
+implicit PySCF gradient default do not validate this policy; rerun those checks.
+The explicit initial velocities are used because the configuration does not
+request random velocity
 initialization. For an unconditioned model, pass `--unconditioned` to preparation;
 for OMol models retain the explicit neutral-singlet conditions `[0, 1]`.
 

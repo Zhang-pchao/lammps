@@ -126,6 +126,7 @@ def load_config(path):
         "conv_tol": 1e-9,
         "max_cycle": 100,
         "grid_level": 3,
+        "grid_response": True,
         "threads": None,
     }
     qm = config["qm"]
@@ -140,6 +141,8 @@ def load_config(path):
     for key in ("multiplicity", "max_cycle"):
         _positive_integer(qm[key], f"qm.{key}")
     _positive_integer(qm["grid_level"], "qm.grid_level", allow_zero=True)
+    if type(qm["grid_response"]) is not bool:
+        raise ValueError("qm.grid_response must be true or false")
     if qm["threads"] is not None:
         _positive_integer(qm["threads"], "qm.threads")
     if isinstance(qm["conv_tol"], bool) or not np.isfinite(qm["conv_tol"]) or qm["conv_tol"] <= 0:

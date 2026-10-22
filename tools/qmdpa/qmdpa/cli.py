@@ -90,6 +90,7 @@ def run(config_path, output, *, restart=None):
                 json.dumps(
                     {
                         "configuration": config,
+                        "world_size": int(lmp.extract_setting("world_size")),
                         "restart_from": restart,
                         "status": "started",
                         "pressure": "not qualified",

@@ -29,7 +29,11 @@ and an optional cell (row lattice vectors, three-dimensional periodicity).
 `SubtractiveCalculator(low, high, full_low=...)` is the sole subtraction code.
 The full and region providers can have different declared electronic states.
 `DeepMDBackend` accepts `charge_spin` separately from `fparam` and `aparam`;
-`PySCFBackend` converts multiplicity to `spin = N_alpha - N_beta`.
+`PySCFBackend` converts multiplicity to `spin = N_alpha - N_beta`. Its
+`grid_response=True` default includes the response of the numerical DFT
+integration grid in the nuclear gradient. Set it explicitly to `False` only
+when comparing that approximation; tightening SCF alone does not replace the
+grid response or establish force convergence.
 
 `ExternalCoupling(lmp, region, calculator, type_symbols=...)` adds region
 corrections only, maps current local atom tags on every callback, and uses the
@@ -48,8 +52,13 @@ data), `model`, `model_sha256`, `type_symbols` (LAMMPS types in order), `periodi
 (true or false), `region`, `qm`, `timestep_fs`, and `steps`. Paths are relative to
 the configuration. `region` contains `atom_ids`, corresponding `symbols`, and
 `molecules` (lists partitioning those IDs into complete molecules). `qm` contains
-PySCF settings such as `xc`, `basis`, `charge`, `multiplicity`, `conv_tol`, and
-`threads`. Conditional models require separate `full_charge_spin` and
+PySCF settings such as `xc`, `basis`, `charge`, `multiplicity`, `conv_tol`,
+`grid_level`, `grid_response` (a JSON boolean, default `true`), and `threads`.
+The resolved grid-response setting is saved in the manifest and restart physics
+identity. Changing it requires a fresh run. Numerical results obtained before
+this explicit policy must be revalidated with finite differences and NVE; the
+new default does not by itself qualify a grid, force, or trajectory.
+Conditional models require separate `full_charge_spin` and
 `region_charge_spin`. Optional `temperature_K` plus `velocity_seed` initializes
 velocities on a fresh run only. Otherwise the input data velocities are used.
 `sample_interval` defaults to one. `steps` always means additional steps.

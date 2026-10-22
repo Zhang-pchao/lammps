@@ -134,6 +134,17 @@ class ConfigTests(unittest.TestCase):
         self.data.write_bytes(b"different coordinates")
         self.assertNotEqual(first, self.load()["physics_sha256"])
 
+    def test_grid_response_default_is_recorded_and_changes_restart_identity(self):
+        implicit = self.load()
+        self.assertIs(implicit["qm"]["grid_response"], True)
+        self.config["qm"]["grid_response"] = True
+        explicit = self.load()
+        self.assertEqual(implicit["physics_sha256"], explicit["physics_sha256"])
+        self.config["qm"]["grid_response"] = False
+        disabled = self.load()
+        self.assertIs(disabled["qm"]["grid_response"], False)
+        self.assertNotEqual(explicit["physics_sha256"], disabled["physics_sha256"])
+
     def test_region_dp_and_qm_electronic_states_must_match(self):
         for state in ([1, 1], [0, 2]):
             config = deepcopy(self.config)
@@ -174,6 +185,10 @@ class ConfigTests(unittest.TestCase):
             ("conv_tol", float("nan")),
             ("max_cycle", 0),
             ("grid_level", True),
+            ("grid_response", 0),
+            ("grid_response", 1),
+            ("grid_response", "false"),
+            ("grid_response", None),
             ("threads", 0),
             ("xc", ""),
             ("basis", ""),

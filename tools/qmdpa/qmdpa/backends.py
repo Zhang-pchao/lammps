@@ -104,7 +104,9 @@ class PySCFBackend:
 
     Multiplicity is converted to PySCF's ``spin = N_alpha - N_beta``.
     A supplied thread count sets PySCF's process-wide thread count once during
-    construction. No SCF restart or previous-frame force fallback is used.
+    construction. ``grid_response`` explicitly includes the numerical
+    integration grid response in DFT gradients by default. No SCF restart or
+    previous-frame force fallback is used.
     """
 
     def __init__(
@@ -117,12 +119,16 @@ class PySCFBackend:
         conv_tol=1e-9,
         max_cycle=100,
         grid_level=3,
+        grid_response=True,
         threads=None,
     ):
         self.charge = _integer(charge, "Charge")
         self.multiplicity = _integer(multiplicity, "Multiplicity", 1)
         self.max_cycle = _integer(max_cycle, "Maximum SCF cycles", 1)
         self.grid_level = _integer(grid_level, "Integration grid level", 0)
+        if type(grid_response) is not bool:
+            raise ValueError("grid_response must be true or false")
+        self.grid_response = grid_response
         if not isinstance(xc, str) or not xc.strip():
             raise ValueError("The density functional must be a nonempty string")
         if not isinstance(basis, str) or not basis.strip():
@@ -167,7 +173,9 @@ class PySCFBackend:
             energy = method.kernel()
             if not method.converged:
                 raise EvaluationError(f"PySCF SCF did not converge within {self.max_cycle} cycles")
-            gradient = method.nuc_grad_method().kernel()
+            gradient_method = method.nuc_grad_method()
+            gradient_method.grid_response = self.grid_response
+            gradient = gradient_method.kernel()
             forces = -np.asarray(gradient) * (self._hartree_ev / self._bohr_angstrom)
             if forces.shape != geometry.positions.shape:
                 raise EvaluationError("PySCF gradient count does not match the input atoms")

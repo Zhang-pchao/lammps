@@ -114,13 +114,19 @@ class FakeSCF:
         self.converged = converged
         self.grids = SimpleNamespace(level=None)
         self.gradient_called = False
+        self.gradient_response_used = None
+        self.gradient = SimpleNamespace(grid_response=None, kernel=self.gradient_kernel)
 
     def kernel(self):
         return -1.5
 
     def nuc_grad_method(self):
         self.gradient_called = True
-        return SimpleNamespace(kernel=lambda: np.ones((3, 3)))
+        return self.gradient
+
+    def gradient_kernel(self):
+        self.gradient_response_used = self.gradient.grid_response
+        return np.ones((3, 3))
 
 
 def pyscf_modules(method, observed):
@@ -130,7 +136,14 @@ def pyscf_modules(method, observed):
 
     package = ModuleType("pyscf")
     package.gto = SimpleNamespace(M=molecule)
-    package.dft = SimpleNamespace(RKS=lambda mol: method, UKS=lambda mol: method)
+
+    def select_method(kind):
+        observed["method"] = kind
+        return method
+
+    package.dft = SimpleNamespace(
+        RKS=lambda mol: select_method("RKS"), UKS=lambda mol: select_method("UKS")
+    )
     package.lib = SimpleNamespace(num_threads=lambda value: observed.update(threads=value))
     data = ModuleType("pyscf.data")
     data.nist = SimpleNamespace(HARTREE2EV=2.0, BOHR=0.5)
@@ -150,6 +163,26 @@ class PySCFContractTests(unittest.TestCase):
         self.assertEqual(observed["threads"], 2)
         self.assertEqual(result.energy, -3.0)
         np.testing.assert_array_equal(result.forces, -4.0 * np.ones((3, 3)))
+
+    def test_dft_grid_response_is_explicit_for_restricted_and_unrestricted_gradients(self):
+        for multiplicity, kind in ((1, "RKS"), (2, "UKS")):
+            for options, expected in (
+                ({}, True),
+                ({"grid_response": True}, True),
+                ({"grid_response": False}, False),
+            ):
+                with self.subTest(multiplicity=multiplicity, options=options):
+                    method, observed = FakeSCF(), {}
+                    with patch.dict(sys.modules, pyscf_modules(method, observed)):
+                        backend = PySCFBackend(multiplicity=multiplicity, **options)
+                    backend.evaluate(water())
+                    self.assertEqual(observed["method"], kind)
+                    self.assertIs(method.gradient_response_used, expected)
+
+    def test_grid_response_rejects_nonboolean_values_before_importing_pyscf(self):
+        for value in (0, 1, "true", "false", None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "grid_response"):
+                PySCFBackend(grid_response=value)
 
     def test_unconverged_scf_never_returns_a_gradient(self):
         method = FakeSCF(converged=False)
