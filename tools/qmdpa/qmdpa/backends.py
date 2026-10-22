@@ -164,25 +164,30 @@ class PySCFBackend:
         if threads is not None:
             lib.num_threads(threads)
 
+    def _make_method(self, geometry: Geometry):
+        """Build a fresh molecular SCF object with this provider's settings."""
+        molecule = self._gto.M(
+            atom=list(zip(geometry.symbols, geometry.positions.tolist())),
+            unit="Angstrom",
+            basis=self.basis,
+            charge=self.charge,
+            spin=self.multiplicity - 1,
+            verbose=0,
+        )
+        method = self._dft.RKS(molecule) if molecule.spin == 0 else self._dft.UKS(molecule)
+        method.xc = self.xc
+        method.conv_tol = self.conv_tol
+        if self.conv_tol_grad is not None:
+            method.conv_tol_grad = self.conv_tol_grad
+        method.max_cycle = self.max_cycle
+        method.grids.level = self.grid_level
+        return method
+
     def evaluate(self, geometry: Geometry) -> Evaluation:
         if geometry.periodic:
             raise ValueError("The PySCF molecular backend requires an isolated geometry")
         try:
-            molecule = self._gto.M(
-                atom=list(zip(geometry.symbols, geometry.positions.tolist())),
-                unit="Angstrom",
-                basis=self.basis,
-                charge=self.charge,
-                spin=self.multiplicity - 1,
-                verbose=0,
-            )
-            method = self._dft.RKS(molecule) if molecule.spin == 0 else self._dft.UKS(molecule)
-            method.xc = self.xc
-            method.conv_tol = self.conv_tol
-            if self.conv_tol_grad is not None:
-                method.conv_tol_grad = self.conv_tol_grad
-            method.max_cycle = self.max_cycle
-            method.grids.level = self.grid_level
+            method = self._make_method(geometry)
             energy = method.kernel()
             if not method.converged:
                 raise EvaluationError(f"PySCF SCF did not converge within {self.max_cycle} cycles")
