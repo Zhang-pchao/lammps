@@ -153,8 +153,11 @@ def load_additive_config(path):
         config["temperature_K"] = _positive_real(config["temperature_K"], "temperature_K")
         _positive_integer(config["velocity_seed"], "velocity_seed")
     config["software"] = software_identity()
-    for package in ("torch", "mpi4py"):
-        config["software"]["packages"][package] = importlib.metadata.version(package)
+    config["software"]["packages"]["torch"] = importlib.metadata.version("torch")
+    try:
+        config["software"]["packages"]["mpi4py"] = importlib.metadata.version("mpi4py")
+    except importlib.metadata.PackageNotFoundError:
+        config["software"]["packages"]["mpi4py"] = None
     physics = {
         key: value
         for key, value in config.items()

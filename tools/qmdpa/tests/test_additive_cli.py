@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import unittest
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -70,6 +71,36 @@ class AdditiveConfigTests(unittest.TestCase):
         self.assertIsNone(loaded["qm"]["nlc_grid_level"])
         self.config.update(steps=10, sample_interval=2)
         self.assertEqual(loaded["physics_sha256"], self.load()["physics_sha256"])
+
+    def test_missing_optional_mpi4py_records_null_identity(self):
+        self.path.write_text(json.dumps(self.config))
+
+        def version(package):
+            if package == "mpi4py":
+                raise PackageNotFoundError(package)
+            return "test"
+
+        with patch("qmdpa.additive_config.importlib.metadata.version", side_effect=version):
+            loaded = load_additive_config(self.path)
+            repeated = load_additive_config(self.path)
+        self.assertIsNone(loaded["software"]["packages"]["mpi4py"])
+        self.assertEqual(loaded["software"]["packages"]["torch"], "test")
+        self.assertEqual(loaded["physics_sha256"], repeated["physics_sha256"])
+        self.assertNotEqual(loaded["physics_sha256"], self.load()["physics_sha256"])
+
+    def test_missing_required_torch_is_reported(self):
+        self.path.write_text(json.dumps(self.config))
+
+        def version(package):
+            if package == "torch":
+                raise PackageNotFoundError(package)
+            return "test"
+
+        with (
+            patch("qmdpa.additive_config.importlib.metadata.version", side_effect=version),
+            self.assertRaises(PackageNotFoundError),
+        ):
+            load_additive_config(self.path)
 
     def test_each_physical_choice_changes_identity(self):
         first = self.load()["physics_sha256"]
