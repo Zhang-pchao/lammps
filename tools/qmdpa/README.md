@@ -94,6 +94,52 @@ oxide interfaces, OMat24 model suitability, or hybrid dynamics. Real embedding
 force tests are opt-in with `QMDPA_REAL_EMBEDDING_TESTS=1` for
 `tests/test_embedding.py`.
 
+## Finite additive electrostatic potential
+
+`qmdpa.additive` composes a separately declared finite Hamiltonian:
+
+```text
+E_total = E_DPA(environment) + E_QM_embedded(QM; fixed charges)
+          + E_cross_LJ(QM, environment)
+```
+
+DeePMD receives only the environment. The embedded term includes QM internal
+energy and its interaction with external charges, including reaction forces on
+those charge sites. No full-system DPA or extra environment Coulomb term is
+added. A caller must justify the charge and cross-parameter model separately.
+
+```python
+from qmdpa.additive import AdditiveCalculator, CrossLennardJones
+
+cross = CrossLennardJones(cross_parameters, source=parameter_source)
+calculator = AdditiveCalculator(
+    environment_dpa, provider, cross,
+    qm_atom_ids=qm.atom_ids, environment_atom_ids=environment.atom_ids,
+)
+terms = calculator.evaluate_terms(full_geometry)
+energy_ev = terms.total.energy
+forces = terms.total.forces
+```
+
+`cross_parameters` maps each `(QM_symbol, environment_symbol)` to
+`(epsilon_eV, sigma_Angstrom)`. Every occurring pair needs explicit values,
+including deliberately zero epsilon; there are no mixing rules, cutoffs or
+within-region LJ interactions. Parameters and their source are immutable.
+The potential is `4*epsilon*((sigma/r)**12-(sigma/r)**6)` for each cross pair.
+Coincident sites and invalid numerical output are rejected.
+
+The two fixed, nonempty regions must be disjoint and cover every input atom.
+Full input order may change; providers always receive their configured atom
+orders and the total forces follow the full input order. Element identity
+cannot change. `terms.environment`, `terms.embedded` and `terms.cross` expose
+the independent contributions, while `evaluate()` returns only `terms.total`.
+The caller owns provider lifetimes. Periodic geometries are unsupported.
+
+This standalone calculator is separate from the subtractive CLI/LAMMPS bridge
+below. It does not enable electrostatic dynamics. A future all-atom adapter
+must supply the entire additive energy and forces with native pair energy zero,
+and pass its own communication, failure and restart checks.
+
 ## Command line
 
 ```bash

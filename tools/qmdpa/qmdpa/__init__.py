@@ -4,6 +4,16 @@
 # Author: Pengchao Zhang <pczhang1997@gmail.com>
 """Fixed-region QM/DPA coupling for the LAMMPS library interface."""
 
+from .additive import AdditiveCalculator, AdditiveTerms, CrossLennardJones
 from .core import Backend, Evaluation, EvaluationError, Geometry, SubtractiveCalculator
 
-__all__ = ["Backend", "Evaluation", "EvaluationError", "Geometry", "SubtractiveCalculator"]
+__all__ = [
+    "AdditiveCalculator",
+    "AdditiveTerms",
+    "Backend",
+    "CrossLennardJones",
+    "Evaluation",
+    "EvaluationError",
+    "Geometry",
+    "SubtractiveCalculator",
+]
