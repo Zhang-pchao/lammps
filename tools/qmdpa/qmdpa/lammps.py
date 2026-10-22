@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Collective LAMMPS external-force coupling with explicit failure handling."""
 
+import time
+
 import numpy as np
 
 from .core import EvaluationError, _evaluate
@@ -64,6 +66,7 @@ class ExternalCoupling:
         self.failure = None
         self.last_step = None
         self.last_correction = None
+        self.reset_statistics()
         self._box = lmp.extract_box()
         self._cell = box_matrix(self._box)
         self._members = set(region.atom_ids)
@@ -71,6 +74,58 @@ class ExternalCoupling:
         lmp.command(f"fix {fix_id} all external pf/callback 1 1")
         lmp.command(f"fix_modify {fix_id} energy yes virial no")
         lmp.set_fix_external_callback(fix_id, self._callback)
+
+    def reset_statistics(self):
+        """Clear measurements and the previous attempted input, without resuming a failure."""
+        self._statistics = {
+            "callback_calls": 0,
+            "calculator_attempts": 0,
+            "calculator_successes": 0,
+            "calculator_failures": 0,
+            "consecutive_repeated_geometry_attempts": 0,
+            "calculator_wall_seconds": 0.0,
+        }
+        self._previous_geometry = None
+
+    def statistics(self):
+        """Return a detached JSON-safe snapshot; calculator counts belong to rank zero.
+
+        Repeats compare consecutive calculator attempts exactly, including failed
+        attempts. A successful calculator return need not become an accepted
+        callback or checkpoint. Times are host wall seconds, not CPU or GPU time.
+        """
+        return {"schema_version": 1, "rank": int(self.comm.rank), **self._statistics}
+
+    def _measured_evaluate(self, geometry):
+        previous = self._previous_geometry
+        if (
+            previous is not None
+            and geometry.atom_ids == previous.atom_ids
+            and geometry.symbols == previous.symbols
+            and np.array_equal(geometry.positions, previous.positions)
+            and (
+                (geometry.cell is None and previous.cell is None)
+                or (
+                    geometry.cell is not None
+                    and previous.cell is not None
+                    and np.array_equal(geometry.cell, previous.cell)
+                )
+            )
+        ):
+            self._statistics["consecutive_repeated_geometry_attempts"] += 1
+        self._previous_geometry = geometry
+        self._statistics["calculator_attempts"] += 1
+        started = time.perf_counter()
+        try:
+            result = self._evaluate_geometry(geometry)
+        except Exception:
+            self._statistics["calculator_failures"] += 1
+            raise
+        else:
+            self._statistics["calculator_successes"] += 1
+            return result
+        finally:
+            self._statistics["calculator_wall_seconds"] += time.perf_counter() - started
 
     def _local_packet(self, nlocal, tags, positions):
         box = self.lmp.extract_box()
@@ -136,6 +191,7 @@ class ExternalCoupling:
         self.lmp.force_timeout()
 
     def _callback(self, caller, step, nlocal, tags, positions, forces):
+        self._statistics["callback_calls"] += 1
         # Every rank participates even when local validation or QM fails.
         try:
             if nlocal:
@@ -155,7 +211,7 @@ class ExternalCoupling:
                 if errors:
                     raise EvaluationError("; ".join(errors))
                 geometry = self.region.assemble([data for _, data in packets])
-                correction = self._evaluate_geometry(geometry)
+                correction = self._measured_evaluate(geometry)
                 result = (None, correction.energy, correction.forces)
             except Exception as exc:
                 result = (f"{type(exc).__name__}: {exc}", 0.0, None)

@@ -6,6 +6,7 @@
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from .backends import DeepMDBackend, PySCFBackend
@@ -28,9 +29,35 @@ def _write_manifest(output, config, *, world_size, restart):
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
+def _timed_call(timings, name, function, *args):
+    """Accumulate host wall time for a call, including a failed call."""
+    started = time.perf_counter()
+    try:
+        return function(*args)
+    finally:
+        timings[name] += time.perf_counter() - started
+
+
 def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupling):
     """Run additional steps; each successful sample has a matching restart pair."""
     from lammps import lammps
+
+    initialization_started = time.perf_counter()
+    timings = {
+        "initialization_wall_seconds": None,
+        "run_wall_seconds": 0.0,
+        "checkpoint_wall_seconds": 0.0,
+    }
+    coupling = None
+
+    def metrics():
+        return {
+            "schema_version": 1,
+            "scope": "owner_rank_host_wall",
+            "clock": "time.perf_counter",
+            **timings,
+            "coupling": None if coupling is None else coupling.statistics(),
+        }
 
     lmp = lammps(cmdargs=["-log", "none", "-screen", "none", "-nocite"])
     comm = lmp.get_mpi_comm()
@@ -87,7 +114,8 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                 restart=restart,
             ),
         )
-        coupling.run(0)
+        timings["initialization_wall_seconds"] = time.perf_counter() - initialization_started
+        _timed_call(timings, "run_wall_seconds", coupling.run, 0)
         initial = _frame(lmp, comm)
         if previous is not None:
             _root_call(comm, lambda: _compare_restart(initial, previous))
@@ -95,11 +123,16 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         remaining = config["steps"]
         while remaining:
             count = min(remaining, config["sample_interval"])
-            coupling.run(count)
+            _timed_call(timings, "run_wall_seconds", coupling.run, count)
             frame = _frame(lmp, comm)
             step = int(lmp.extract_global("ntimestep"))
             restart_path = output / f"restart-{step:012d}.bin"
-            lmp.command(f"write_restart {_quoted(restart_path)}")
+            _timed_call(
+                timings,
+                "checkpoint_wall_seconds",
+                lmp.command,
+                f"write_restart {_quoted(restart_path)}",
+            )
 
             def save_accepted():
                 checkpoint = {
@@ -115,7 +148,7 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                 with (output / "frames.jsonl").open("a") as stream:
                     stream.write(json.dumps(frame) + "\n")
 
-            _root_call(comm, save_accepted)
+            _timed_call(timings, "checkpoint_wall_seconds", _root_call, comm, save_accepted)
             remaining -= count
         _root_call(
             comm,
@@ -126,6 +159,7 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                         "steps": config["steps"],
                         "final_step": int(lmp.extract_global("ntimestep")),
                         "scientific_acceptance": "not assessed",
+                        "metrics": metrics(),
                     },
                     indent=2,
                 )
@@ -133,6 +167,8 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             ),
         )
     except Exception as exc:
+        if timings["initialization_wall_seconds"] is None:
+            timings["initialization_wall_seconds"] = time.perf_counter() - initialization_started
         failure_message = f"{type(exc).__name__}: {exc}"
         if output_created:
             try:
@@ -144,6 +180,7 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                                 "status": "failed",
                                 "error": failure_message,
                                 "recovery": "Use the last accepted checkpoint; discard in-memory state.",
+                                "metrics": metrics(),
                             },
                             indent=2,
                         )

@@ -8,8 +8,10 @@ The driver fixture deliberately swallows uncaught callback exceptions, as a
 ctypes callback does. Tests must detect failure through the coupling protocol.
 """
 
+import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -145,6 +147,164 @@ class BridgeTests(unittest.TestCase):
     def region(self):
         return FixedRegion((22, 5), ("O", "H"))
 
+    def test_statistics_count_consecutive_repeats_without_memoization(self):
+        geometries = []
+
+        def calculate(geometry):
+            geometries.append(geometry)
+            return ConstantCorrection().correction(geometry)
+
+        lmp = Driver()
+        lmp.positions[:] = [[0.4, 0, 0], [9, 0, 0], [0.2, 0, 0]]
+        coupling = ExternalCoupling(lmp, self.region(), SimpleNamespace(correction=calculate))
+        clock = [10, 10.25, 11, 11.5, 12, 12.75, 13, 14, 15, 16.25]
+        with patch("qmdpa.lammps.time.perf_counter", side_effect=clock) as timer:
+            coupling.run(0)
+            # Local reorder and environment movement preserve the assembled region.
+            lmp.tags[:] = [22, 5, 99]
+            lmp.positions[:] = [[0.2, 0, 0], [0.4, 0, 0], [999, 0, 0]]
+            coupling.run(1)
+            lmp.positions[0, 0] = np.nextafter(0.2, np.inf)
+            coupling.run(1)
+            lmp.positions[0, 0] = 0.2
+            coupling.run(1)
+            coupling.run(1)
+        self.assertEqual(timer.call_count, 10)
+        self.assertEqual(len(geometries), 5)
+        np.testing.assert_array_equal(geometries[0].positions, geometries[1].positions)
+        np.testing.assert_array_equal(geometries[0].positions, geometries[3].positions)
+        stats = coupling.statistics()
+        self.assertEqual(
+            stats,
+            {
+                "schema_version": 1,
+                "rank": 0,
+                "callback_calls": 5,
+                "calculator_attempts": 5,
+                "calculator_successes": 5,
+                "calculator_failures": 0,
+                "consecutive_repeated_geometry_attempts": 2,
+                "calculator_wall_seconds": 3.75,
+            },
+        )
+        json.dumps(stats, allow_nan=False)
+        stats["calculator_attempts"] = -1
+        self.assertEqual(coupling.statistics()["calculator_attempts"], 5)
+        self.assertEqual(lmp.swallowed, [])
+
+    def test_failed_repeat_time_and_reset_preserve_failed_lifecycle(self):
+        calls = []
+
+        def calculate(geometry):
+            calls.append(geometry)
+            if len(calls) == 2:
+                raise EvaluationError("SCF failed")
+            return ConstantCorrection().correction(geometry)
+
+        lmp = Driver()
+        coupling = ExternalCoupling(lmp, self.region(), SimpleNamespace(correction=calculate))
+        with patch("qmdpa.lammps.time.perf_counter", side_effect=[1, 1.5, 2, 3.25]):
+            coupling.run(0)
+            with self.assertRaisesRegex(EvaluationError, "SCF failed"):
+                coupling.run(1)
+        stats = coupling.statistics()
+        self.assertEqual(stats["callback_calls"], 2)
+        self.assertEqual(stats["calculator_attempts"], 2)
+        self.assertEqual(stats["calculator_successes"], 1)
+        self.assertEqual(stats["calculator_failures"], 1)
+        self.assertEqual(stats["consecutive_repeated_geometry_attempts"], 1)
+        self.assertEqual(stats["calculator_wall_seconds"], 1.75)
+        failure = coupling.failure
+        commands = list(lmp.commands)
+        coupling.reset_statistics()
+        self.assertEqual(coupling.failure, failure)
+        self.assertEqual((coupling.last_step, coupling.last_correction), (0, 7.5))
+        with self.assertRaisesRegex(EvaluationError, "SCF failed"):
+            coupling.run(1)
+        self.assertEqual(lmp.commands, commands)
+        self.assertEqual(len(calls), 2)
+        for key, value in coupling.statistics().items():
+            if key not in ("schema_version", "rank"):
+                self.assertEqual(value, 0)
+        self.assertEqual(lmp.swallowed, [])
+
+    def test_reset_statistics_forgets_repeat_baseline_only(self):
+        lmp = Driver()
+        coupling = ExternalCoupling(lmp, self.region(), ConstantCorrection())
+        with patch("qmdpa.lammps.time.perf_counter", side_effect=[0, 0, 1, 1, 2, 2]):
+            coupling.run(0)
+            coupling.run(1)
+            self.assertEqual(coupling.statistics()["consecutive_repeated_geometry_attempts"], 1)
+            coupling.reset_statistics()
+            self.assertIsNone(coupling.failure)
+            self.assertEqual((coupling.last_step, coupling.last_correction), (1, 7.5))
+            coupling.run(0)
+        stats = coupling.statistics()
+        self.assertEqual(stats["callback_calls"], 1)
+        self.assertEqual(stats["calculator_attempts"], 1)
+        self.assertEqual(stats["calculator_successes"], 1)
+        self.assertEqual(stats["consecutive_repeated_geometry_attempts"], 0)
+        self.assertEqual(stats["calculator_wall_seconds"], 0)
+
+    def test_statistics_are_local_and_add_no_collectives(self):
+        class CountingRoot(EmptyRootComm):
+            def __init__(self):
+                self.calls = []
+
+            def gather(self, value, root=0):
+                self.calls.append("gather")
+                return super().gather(value, root=root)
+
+            def bcast(self, value, root=0):
+                self.calls.append("bcast")
+                return super().bcast(value, root=root)
+
+            def allgather(self, value):
+                raise AssertionError("Statistics must not add collectives")
+
+        comm = CountingRoot()
+        root = ExternalCoupling(
+            Driver(empty=True, world_size=2),
+            self.region(),
+            ConstantCorrection(),
+            comm=comm,
+        )
+        with patch("qmdpa.lammps.time.perf_counter", side_effect=[4, 4.5]):
+            root.run(0)
+        self.assertEqual(root.statistics()["calculator_attempts"], 1)
+        self.assertEqual(root.statistics()["callback_calls"], 1)
+        root.reset_statistics()
+        self.assertEqual(comm.calls, ["gather", "bcast", "gather", "bcast"])
+
+        class CountingWorker(WorkerComm):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            def gather(self, value, root=0):
+                self.calls.append("gather")
+                return super().gather(value, root=root)
+
+            def bcast(self, value, root=0):
+                self.calls.append("bcast")
+                return super().bcast(value, root=root)
+
+        comm = CountingWorker()
+        worker = ExternalCoupling(Driver(empty=True, world_size=2), self.region(), None, comm=comm)
+        with patch("qmdpa.lammps.time.perf_counter") as timer:
+            with self.assertRaisesRegex(EvaluationError, "Remote force buffer"):
+                worker.run(0)
+            stats = worker.statistics()
+            worker.reset_statistics()
+        timer.assert_not_called()
+        self.assertEqual(stats["rank"], 1)
+        self.assertEqual(stats["callback_calls"], 1)
+        self.assertEqual(stats["calculator_attempts"], 0)
+        self.assertEqual(stats["calculator_successes"], 0)
+        self.assertEqual(stats["calculator_failures"], 0)
+        self.assertEqual(stats["calculator_wall_seconds"], 0)
+        self.assertEqual(comm.calls, ["gather", "bcast", "gather", "bcast"])
+
     def test_correction_is_mapped_by_current_tags_and_environment_is_zero(self):
         lmp = Driver()
         coupling = ExternalCoupling(lmp, self.region(), ConstantCorrection())
@@ -178,8 +338,17 @@ class BridgeTests(unittest.TestCase):
         lmp = Driver()
         coupling = ExternalCoupling(lmp, self.region(), ConstantCorrection())
         lmp.images = None
-        with self.assertRaises(EvaluationError):
+        with (
+            patch("qmdpa.lammps.time.perf_counter") as timer,
+            self.assertRaises(EvaluationError),
+        ):
             coupling.run(0)
+        timer.assert_not_called()
+        stats = coupling.statistics()
+        self.assertEqual(stats["callback_calls"], 1)
+        self.assertEqual(stats["calculator_attempts"], 0)
+        self.assertEqual(stats["calculator_failures"], 0)
+        self.assertEqual(stats["calculator_wall_seconds"], 0)
         self.assertTrue(lmp.timeout)
         self.assertEqual(lmp.swallowed, [])
 
@@ -190,8 +359,17 @@ class BridgeTests(unittest.TestCase):
 
         lmp = Driver()
         coupling = ExternalCoupling(lmp, BrokenRegion((22, 5), ("O", "H")), ConstantCorrection())
-        with self.assertRaisesRegex(EvaluationError, "local force mapping"):
+        with (
+            patch("qmdpa.lammps.time.perf_counter", side_effect=[0, 0.5]),
+            self.assertRaisesRegex(EvaluationError, "local force mapping"),
+        ):
             coupling.run(1)
+        stats = coupling.statistics()
+        self.assertEqual(stats["calculator_attempts"], 1)
+        self.assertEqual(stats["calculator_successes"], 1)
+        self.assertEqual(stats["calculator_failures"], 0)
+        self.assertEqual(stats["calculator_wall_seconds"], 0.5)
+        self.assertIsNone(coupling.last_step)
         self.assertTrue(lmp.timeout)
         self.assertEqual(lmp.swallowed, [])
 
@@ -249,8 +427,13 @@ class BridgeTests(unittest.TestCase):
         coupling = ExternalCoupling(lmp, self.region(), ConstantCorrection())
         with self.assertRaisesRegex(EvaluationError, "requested step 5"):
             coupling.run(5)
+        stats = coupling.statistics()
+        self.assertEqual(stats["calculator_attempts"], 1)
+        self.assertEqual(stats["calculator_successes"], 1)
+        self.assertEqual(stats["calculator_failures"], 0)
         with self.assertRaises(EvaluationError):
             coupling.run(1)
+        self.assertEqual(coupling.statistics(), stats)
 
     def test_changed_box_and_invalid_steps_are_rejected(self):
         lmp = Driver()

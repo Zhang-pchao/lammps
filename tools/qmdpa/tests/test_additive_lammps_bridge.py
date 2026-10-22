@@ -146,6 +146,11 @@ class AdditiveBridgeTests(unittest.TestCase):
             calculator.geometries[-1].positions, [[2, 0, 0], [5, 0, 0], [9, 0, 0]]
         )
         self.assertEqual(len(calculator.geometries), 2)
+        stats = bridge.statistics()
+        self.assertEqual(stats["calculator_attempts"], 2)
+        self.assertEqual(stats["calculator_successes"], 2)
+        self.assertEqual(stats["calculator_failures"], 0)
+        self.assertEqual(stats["consecutive_repeated_geometry_attempts"], 0)
         self.assertEqual(lmp.swallowed, [])
 
     def test_large_atom_ids_are_preserved_through_gather_and_scatter(self):
@@ -379,6 +384,10 @@ class AdditiveBridgeTests(unittest.TestCase):
                 with self.assertRaises(EvaluationError):
                     bridge.run(1)
                 self.assertIsNone(bridge.last_energy)
+                stats = bridge.statistics()
+                self.assertEqual(stats["calculator_attempts"], 1)
+                self.assertEqual(stats["calculator_successes"], 0)
+                self.assertEqual(stats["calculator_failures"], 1)
                 self.assertEqual(lmp.swallowed, [])
         lmp = AdditiveDriver()
 

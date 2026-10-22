@@ -242,3 +242,41 @@ convergence, long-time dynamics or physical water qualification. Targeted native
 sorting/migration evidence, periodic embedding, oxide transfer and mutual
 polarization remain separate requirements. Portable inputs and detailed gates
 are maintained in the companion qm-dpa repository's benchmarks/water directory.
+
+## Execution measurements
+
+Both CLI commands add a `metrics` snapshot to `result.json` on completion and
+to `failure.json` when the output directory has been created. The schema version
+is 1. Measurements restart from zero for each new CLI invocation, including a
+continuation. They do not change the Hamiltonian, checkpoint schema or force
+evaluation policy.
+
+`scope: owner_rank_host_wall` means the recorded intervals use
+`time.perf_counter` on rank zero, without an MPI reduction or additional
+synchronization. They are neither CPU usage nor GPU kernel timings, and the
+intervals are not a complete job-time decomposition:
+
+- `initialization_wall_seconds`: native LAMMPS construction, configuration,
+  restart verification, provider construction and setup through manifest writing,
+  before the initial `run 0`; includes a failed initialization.
+- `run_wall_seconds`: all coupling `run` calls, including `run 0`, setup,
+  force callbacks and failed calls.
+- `checkpoint_wall_seconds`: native restart writes and the existing collective
+  companion checksum/JSON/frame writes, including failures. Separate frame
+  gathering, final report writing and teardown are excluded.
+
+The nested `coupling` snapshot reports `rank`, local `callback_calls`, and
+root-only `calculator_attempts`, `calculator_successes`,
+`calculator_failures`, `calculator_wall_seconds` and
+`consecutive_repeated_geometry_attempts`. The calculator interval wraps the
+adapter evaluation after geometry assembly. A successful return is not yet an
+accepted callback or checkpoint: subsequent force mapping or native integration
+can still fail. These counters do not separate DeePMD, SCF or gradient work.
+
+A repeated input has exactly equal assembled IDs, symbols, coordinates and cell
+to the immediately preceding calculator attempt, including failed attempts.
+There is no tolerance, memoization or reuse of returned forces. Callbacks rejected
+before the calculator do not replace that previous attempted input. The bridge's
+`statistics()` returns a detached JSON-safe snapshot; `reset_statistics()`
+clears only measurements and the previous-input reference, never a failure,
+accepted state or simulation state.
