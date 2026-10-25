@@ -141,22 +141,28 @@ def _evaluate(backend, geometry):
 
 
 class SubtractiveCalculator:
-    """Combine full low-level energy with an isolated-region correction.
+    """Combine full low-level energy with an explicitly bounded region correction.
 
     ``low`` evaluates the isolated QM region. ``full_low`` may be a separate
     instance with different full-system charge/spin or atomic parameters.
     It defaults to ``low`` when those settings are identical.
     """
 
-    def __init__(self, low: Backend, high: Backend, *, full_low: Backend | None = None):
+    def __init__(self, low: Backend, high: Backend, *, full_low: Backend | None = None,
+                 region_boundary="isolated"):
+        if region_boundary not in ("isolated", "periodic-same-cell"):
+            raise ValueError("region_boundary must be isolated or periodic-same-cell")
+        self.region_boundary = region_boundary
         self.low = low
         self.high = high
         self.full_low = low if full_low is None else full_low
 
     def correction(self, qm_geometry: Geometry) -> Evaluation:
         """Return high minus low, in the supplied QM atom order."""
-        if qm_geometry.periodic:
+        if self.region_boundary == "isolated" and qm_geometry.periodic:
             raise ValueError("The QM correction requires an explicitly isolated geometry")
+        if self.region_boundary == "periodic-same-cell" and not qm_geometry.periodic:
+            raise ValueError("The periodic QM correction requires an explicit cell")
         low = _evaluate(self.low, qm_geometry)
         high = _evaluate(self.high, qm_geometry)
         return Evaluation(high.energy - low.energy, high.forces - low.forces)
@@ -168,6 +174,11 @@ class SubtractiveCalculator:
         only by periodic image shifts. Their mapping has unit Cartesian
         derivative; adaptive membership and link atoms are not supported.
         """
+        if self.region_boundary == "periodic-same-cell" and (
+            not full_geometry.periodic or not qm_geometry.periodic
+            or not np.array_equal(full_geometry.cell, qm_geometry.cell)
+        ):
+            raise ValueError("Periodic full and QM geometries must use the same cell")
         selected = full_geometry.select(qm_geometry.atom_ids)
         if selected.symbols != qm_geometry.symbols:
             raise ValueError("QM and full-system element symbols differ for the same IDs")

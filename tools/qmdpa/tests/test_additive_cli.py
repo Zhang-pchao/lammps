@@ -64,6 +64,21 @@ class AdditiveConfigTests(unittest.TestCase):
         with patch("qmdpa.additive_config.importlib.metadata.version", return_value="test"):
             return load_additive_config(self.path)
 
+    def test_explicit_provider_matches_default_and_records_derivative_scope(self):
+        baseline = self.load()
+        self.config["provider"] = {
+            "engine": "pyscf",
+            "device": "cpu",
+            "state": {"method": "ground"},
+        }
+        explicit = self.load()
+        self.assertEqual(baseline["physics_sha256"], explicit["physics_sha256"])
+        self.assertEqual(explicit["provider"], self.config["provider"])
+        self.assertEqual(explicit["provider_contract"]["force_coordinates"], ["qm", "environment"])
+        self.config["provider"]["device"] = "gpu"
+        with self.assertRaisesRegex(ValueError, "No implemented provider combination"):
+            self.load()
+
     def test_paths_defaults_and_budget_identity(self):
         loaded = self.load()
         self.assertEqual(loaded["model"], str(self.root / "model.pt"))

@@ -11,11 +11,13 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from qmdpa.cli import _write_manifest
 from qmdpa.config import file_digest, load_config
+from qmdpa.providers import make_qm_provider
 from qmdpa.runtime import (
     _compare_restart,
     _frame,
@@ -89,6 +91,21 @@ class ConfigTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.config if config is None else config))
         return load_config(self.path)
 
+    def test_explicit_provider_matches_default_and_records_derivative_scope(self):
+        baseline = self.load()
+        self.config["provider"] = {
+            "engine": "pyscf",
+            "device": "cpu",
+            "state": {"method": "ground"},
+        }
+        explicit = self.load()
+        self.assertEqual(baseline["physics_sha256"], explicit["physics_sha256"])
+        self.assertEqual(explicit["provider"], self.config["provider"])
+        self.assertEqual(explicit["provider_contract"]["force_coordinates"], ["qm"])
+        self.config["provider"]["device"] = "gpu"
+        with self.assertRaisesRegex(ValueError, "No implemented provider combination"):
+            self.load()
+
     def test_paths_resolve_against_configuration_and_hash_actual_bytes(self):
         loaded = self.load()
         self.assertEqual(loaded["model"], str(self.model))
@@ -158,6 +175,28 @@ class ConfigTests(unittest.TestCase):
         self.config["qm"]["conv_tol_grad"] = 1e-8
         self.assertNotEqual(explicit["physics_sha256"], self.load()["physics_sha256"])
 
+    def test_nlc_grid_default_identity_and_explicit_provider_forwarding(self):
+        implicit = self.load()
+        self.assertNotIn("nlc_grid_level", implicit["qm"])
+        self.config["qm"]["nlc_grid_level"] = None
+        explicit_default = self.load()
+        self.assertEqual(implicit["qm"], explicit_default["qm"])
+        self.assertEqual(implicit["physics_sha256"], explicit_default["physics_sha256"])
+        identities = {implicit["physics_sha256"]}
+        for level in (0, 4):
+            self.config["qm"]["nlc_grid_level"] = level
+            loaded = self.load()
+            self.assertEqual(loaded["qm"]["nlc_grid_level"], level)
+            self.assertEqual(loaded["qm"]["grid_level"], 3)
+            self.assertNotIn(loaded["physics_sha256"], identities)
+            identities.add(loaded["physics_sha256"])
+            with patch("qmdpa.backends.PySCFBackend") as backend:
+                self.assertIs(
+                    make_qm_provider(loaded["qm"], provider=loaded["provider"]),
+                    backend.return_value,
+                )
+            backend.assert_called_once_with(**loaded["qm"])
+
     def test_region_dp_and_qm_electronic_states_must_match(self):
         for state in ([1, 1], [0, 2]):
             config = deepcopy(self.config)
@@ -204,6 +243,13 @@ class ConfigTests(unittest.TestCase):
             ("conv_tol_grad", "1e-7"),
             ("max_cycle", 0),
             ("grid_level", True),
+            ("nlc_grid_level", True),
+            ("nlc_grid_level", False),
+            ("nlc_grid_level", -1),
+            ("nlc_grid_level", 1.0),
+            ("nlc_grid_level", "4"),
+            ("nlc_grid_level", float("nan")),
+            ("nlc_grid_level", float("inf")),
             ("grid_response", 0),
             ("grid_response", 1),
             ("grid_response", "false"),

@@ -151,9 +151,10 @@ class CrossLennardJonesTests(unittest.TestCase):
             for atom_id, force in zip(ids, forces)
         }
         force = np.array([expected[atom_id] for atom_id in atoms.atom_ids])
-        energy = lambda value: (
-            backend.evaluate(value.select(QM_IDS), value.select(ENVIRONMENT_IDS)).energy_ev
-        )
+
+        def energy(value):
+            return backend.evaluate(value.select(QM_IDS), value.select(ENVIRONMENT_IDS)).energy_ev
+
         for step in (1e-4, 5e-5):
             with self.subTest(step=step):
                 np.testing.assert_allclose(

@@ -106,7 +106,7 @@ class DriverMetricsTests(unittest.TestCase):
                 raise RuntimeError("provider initialization failed")
             return Coupling(lmp)
 
-        def frame(lmp, comm):
+        def frame(lmp, comm, *, periodic=False):
             clock.now += 19.0
             return {
                 "step": lmp.step,

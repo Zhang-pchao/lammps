@@ -159,6 +159,8 @@ class FakeSCF:
     def __init__(self, converged=True):
         self.converged = converged
         self.grids = SimpleNamespace(level=None)
+        self.nlcgrids = SimpleNamespace(level=2)
+        self.nlc_grid_level_used = None
         self.gradient_called = False
         self.conv_tol_grad = None
         self.orbital_gradient_tolerance_used = None
@@ -167,6 +169,7 @@ class FakeSCF:
 
     def kernel(self):
         self.orbital_gradient_tolerance_used = self.conv_tol_grad
+        self.nlc_grid_level_used = self.nlcgrids.level
         return -1.5
 
     def nuc_grad_method(self):
@@ -249,6 +252,38 @@ class PySCFContractTests(unittest.TestCase):
         for tolerance in (True, 0, -1, float("inf"), float("nan"), "1e-7"):
             with self.subTest(tolerance=tolerance), self.assertRaisesRegex(ValueError, "tolerance"):
                 PySCFBackend(conv_tol_grad=tolerance)
+
+    def test_nlc_grid_is_independent_and_reaches_restricted_and_unrestricted_scf(self):
+        for multiplicity, kind in ((1, "RKS"), (2, "UKS")):
+            for options, expected in (
+                ({}, 2),
+                ({"nlc_grid_level": None}, 2),
+                ({"nlc_grid_level": 0}, 0),
+                ({"nlc_grid_level": 5}, 5),
+                ({"nlc_grid_level": np.int64(4)}, 4),
+            ):
+                with self.subTest(multiplicity=multiplicity, options=options):
+                    method, observed = FakeSCF(), {}
+                    with patch.dict(sys.modules, pyscf_modules(method, observed)):
+                        backend = PySCFBackend(
+                            xc="wb97m-v", multiplicity=multiplicity, grid_level=4, **options
+                        )
+                    result = backend.evaluate(water())
+                    self.assertEqual(observed["method"], kind)
+                    self.assertEqual(method.grids.level, 4)
+                    self.assertEqual(method.nlc_grid_level_used, expected)
+                    self.assertEqual(backend.nlc_grid_level, options.get("nlc_grid_level"))
+                    self.assertEqual(result.energy, -3.0)
+                    np.testing.assert_array_equal(result.forces, -4.0 * np.ones((3, 3)))
+
+    def test_invalid_nlc_grid_levels_fail_before_importing_pyscf(self):
+        with patch.dict(sys.modules, {"pyscf": None, "pyscf.data": None}):
+            for level in (True, False, np.bool_(True), -1, 1.0, 1.2, "4", [], {}, np.nan, np.inf):
+                with (
+                    self.subTest(level=level),
+                    self.assertRaisesRegex(ValueError, "NLC grid level"),
+                ):
+                    PySCFBackend(nlc_grid_level=level)
 
     def test_unconverged_scf_never_returns_a_gradient(self):
         method = FakeSCF(converged=False)

@@ -1,9 +1,15 @@
-# Fixed-region QM/DPA coupling
+# QM/DPA coupling
 
-This tool adds an isolated molecular QM correction to a DeePMD potential in
-LAMMPS: `E_hybrid = E_DP(full) + E_QM(region) - E_DP(region)`. It uses the public
-LAMMPS library and `fix external` interfaces. The same subtraction implementation
-is used for standalone validation and LAMMPS dynamics.
+This package couples LAMMPS, DeePMD and explicit quantum providers through the
+public LAMMPS library and fix external interfaces. Fixed-region mechanical
+embedding uses E_DPA(full) + E_QM(region) - E_DPA(region). Additive EE and
+gap-anchor have their own complete potentials and assembly rules.
+
+The unified configuration also supports finite complete-molecule ground-state
+partition families. Read [CAPABILITIES.md](CAPABILITIES.md) for the current
+backend/method matrix, [CONFIGURATION.md](CONFIGURATION.md) for selectors, and
+[DEPLOYMENT.md](DEPLOYMENT.md) for isolated package installation and runtime
+requirements. Qualification remains specific to source, method and inputs.
 
 ## Installation
 
@@ -33,12 +39,31 @@ The full and region providers can have different declared electronic states.
 `grid_response=True` default includes the response of the numerical DFT
 integration grid in the nuclear gradient. Set it explicitly to `False` only
 when comparing that approximation; tightening SCF alone does not replace the
-grid response or establish force convergence.
+grid response or establish force convergence. `nlc_grid_level=None` preserves
+PySCF's nonlocal-correlation grid default. A nonnegative integer selects that
+grid independently of `grid_level` for ordinary and electrostatic providers.
 
 `ExternalCoupling(lmp, region, calculator, type_symbols=...)` adds region
 corrections only, maps current local atom tags on every callback, and uses the
 LAMMPS communicator. Supply the calculator on rank zero. Call its `run()` method
 so failures caught inside a ctypes callback are re-raised by the driver.
+
+## Selected electronic states
+
+The CPU RHF/TDA route and its fixed-reference state contract are described in
+[EXCITED.md](EXCITED.md). A separate experimental PBE0/def2-SVP/grid4 API is
+described in [PBE0_TDA.md](PBE0_TDA.md). PBE0 has an explicit experimental factory/configuration
+route; complete hybrid-Hamiltonian and native qualification remain separate.
+Its analytic quadrature response has its own reference identity and diagnostics.
+The shared CPU RHF/PBE0 and GPU RHF [state-set API](MULTISTATE.md) provides
+several fixed-reference energies and complete gradients at one geometry using
+one common SCF/TDA solve.
+The unified prepare-states command prepares its named references and portable
+files; see [STATE_INPUTS.md](STATE_INPUTS.md).
+
+The bounded CPU ground mechanical ABACUS route uses the existing official
+ASE/abacuslite worker. See [ABACUS.md](ABACUS.md) for its finite-supercell and explicit same-cell periodic routes,
+source identity and checked cleanup requirements.
 
 ## Standalone electrostatic embedding
 
@@ -142,30 +167,49 @@ make inference deterministic: the application must declare and verify its
 PyTorch/CUDA runtime policy before loading a model. An already compiled AOT
 archive cannot be made deterministic by this option or by a runtime flag.
 
-This standalone calculator is separate from the subtractive CLI/LAMMPS bridge
-below. It does not enable electrostatic dynamics. A future all-atom adapter
-must supply the entire additive energy and forces with native pair energy zero,
-and pass its own communication, failure and restart checks.
+The additive native adapter described below supplies this complete energy and
+all forces with a zero native pair baseline. Its configuration and qualification
+are distinct from the mechanical subtraction route. Creating a standalone
+calculator alone does not establish native communication or restart validity.
 
 ## Command line
 
 ```bash
+qmdpa validate run.json
 qmdpa run run.json --output new-run-directory
 qmdpa run continuation.json --output new-continuation --restart previous/checkpoint-000000000010.json
 ```
 
-The JSON schema requires `schema_version: 1`, `data_file` (atomic-style LAMMPS
+The shared run command selects an existing implementation using the
+configuration's explicit Hamiltonian. Fixed-region mechanical, additive and
+gap-anchor routes coexist with the declared molecular ME and additive EE
+families and explicit fragment corrections listed in CONFIGURATION.md. A legacy schema-1 input without this field
+continues to select mechanical embedding only. No electrostatic model is
+selected by fallback. See [configuration routing](CONFIGURATION.md) for the
+assembly table, preflight output and compatibility boundaries.
+
+Validation loads the same configuration and checks file identities, settings
+and declared provider capabilities without constructing an evaluator or running
+LAMMPS. Its success is configuration validity, not numerical or scientific
+acceptance. Configuration loading during a native run remains collective, with
+only rank zero reading the input.
+
+The mechanical JSON schema requires `schema_version: 1`, `data_file` (atomic-style LAMMPS
 data), `model`, `model_sha256`, `type_symbols` (LAMMPS types in order), `periodic`
 (true or false), `region`, `qm`, `timestep_fs`, and `steps`. Paths are relative to
 the configuration. `region` contains `atom_ids`, corresponding `symbols`, and
 `molecules` (lists partitioning those IDs into complete molecules). `qm` contains
 PySCF settings such as `xc`, `basis`, `charge`, `multiplicity`, `conv_tol`,
-`conv_tol_grad` (positive or `null`), `grid_level`, `grid_response` (a JSON
-boolean, default `true`), and `threads`. The optional orbital-gradient threshold
-controls SCF independently of the energy-change threshold. `null` preserves the
+`conv_tol_grad` (positive or `null`), `grid_level`, `nlc_grid_level` (a nonnegative
+integer or `null`), `grid_response` (a JSON boolean, default `true`), and `threads`.
+The optional orbital-gradient threshold controls SCF independently of the
+energy-change threshold. `null` preserves the
 PySCF default, normally `sqrt(conv_tol)`; energy convergence alone does not bound
 nuclear-force error. Use an explicit value for a qualified dynamics protocol and
 compare forces against a tighter reference on identical geometries.
+Omitting `nlc_grid_level` or setting it to `null` preserves the ordinary ground
+provider's default and omits the key from its resolved settings. An explicit
+integer is recorded in the manifest and restart physics identity.
 The resolved grid-response setting is saved in the manifest and restart physics
 identity. Changing it requires a fresh run. Numerical results obtained before
 this explicit policy must be revalidated with finite differences and NVE; the
@@ -183,8 +227,10 @@ source files and should not be committed.
 
 ## Scope and failure semantics
 
-- Fixed complete-molecule membership is an input contract. No covalent cuts,
-  adaptive membership, or automatic assignment of a spatial QM region is made.
+- Fixed-region modes retain their declared complete-molecule membership.
+  Molecular modes use an explicitly declared family and weight policy; see
+  MOLECULAR_ADAPTIVE.md and MOLECULAR_ADDITIVE.md. Covalent cuts and automatic
+  chemical regrouping are unsupported.
 - Initial image flags must describe the intended intact QM molecules and their
   relative positions. Images are preserved continuously; do not reset them
   during a run. Fixed-cell triclinic image mapping is supported.
@@ -203,7 +249,8 @@ source files and should not be committed.
 
 ## Finite electrostatic additive dynamics
 
-The separate experimental entry point is:
+The experimental additive mode is available through the shared run command
+with its explicit Hamiltonian, or through the preserved dedicated entry point:
 
 ```bash
 python -m qmdpa.additive_cli CONFIG.json --output FRESH_DIRECTORY
@@ -280,3 +327,24 @@ before the calculator do not replace that previous attempted input. The bridge's
 `statistics()` returns a detached JSON-safe snapshot; `reset_statistics()`
 clears only measurements and the previous-input reference, never a failure,
 accepted state or simulation state.
+
+## Offline and experimental diagnostics
+
+[Offline water selection](SELECTION.md) proposes complete OH groups with explicit
+ambiguity diagnostics. It does not change dynamics. [Reference-subtractive
+embedding](REFERENCE.md) compares a declared fixed-charge Coulomb counterterm
+with an embedded QM provider; it does not establish a decomposition of pretrained
+DPA electrostatics. Neither tool changes the existing dynamics CLI. The companion
+validation project supplies real-provider scans and separate acceptance records.
+
+[Fixed-charge configuration](CHARGES.md) documents explicit water charge templates,
+per-atom/type/file inputs, overrides, provenance and additive schema 2.
+It does not assign a universal element charge or qualify a new physical model.
+
+## Experimental gap-anchor candidate
+
+See [GAP_ANCHOR.md](GAP_ANCHOR.md) for the separate standalone ground-ME plus
+embedded-excitation-gap model, its five-term ledger and qualification limits.
+
+The next development version adds an optional [static distance bias](BIAS.md)
+through the unified entry point. Its qualification is separate from the rc2 candidate.

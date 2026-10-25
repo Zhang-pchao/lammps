@@ -39,7 +39,18 @@ class ExternalCoupling:
 
     _calculator_kind = "subtractive"
 
-    def __init__(self, lmp, region, calculator, *, fix_id="qmdpa", comm=None, type_symbols=None):
+    def __init__(
+        self,
+        lmp,
+        region,
+        calculator,
+        *,
+        fix_id="qmdpa",
+        comm=None,
+        type_symbols=None,
+        state_observer=None,
+        region_boundary="isolated",
+    ):
         if not fix_id.isidentifier():
             raise ValueError("fix_id must be an identifier")
         if lmp.extract_global("units") != "metal":
@@ -63,12 +74,22 @@ class ExternalCoupling:
             not self.type_symbols or any(not isinstance(s, str) or not s for s in self.type_symbols)
         ):
             raise ValueError("type_symbols must contain a nonempty element name per LAMMPS type")
+        if self.comm.rank != 0 and state_observer is not None:
+            raise ValueError("Electronic-state records belong only to rank zero")
+        self.state_observer = state_observer
+        self.native_bias = None
         self.failure = None
         self.last_step = None
         self.last_correction = None
         self.reset_statistics()
         self._box = lmp.extract_box()
         self._cell = box_matrix(self._box)
+        if region_boundary not in ("isolated", "periodic-same-cell"):
+            raise ValueError("Unknown region boundary")
+        self.region_boundary = region_boundary
+        if region_boundary == "periodic-same-cell":
+            if not all(self._box[5]) or not np.array_equal(self._cell, np.diag(np.diag(self._cell))):
+                raise ValueError("Periodic QM requires full PBC and an orthorhombic fixed box")
         self._members = set(region.atom_ids)
         self._symbols = dict(zip(region.atom_ids, region.symbols))
         lmp.command(f"fix {fix_id} all external pf/callback 1 1")
@@ -173,11 +194,17 @@ class ExternalCoupling:
         return unwrap(positions, images, self._cell)
 
     def _evaluate_geometry(self, geometry):
+        if self.region_boundary == "periodic-same-cell":
+            from .core import Geometry
+
+            geometry = Geometry(geometry.atom_ids, geometry.symbols, geometry.positions, self._cell)
         return self.calculator.correction(geometry)
 
     def _stop(self, step, error, forces):
         """Invalidate the segment and request return from the native run loop."""
         self.failure = f"QM/DPA evaluation failed at step {step}: {error}"
+        if self.state_observer is not None:
+            self.state_observer.clear()
         if forces is not None:
             try:
                 forces[:] = 0.0
@@ -198,19 +225,28 @@ class ExternalCoupling:
                 if forces is None or np.shape(forces) != (nlocal, 3):
                     raise ValueError("Local correction forces must have shape (nlocal, 3)")
                 forces[:] = 0.0
-            packet = (None, self._local_packet(nlocal, tags, positions))
+            data = self._local_packet(nlocal, tags, positions)
+            if self.native_bias is not None:
+                data = (data, self.native_bias.local_packet(nlocal, tags, positions))
+            packet = (None, data)
         except Exception as exc:
             packet = (f"{type(exc).__name__}: {exc}", None)
         packets = self.comm.gather(packet, root=0)
         result = None
         if self.comm.rank == 0:
             try:
+                if self.state_observer is not None:
+                    self.state_observer.clear()
                 if self.failure is not None:
                     raise EvaluationError(self.failure)
                 errors = [error for error, _ in packets if error is not None]
                 if errors:
                     raise EvaluationError("; ".join(errors))
-                geometry = self.region.assemble([data for _, data in packets])
+                data = [data for _, data in packets]
+                if self.native_bias is not None:
+                    self.native_bias.validate_packets([item[1] for item in data])
+                    data = [item[0] for item in data]
+                geometry = self.region.assemble(data)
                 correction = self._measured_evaluate(geometry)
                 result = (None, correction.energy, correction.forces)
             except Exception as exc:
@@ -253,6 +289,8 @@ class ExternalCoupling:
         final = int(self.lmp.extract_global("ntimestep"))
         if final != start + steps:
             self.failure = f"LAMMPS stopped at step {final}; requested step {start + steps}"
+            if self.state_observer is not None:
+                self.state_observer.clear()
             raise EvaluationError(self.failure)
         return self.last_correction
 
@@ -267,7 +305,9 @@ class AdditiveExternalCoupling(ExternalCoupling):
     before this fix adds its forces; nonzero image flags are rejected.
 
     The caller must use only NVE integration and no additional force or energy
-    fixes. Native-style and pre-callback force checks cannot classify arbitrary
+    fixes, except the unified driver's validated static distance springs created
+    after this callback. Those springs have separate energy/force records and
+    do not change this calculator's returned total. Pre-callback checks cannot classify arbitrary
     fixes that execute later. This class never creates or changes the integrator.
     Use run() and accepted checkpoints with the same failure protocol as the
     subtractive bridge; a failed in-memory step must be discarded.
@@ -284,13 +324,20 @@ class AdditiveExternalCoupling(ExternalCoupling):
         type_symbols,
         fix_id="qmdpa_additive",
         comm=None,
+        state_observer=None,
     ):
         if type_symbols is None:
             raise ValueError("All-atom additive coupling requires explicit type_symbols")
         type_symbols = tuple(type_symbols)
         self._validate_native_assembly(lmp, region, type_symbols)
         super().__init__(
-            lmp, region, calculator, fix_id=fix_id, comm=comm, type_symbols=type_symbols
+            lmp,
+            region,
+            calculator,
+            fix_id=fix_id,
+            comm=comm,
+            type_symbols=type_symbols,
+            state_observer=state_observer,
         )
 
     @staticmethod
@@ -343,3 +390,29 @@ class AdditiveExternalCoupling(ExternalCoupling):
 
     def _evaluate_geometry(self, geometry):
         return _evaluate(self.calculator, geometry)
+
+
+class GapAnchorExternalCoupling(AdditiveExternalCoupling):
+    """Use the existing all-atom zero-pair transport for a distinct Hamiltonian.
+
+    Only transport/assembly guards are inherited. This class does not confer
+    additive EE numerical or scientific qualification on the gap-anchor model.
+    """
+
+    _calculator_kind = "gap-anchor"
+
+    def __init__(self, lmp, region, calculator, *, type_symbols,
+                 fix_id="qmdpa_gap_anchor", comm=None, state_observer=None):
+        super().__init__(lmp, region, calculator, type_symbols=type_symbols,
+                         fix_id=fix_id, comm=comm, state_observer=state_observer)
+
+
+class ReferenceExternalCoupling(AdditiveExternalCoupling):
+    """Transport complete reference-subtractive totals with a zero native pair."""
+
+    _calculator_kind = "reference-subtractive"
+
+    def __init__(self, lmp, region, calculator, *, type_symbols,
+                 fix_id="qmdpa_reference", comm=None):
+        super().__init__(lmp, region, calculator, type_symbols=type_symbols,
+                         fix_id=fix_id, comm=comm)

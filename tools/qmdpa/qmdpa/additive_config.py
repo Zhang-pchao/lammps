@@ -12,9 +12,12 @@ import re
 from pathlib import Path
 
 from .additive import CrossLennardJones
+from .charges import _invalid_constant, _unique_object, resolve_fixed_charges
 from .config import _positive_integer, file_digest, software_identity, validate_qm, validate_region
 from .embedding import FixedEmbeddingCharges
 from .inference import RAW_PROFILE
+from .providers import provider_contract, validate_provider, validate_provider_regions
+from .state_inputs import resolve_provider_reference
 
 
 def cross_parameters(cross):
@@ -56,7 +59,23 @@ def _positive_real(value, name):
 def load_additive_config(path):
     """Validate every Hamiltonian input and include it in the restart identity."""
     path = Path(path).resolve()
-    config = json.loads(path.read_text())
+    raw = path.read_text()
+    config = json.loads(raw)
+    provider = config.get("provider") if isinstance(config, dict) else None
+    state = provider.get("state") if isinstance(provider, dict) else None
+    tda = isinstance(state, dict) and state.get("method") in ("rhf-tda", "pbe0-tda")
+    if isinstance(config, dict) and (config.get("schema_version") == 2 or tda):
+        # Preserve legacy ground parsing; new charge/state inputs must be unambiguous.
+        config = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+    return _validate_config(config, path)
+
+
+def _validate_config(config, path):
+    """Validate a parsed request using its original file location for relative paths."""
+    from copy import deepcopy
+
+    config = deepcopy(config)
+    path = Path(path).resolve()
     required = {
         "schema_version",
         "hamiltonian",
@@ -75,15 +94,15 @@ def load_additive_config(path):
         "timestep_fs",
         "steps",
     }
-    optional = {"sample_interval", "temperature_K", "velocity_seed"}
+    optional = {"sample_interval", "temperature_K", "velocity_seed", "provider"}
     if (
         not isinstance(config, dict)
         or not required <= set(config)
         or set(config) - required - optional
     ):
         raise ValueError("Additive configuration has missing or unsupported fields")
-    if type(config["schema_version"]) is not int or config["schema_version"] != 1:
-        raise ValueError("schema_version must be 1")
+    if type(config["schema_version"]) is not int or config["schema_version"] not in (1, 2):
+        raise ValueError("schema_version must be 1 or 2")
     if config["hamiltonian"] != "finite-electrostatic-additive":
         raise ValueError("Require the finite-electrostatic-additive Hamiltonian")
     if config["periodic"] is not False:
@@ -124,6 +143,26 @@ def load_additive_config(path):
     ):
         raise ValueError("environment_charge_spin requires integer charge and multiplicity")
     embedding = config["embedding"]
+    if config["schema_version"] == 2:
+        if (
+            not isinstance(embedding, dict)
+            or "charge_request" not in embedding
+            or set(embedding) - {"charge_request", "radii_angstrom"}
+        ):
+            raise ValueError(
+                "Schema 2 embedding requires only charge_request and optional radii_angstrom"
+            )
+        resolved = resolve_fixed_charges(
+            embedding["charge_request"],
+            env_region["atom_ids"],
+            env_region["symbols"],
+            base_directory=path.parent,
+        )
+        normalized = resolved["embedding"]
+        if "radii_angstrom" in embedding:
+            normalized["radii_angstrom"] = embedding["radii_angstrom"]
+        config["charge_resolution"] = resolved["provenance"]
+        embedding = config["embedding"] = normalized
     if (
         not isinstance(embedding, dict)
         or not {"atom_ids", "charges_e", "source"} <= set(embedding)
@@ -135,13 +174,28 @@ def load_additive_config(path):
     charges = FixedEmbeddingCharges(**embedding)
     if charges.atom_ids != tuple(env_region["atom_ids"]):
         raise ValueError("Charge IDs must equal environment atom IDs in order")
-    if not math.isclose(float(sum(charges.charges_e)), state[0], rel_tol=0, abs_tol=1e-8):
+    total_charge = (
+        math.fsum(charges.charges_e)
+        if config["schema_version"] == 2
+        else float(sum(charges.charges_e))
+    )
+    if not math.isclose(total_charge, state[0], rel_tol=0, abs_tol=1e-8):
         raise ValueError("Total fixed environment charge must match the DPA charge")
     pairs = cross_parameters(config["cross"])
     required_pairs = {(q, m) for q in qm_region["symbols"] for m in env_region["symbols"]}
     if set(pairs) != required_pairs:
         raise ValueError("Every cross element pair needs exactly one explicit parameter")
-    config["qm"] = validate_qm(config["qm"], electrostatic=True)
+    config["provider"] = validate_provider(
+        resolve_provider_reference(config.get("provider"), path), electrostatic=True)
+    config["provider_contract"] = provider_contract(config["provider"], electrostatic=True)
+    config["qm"] = validate_qm(config["qm"], electrostatic=True, provider=config["provider"])
+    validate_provider_regions(
+        config["provider"],
+        qm_region,
+        periodic=config["periodic"],
+        environment_region=env_region,
+        charges=charges,
+    )
     config["steps"] = _positive_integer(config["steps"], "steps", allow_zero=True)
     config["sample_interval"] = _positive_integer(
         config.get("sample_interval", 1), "sample_interval"
@@ -152,7 +206,7 @@ def load_additive_config(path):
     if "temperature_K" in config:
         config["temperature_K"] = _positive_real(config["temperature_K"], "temperature_K")
         _positive_integer(config["velocity_seed"], "velocity_seed")
-    config["software"] = software_identity()
+    config["software"] = software_identity(config["provider"])
     config["software"]["packages"]["torch"] = importlib.metadata.version("torch")
     try:
         config["software"]["packages"]["mpi4py"] = importlib.metadata.version("mpi4py")

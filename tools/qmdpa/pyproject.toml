@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lammps-qmdpa"
-version = "0.1.0"
-description = "Fixed-region subtractive QM/DPA coupling for LAMMPS"
+version = "0.3.0rc1"
+description = "Explicit energy and force coupling of quantum providers and DeePMD in LAMMPS"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-2.0-only"}

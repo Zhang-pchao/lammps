@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "hamiltonian": "finite-molecular-additive",
+  "data_file": "molecules.data",
+  "model": "model.pt",
+  "model_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "type_symbols": [
+    "H"
+  ],
+  "periodic": false,
+  "full_region": {
+    "atom_ids": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "symbols": [
+      "H",
+      "H",
+      "H",
+      "H",
+      "H",
+      "H",
+      "H",
+      "H"
+    ],
+    "molecules": [
+      [
+        1,
+        2
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        5,
+        6
+      ],
+      [
+        7,
+        8
+      ]
+    ]
+  },
+  "groups": [
+    {
+      "group_id": "core",
+      "atom_ids": [
+        1,
+        2
+      ],
+      "symbols": [
+        "H",
+        "H"
+      ]
+    },
+    {
+      "group_id": "a",
+      "atom_ids": [
+        3,
+        4
+      ],
+      "symbols": [
+        "H",
+        "H"
+      ]
+    },
+    {
+      "group_id": "b",
+      "atom_ids": [
+        5,
+        6
+      ],
+      "symbols": [
+        "H",
+        "H"
+      ]
+    },
+    {
+      "group_id": "c",
+      "atom_ids": [
+        7,
+        8
+      ],
+      "symbols": [
+        "H",
+        "H"
+      ]
+    }
+  ],
+  "core_group_ids": [
+    "core"
+  ],
+  "partitions": [
+    {
+      "partition_id": "a",
+      "qm_group_ids": [
+        "core",
+        "a"
+      ],
+      "qm_charge": 0,
+      "qm_multiplicity": 1,
+      "method_identity": "RHF-STO3G-ground-finite-software",
+      "energy_reference": "shared-DPA4-original-and-RHF-convention-same-H4-composition",
+      "electronic_state": "ground"
+    },
+    {
+      "partition_id": "b",
+      "qm_group_ids": [
+        "core",
+        "b"
+      ],
+      "qm_charge": 0,
+      "qm_multiplicity": 1,
+      "method_identity": "RHF-STO3G-ground-finite-software",
+      "energy_reference": "shared-DPA4-original-and-RHF-convention-same-H4-composition",
+      "electronic_state": "ground"
+    },
+    {
+      "partition_id": "c",
+      "qm_group_ids": [
+        "core",
+        "c"
+      ],
+      "qm_charge": 0,
+      "qm_multiplicity": 1,
+      "method_identity": "RHF-STO3G-ground-finite-software",
+      "energy_reference": "shared-DPA4-original-and-RHF-convention-same-H4-composition",
+      "electronic_state": "ground"
+    }
+  ],
+  "switch": {
+    "method": "quintic-molecular-occupancy",
+    "center_atom_id": 1,
+    "candidate_anchors": [
+      [
+        "a",
+        3
+      ],
+      [
+        "b",
+        5
+      ],
+      [
+        "c",
+        7
+      ]
+    ],
+    "occupancy": 1,
+    "inner_radius_angstrom": 2.0,
+    "outer_radius_angstrom": 3.0
+  },
+  "provider": {
+    "engine": "pyscf",
+    "device": "cpu",
+    "state": {
+      "method": "ground"
+    }
+  },
+  "qm": {
+    "xc": "hf",
+    "basis": "sto-3g",
+    "charge": 0,
+    "multiplicity": 1,
+    "grid_response": true,
+    "threads": 1,
+    "conv_tol": 1e-12,
+    "conv_tol_grad": 1e-09,
+    "max_cycle": 100
+  },
+  "inference_profile": "torch-raw-deterministic-v1",
+  "timestep_fs": 0.02,
+  "steps": 20,
+  "sample_interval": 1,
+  "environment_charge_spin": [
+    0,
+    1
+  ],
+  "embedding": {
+    "atom_ids": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "charges_e": [
+      0.04,
+      -0.04,
+      0.04,
+      -0.04,
+      0.04,
+      -0.04,
+      0.04,
+      -0.04
+    ],
+    "source": "Artificial fixed H2 dipoles for software validation; not physical parameterization"
+  },
+  "cross": {
+    "form": "lj12-6",
+    "cutoff": null,
+    "mixing": "none",
+    "source": "Artificial small cross-LJ interface control",
+    "pairs": [
+      {
+        "qm_symbol": "H",
+        "environment_symbol": "H",
+        "epsilon_ev": 0.002,
+        "sigma_angstrom": 1.2
+      }
+    ]
+  }
+}

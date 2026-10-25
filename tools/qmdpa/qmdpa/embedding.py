@@ -21,7 +21,7 @@ from types import MappingProxyType
 
 import numpy as np
 
-from .backends import PySCFBackend, _integer
+from .backends import PySCFBackend
 from .core import Evaluation, EvaluationError, Geometry, _atom_ids, _readonly_array
 
 
@@ -104,6 +104,21 @@ class PySCFElectrostaticBackend(PySCFBackend):
     post-HF response are outside this contract. No previous result is reused.
     """
 
+    _engine_name = "PySCF"
+    _density_namespace = np
+
+    @staticmethod
+    def _to_host(values):
+        return np.asarray(values)
+
+    _density_array = _to_host
+
+    def _check_method_device(self, method):
+        """CPU execution needs no optional device check."""
+
+    def _check_solved_method(self, method):
+        """CPU densities are validated below before constructing reaction forces."""
+
     def __init__(
         self,
         charges: FixedEmbeddingCharges,
@@ -114,13 +129,10 @@ class PySCFElectrostaticBackend(PySCFBackend):
     ):
         if not isinstance(charges, FixedEmbeddingCharges):
             raise ValueError("charges must be explicit FixedEmbeddingCharges")
-        if nlc_grid_level is not None:
-            nlc_grid_level = _integer(nlc_grid_level, "NLC grid level", 0)
         if type(include_qm_dipole) is not bool:
             raise ValueError("include_qm_dipole must be true or false")
-        self.nlc_grid_level = nlc_grid_level
         self.include_qm_dipole = include_qm_dipole
-        super().__init__(**qm_settings)
+        super().__init__(nlc_grid_level=nlc_grid_level, **qm_settings)
         try:
             from pyscf import qmmm
         except ImportError as exc:
@@ -130,6 +142,17 @@ class PySCFElectrostaticBackend(PySCFBackend):
         self.charges = charges
         self._qmmm = qmmm
         self._identity = None
+
+    def _method_diagnostics(self, method):
+        """Report the grids actually used by this DFT method."""
+        diagnostics = {"grid_response": self.grid_response,
+                       "nlc_enabled": bool(method.do_nlc())}
+        for name, grid in (("regular", method.grids), ("nlc", method.nlcgrids)):
+            diagnostics[f"{name}_grid_level"] = int(grid.level)
+            diagnostics[f"{name}_grid_points"] = (
+                None if grid.coords is None else int(len(grid.coords))
+            )
+        return diagnostics
 
     def evaluate(self, qm_geometry: Geometry, environment_geometry: Geometry) -> EmbeddedEvaluation:
         if qm_geometry.periodic or environment_geometry.periodic:
@@ -154,8 +177,6 @@ class PySCFElectrostaticBackend(PySCFBackend):
         self._identity = identity
         try:
             method = self._make_method(qm_geometry)
-            if self.nlc_grid_level is not None:
-                method.nlcgrids.level = self.nlc_grid_level
             method = self._qmmm.mm_charge(
                 method,
                 environment_geometry.positions,
@@ -163,21 +184,24 @@ class PySCFElectrostaticBackend(PySCFBackend):
                 radii=self.charges.radii_angstrom,
                 unit="Angstrom",
             )
+            self._check_method_device(method)
             energy = method.kernel()
             if not method.converged:
-                raise EvaluationError(f"PySCF SCF did not converge within {self.max_cycle} cycles")
-            gradient_method = method.nuc_grad_method()
-            gradient_method.grid_response = self.grid_response
-            qm_gradient = np.asarray(gradient_method.kernel())
-            density = np.asarray(method.make_rdm1())
+                raise EvaluationError(
+                    f"{self._engine_name} SCF did not converge within {self.max_cycle} cycles"
+                )
+            self._check_solved_method(method)
+            gradient_method = self._make_gradient(method)
+            qm_gradient = self._to_host(gradient_method.kernel())
+            density = self._density_array(method.make_rdm1())
             if density.ndim == 3 and density.shape[0] == 2:
                 density = density.sum(axis=0)  # UKS alpha + beta; no extra factor of two.
             if density.ndim != 2 or density.shape[0] != density.shape[1]:
                 raise EvaluationError("PySCF returned an invalid total density matrix")
-            if not np.isfinite(density).all():
+            if not self._density_namespace.isfinite(density).all():
                 raise EvaluationError("PySCF returned a nonfinite total density matrix")
-            electronic = np.asarray(gradient_method.grad_hcore_mm(density))
-            nuclear = np.asarray(gradient_method.grad_nuc_mm())
+            electronic = self._to_host(gradient_method.grad_hcore_mm(density))
+            nuclear = self._to_host(gradient_method.grad_nuc_mm())
             expected = environment_geometry.positions.shape
             if electronic.shape != expected or nuclear.shape != expected:
                 raise EvaluationError("MM gradient components must match the environment atoms")
@@ -193,16 +217,14 @@ class PySCFElectrostaticBackend(PySCFBackend):
                     if method.conv_tol_grad is not None
                     else float(method.conv_tol) ** 0.5
                 ),
-                "grid_response": self.grid_response,
-                "nlc_enabled": bool(method.do_nlc()),
                 "charge_model": "point" if self.charges.radii_angstrom is None else "gaussian",
                 "charge_source": self.charges.source,
             }
-            for name, grid in (("regular", method.grids), ("nlc", method.nlcgrids)):
-                diagnostics[f"{name}_grid_level"] = int(grid.level)
-                diagnostics[f"{name}_grid_points"] = (
-                    None if grid.coords is None else int(len(grid.coords))
-                )
+            diagnostics.update(self._method_diagnostics(method))
+            if self.density_fit is not None:
+                diagnostics["density_fit"] = {
+                    **self.density_fit, "only_dfj": False, "auxbasis_response": True
+                }
             if self.include_qm_dipole:
                 # The inherited SCF dipole uses only method.mol (QM nuclei)
                 # and this total QM density; external charges are excluded.
@@ -226,4 +248,4 @@ class PySCFElectrostaticBackend(PySCFBackend):
         except EvaluationError:
             raise
         except Exception as exc:
-            raise EvaluationError(f"PySCF electrostatic evaluation failed: {exc}") from exc
+            raise EvaluationError(f"{self._engine_name} electrostatic evaluation failed: {exc}") from exc

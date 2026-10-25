@@ -196,19 +196,25 @@ class EmbeddingContractTests(unittest.TestCase):
                 )
 
     def test_nlc_grid_and_qm_only_dipole_diagnostics_are_explicit(self):
-        for level in (None, 4):
-            with self.subTest(level=level):
+        for options, expected in (
+            ({}, 2),
+            ({"nlc_grid_level": None}, 2),
+            ({"nlc_grid_level": 0}, 0),
+            ({"nlc_grid_level": 4}, 4),
+        ):
+            with self.subTest(options=options):
                 backend, observed = self.backend(
                     xc="wb97m-v",
                     basis="def2-tzvpd",
                     grid_level=4,
-                    nlc_grid_level=level,
                     include_qm_dipole=True,
                     conv_tol_grad=1e-8,
+                    **options,
                 )
                 result = backend.evaluate(*geometries())
                 method = observed["methods"][-1]
-                self.assertEqual(method.nlcgrids.level, 2 if level is None else 4)
+                self.assertEqual(backend.nlc_grid_level, options.get("nlc_grid_level"))
+                self.assertEqual(method.nlcgrids.level, expected)
                 self.assertEqual(result.diagnostics["regular_grid_level"], 4)
                 self.assertEqual(result.diagnostics["nlc_grid_level"], method.nlcgrids.level)
                 self.assertTrue(result.diagnostics["nlc_enabled"])

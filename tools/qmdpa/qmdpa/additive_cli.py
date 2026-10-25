@@ -18,16 +18,18 @@ def _additive_coupling(lmp, comm, config):
     from .additive import AdditiveCalculator, CrossLennardJones
     from .additive_config import cross_parameters
     from .backends import DeepMDBackend
-    from .embedding import FixedEmbeddingCharges, PySCFElectrostaticBackend
+    from .embedding import FixedEmbeddingCharges
     from .inference import StrictRawCalculator, prepare_raw_inference, strict_runtime_state
     from .lammps import AdditiveExternalCoupling
+    from .providers import make_qm_provider
     from .region import FixedRegion
     from .runtime import _root_call
+    from .state_records import RecordingTDAProvider
 
-    calculator = None
+    calculator = state_observer = None
 
     def make_calculator():
-        nonlocal calculator
+        nonlocal calculator, state_observer
         torch = prepare_raw_inference(config["model"])
         environment = DeepMDBackend(
             config["model"], charge_spin=config["environment_charge_spin"], no_jit=True
@@ -38,12 +40,17 @@ def _additive_coupling(lmp, comm, config):
             "backend_class": f"{type(backend).__module__}.{type(backend).__qualname__}",
             "no_jit": True,
         }
+        provider = make_qm_provider(
+            config["qm"],
+            provider=config["provider"],
+            charges=FixedEmbeddingCharges(**config["embedding"]),
+        )
+        if isinstance(provider, RecordingTDAProvider):
+            state_observer = provider
         calculator = StrictRawCalculator(
             AdditiveCalculator(
                 environment,
-                PySCFElectrostaticBackend(
-                    FixedEmbeddingCharges(**config["embedding"]), **config["qm"]
-                ),
+                provider,
                 CrossLennardJones(
                     cross_parameters(config["cross"]), source=config["cross"]["source"]
                 ),
@@ -59,7 +66,12 @@ def _additive_coupling(lmp, comm, config):
         tuple(qm["atom_ids"] + env["atom_ids"]), tuple(qm["symbols"] + env["symbols"])
     )
     return AdditiveExternalCoupling(
-        lmp, region, calculator, comm=comm, type_symbols=tuple(config["type_symbols"])
+        lmp,
+        region,
+        calculator,
+        comm=comm,
+        type_symbols=tuple(config["type_symbols"]),
+        state_observer=state_observer,
     )
 
 

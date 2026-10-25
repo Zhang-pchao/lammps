@@ -1,0 +1,327 @@
+# LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
+# https://www.lammps.org/, Sandia National Laboratories
+# SPDX-License-Identifier: GPL-2.0-only
+# Author: Pengchao Zhang <pczhang1997@gmail.com>
+"""Select an existing fixed-region Hamiltonian from an explicit configuration.
+
+This module owns no energy, force, state or checkpoint implementation. Loading
+runs on the existing native owner's collective configuration path; all ranks
+then use the same normalized Hamiltonian. Validation alone runs no evaluator.
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+from pathlib import Path
+
+from .charges import _invalid_constant, _unique_object
+from .fragment_ground import GROUND_FRAGMENT_HAMILTONIAN
+from .fragment_response_config import FRAGMENT_GAP_HAMILTONIAN
+from .interaction_delta_config import CORRECTED_GAP_HAMILTONIAN
+
+MECHANICAL = "fixed-region-mechanical"
+MOLECULAR = "finite-molecular-mechanical"
+MOLECULAR_EE = "finite-molecular-additive"
+REFERENCE = "finite-electrostatic-reference-subtractive"
+_ROUTES = {
+    REFERENCE: ("reference_config", "load_reference_config", "reference_cli",
+                "_zero_pair", "_reference_coupling"),
+    MOLECULAR: ("adaptive_config", "load_adaptive_config", "adaptive_cli",
+                "_zero_pair", "_adaptive_coupling"),
+    MECHANICAL: ("config", "load_config", "cli", "_mechanical_pair", "_mechanical_coupling"),
+    "finite-electrostatic-additive": (
+        "additive_config", "load_additive_config", "additive_cli", "_zero_pair", "_additive_coupling"
+    ),
+    "finite-electrostatic-gap-anchor": (
+        "gap_anchor_config", "load_gap_anchor_config", "gap_anchor_cli",
+        "_zero_pair", "_gap_anchor_coupling"
+    ),
+}
+_ROUTES[MOLECULAR_EE] = _ROUTES[MOLECULAR]
+_ROUTES[CORRECTED_GAP_HAMILTONIAN] = _ROUTES["finite-electrostatic-gap-anchor"]
+_ROUTES[FRAGMENT_GAP_HAMILTONIAN] = _ROUTES["finite-electrostatic-gap-anchor"]
+_ROUTES[GROUND_FRAGMENT_HAMILTONIAN] = (
+    "fragment_ground", "load_ground_fragment_config", "fragment_ground",
+    "_zero_pair", "_ground_fragment_coupling"
+)
+
+
+def _route(hamiltonian):
+    if not isinstance(hamiltonian, str) or hamiltonian not in _ROUTES:
+        raise ValueError(
+            "Unsupported Hamiltonian. Choose "
+            + ", ".join(_ROUTES)
+            + "; no model is selected by fallback."
+        )
+    return _ROUTES[hamiltonian]
+
+
+def _function(module, name):
+    return getattr(importlib.import_module("."+module, __package__), name)
+
+
+def _normalize_selection(raw):
+    """Consume an optional user selector without changing the physical identity."""
+    from copy import deepcopy
+
+    config = deepcopy(raw)
+    if "coupling" not in config:
+        return config
+    choice = config.pop("coupling")
+    required = {"surface", "embedding"}
+    if (not isinstance(choice, dict) or not required <= set(choice)
+            or set(choice) - required - {"ee_model", "me_model"}):
+        raise ValueError("coupling requires surface, embedding and an optional matching me_model or ee_model")
+    surface, embedding = choice["surface"], choice["embedding"]
+    if surface not in ("ground", "selected"):
+        raise ValueError("coupling.surface must be ground or selected")
+    if embedding == "mechanical":
+        if "ee_model" in choice:
+            raise ValueError("Mechanical coupling cannot specify ee_model")
+        model = choice.get("me_model")
+        if model not in (None, "fragment-response", "molecular"):
+            raise ValueError("Mechanical me_model must be fragment-response or molecular when supplied")
+        if model in ("fragment-response", "molecular") and surface != "ground":
+            raise ValueError("Mechanical fragment response currently requires the ground surface")
+        hamiltonian = {"fragment-response": GROUND_FRAGMENT_HAMILTONIAN,
+                       "molecular": MOLECULAR, None: MECHANICAL}[model]
+    elif embedding == "electrostatic":
+        if "me_model" in choice:
+            raise ValueError("Electrostatic coupling cannot specify me_model")
+        model = choice.get("ee_model")
+        if model == "reference-subtractive" and surface != "ground":
+            raise ValueError("Reference-subtractive dynamics currently requires ground state")
+        if model not in ("reference-subtractive", "additive", "molecular-additive", "gap-anchor", "gap-anchor-cross-delta", "gap-anchor-fragment-response"):
+            raise ValueError("Electrostatic coupling requires explicit ee_model additive, gap-anchor, gap-anchor-cross-delta or gap-anchor-fragment-response")
+        if model == "gap-anchor" and surface == "ground":
+            raise ValueError("Ground gap-anchor reduces to GS-ME; select mechanical explicitly")
+        if model in ("gap-anchor-cross-delta", "gap-anchor-fragment-response") and surface == "ground":
+            raise ValueError("The corrected native driver currently requires a selected PBE0 state")
+        if model == "molecular-additive" and surface != "ground":
+            raise ValueError("Molecular additive coupling requires the ground surface")
+        hamiltonian = MOLECULAR_EE if model == "molecular-additive" else "finite-electrostatic-" + model
+    else:
+        raise ValueError("coupling.embedding must be mechanical or electrostatic")
+    if "hamiltonian" in config and config["hamiltonian"] != hamiltonian:
+        raise ValueError("coupling conflicts with the explicit Hamiltonian")
+    provider = config.get("provider")
+    state = provider.get("state") if isinstance(provider, dict) else None
+    method = state.get("method") if isinstance(state, dict) else None
+    if surface == "selected" and method not in ("rhf-tda", "pbe0-tda"):
+        raise ValueError("Selected coupling requires an explicit supported provider.state reference")
+    if surface == "ground" and provider is not None and method != "ground":
+        raise ValueError("Ground coupling conflicts with provider.state")
+    config["hamiltonian"] = hamiltonian
+    return config
+
+
+def _describe_selection(config):
+    mechanical = config["hamiltonian"] in (MECHANICAL, GROUND_FRAGMENT_HAMILTONIAN, MOLECULAR)
+    result = {"surface": "ground" if config["provider"]["state"]["method"] == "ground" else "selected",
+              "embedding": "mechanical" if mechanical else "electrostatic"}
+    if config["hamiltonian"] == GROUND_FRAGMENT_HAMILTONIAN:
+        result["me_model"] = "fragment-response"
+    if config["hamiltonian"] == MOLECULAR:
+        result["me_model"] = "molecular"
+    if not mechanical:
+        result["ee_model"] = ("molecular-additive" if config["hamiltonian"] == MOLECULAR_EE
+                              else config["hamiltonian"].removeprefix("finite-electrostatic-"))
+    return result
+
+
+def _energy_contract(config):
+    """Describe existing terms; no backend calls or extra electronic calculations."""
+    hamiltonian = config["hamiltonian"]
+    selected = config["provider"]["state"]["method"] != "ground"
+    if hamiltonian == MOLECULAR_EE:
+        return {
+            "total_terms": [{"name": "normalized_weighted_complete_additive_totals",
+                             "coefficient": 1, "force_coordinates": "all"}],
+            "partition_terms": ["low_environment", "embedded_ground", "cross_lj", "declared_offset"],
+            "native_baseline": "zero", "external_energy": "complete-total",
+            "force_definition": "weighted-complete-forces-minus-energy-times-weight-gradients",
+            "partition_policy": config["switch"],
+            "scope": "Fixed-charge complete fixed-occupancy family; no excited-state map or mutual polarization",
+        }
+    if hamiltonian == MOLECULAR:
+        return {
+            "total_terms": [{"name": "low_full", "coefficient": 1, "force_coordinates": "all"},
+                            {"name": "normalized_weighted_ground_corrections", "coefficient": 1,
+                             "force_coordinates": "all"}],
+            "native_baseline": "zero", "external_energy": "complete-total",
+            "force_definition": "weighted-complete-forces-minus-energy-times-weight-gradients",
+            "partition_policy": config["switch"],
+            "scope": "Complete fixed-occupancy family; no reactive regrouping or excited-state map",
+        }
+    if hamiltonian == MECHANICAL:
+        quantum_term = ("periodic_ground" if config["qm"].get("boundary") == "periodic-same-cell"
+                        else "supercell_ground" if config["provider"]["engine"] == "abacus"
+                        else "isolated_selected" if selected else "isolated_ground")
+        terms = [("low_full", 1, "AB"), ("low_qm", -1, "A"),
+                 (quantum_term, 1, "A")]
+        baseline = "low_full"
+    elif hamiltonian == GROUND_FRAGMENT_HAMILTONIAN:
+        terms = [("low_full", 1, "AB"), ("low_qm", -1, "A"),
+                 ("isolated_ground", 1, "A"), ("fragment_pair_deltas", 1, "declared"),
+                 ("declared_environment_one_body", 1, "declared")]
+        baseline = "zero"
+    elif hamiltonian == REFERENCE:
+        terms = [("low_full", 1, "AB"), ("low_qm", -1, "A"),
+                 ("embedded_ground", 1, "AB"), ("reference_cross_coulomb", -1, "AB")]
+        baseline = "zero"
+    elif hamiltonian == "finite-electrostatic-additive":
+        terms = [("low_environment", 1, "B"),
+                 ("embedded_selected" if selected else "embedded_ground", 1, "AB"),
+                 ("cross_lj", 1, "AB")]
+        baseline = "zero"
+    else:
+        terms = [("low_full", 1, "AB"), ("low_qm", -1, "A"),
+                 ("isolated_ground", 1, "A"), ("embedded_gap", 1, "AB")]
+        baseline = "zero"
+        if hamiltonian == CORRECTED_GAP_HAMILTONIAN:
+            terms.append(("cross_interaction_delta", 1, "CB"))
+        if hamiltonian == FRAGMENT_GAP_HAMILTONIAN:
+            terms.extend([("fragment_pair_deltas", 1, "declared"),
+                          ("declared_environment_one_body", 1, "declared"),
+                          ("cluster_pair_gap", 1, "CD"), ("cluster_field_gap", -1, "CD")])
+    regions = {"A": "qm", "B": "environment", "AB": "complete-system"}
+    if hamiltonian in (FRAGMENT_GAP_HAMILTONIAN, GROUND_FRAGMENT_HAMILTONIAN):
+        regions.update({"declared": "explicit pairs and optional aligned environment monomers",
+                        "CD": "declared cluster core and environment fragment"})
+    if hamiltonian == CORRECTED_GAP_HAMILTONIAN:
+        regions["CB"] = "declared correction core and environment fragment"
+    return {"total_terms": [{"name": name, "coefficient": sign, "force_coordinates": region}
+                            for name, sign, region in terms],
+            "native_baseline": baseline, "external_energy": "total-minus-native-baseline",
+            "force_definition": "negative-coordinate-gradient-of-each-signed-energy-term",
+            "regions": regions,
+            "scope": "Formula contract only; evaluated components and scientific accuracy require evidence"}
+
+
+def load_run_config(path):
+    """Validate one declared route with its existing strict configuration loader."""
+    path = Path(path).resolve()
+    original = path.read_bytes()
+    raw = json.loads(original, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+    if not isinstance(raw, dict):
+        raise ValueError("Run configuration must be a JSON object")
+    has_selector = "coupling" in raw
+    has_bias = "bias" in raw
+    bias = raw.pop("bias", None)
+    raw = _normalize_selection(raw)
+    # Legacy schema-1 mechanical configurations predate an explicit model ID.
+    hamiltonian = raw.get("hamiltonian", MECHANICAL)
+    module, loader, _, _, _ = _route(hamiltonian)
+    config = (_function(module, "_validate_config")(raw, path) if has_selector or has_bias
+              else _function(module, loader)(path))
+    if path.read_bytes() != original:
+        raise ValueError("Configuration changed while selecting and validating its Hamiltonian")
+    if config.get("hamiltonian") != hamiltonian:
+        raise ValueError("Validated Hamiltonian differs from the declared model")
+    if has_bias:
+        from .bias import bind_bias
+
+        bind_bias(config, bias)
+    return config
+
+
+def _setup_pair(lmp, config):
+    _, _, module, setup, _ = _route(config["hamiltonian"])
+    return _function(module, setup)(lmp, config)
+
+
+def _make_coupling(lmp, comm, config, *, provider_resources=None):
+    _, _, module, _, factory = _route(config["hamiltonian"])
+    if provider_resources is not None:
+        if config["hamiltonian"] != MECHANICAL or config["provider"]["engine"] != "abacus":
+            raise ValueError("External provider resources require ABACUS mechanical coupling")
+        return _function(module, factory)(lmp, comm, config, provider_resources=provider_resources)
+    return _function(module, factory)(lmp, comm, config)
+
+
+def run(config_path, output, *, restart=None):
+    """Reuse the same owner-read/MPI, failure and accepted-checkpoint lifecycle."""
+    from .cli import _run
+
+    return _run(
+        config_path, output, restart=restart, config_loader=load_run_config,
+        setup_pair=_setup_pair, make_coupling=_make_coupling,
+    )
+
+
+def describe_run(config):
+    """Summarize validated choices without claiming numerical qualification."""
+    hamiltonian = config["hamiltonian"]
+    _route(hamiltonian)
+    mechanical = hamiltonian == MECHANICAL
+    regions = (
+        {"full": config["full_region"], "groups": config["groups"],
+         "core_group_ids": config["core_group_ids"], "partitions": config["partitions"]}
+        if hamiltonian in (MOLECULAR, MOLECULAR_EE) else
+        {"qm": config["region"]}
+        if mechanical else
+        {"qm": config["qm_region"], "environment": config["environment_region"]}
+    )
+    description = {
+        "schema_version": 1,
+        "status": "configuration-valid",
+        "hamiltonian": hamiltonian,
+        "coupling": _describe_selection(config),
+        "energy_contract": _energy_contract(config),
+        "assembly": {
+            "native_pair": "deepmd" if mechanical else "zero",
+            "external_quantity": (
+                "qm-minus-region-low-correction" if mechanical else "complete-total-energy-and-forces"
+            ),
+        },
+        "periodic": config["periodic"],
+        "regions": regions,
+        "provider_contract": config["provider_contract"],
+        "qm": config["qm"],
+        "model": {"path": config["model"], "sha256": config["model_sha256"]},
+        "data": {"path": config["data_file"], "sha256": config["data_sha256"]},
+        "physics_sha256": config["physics_sha256"],
+        "software": config["software"],
+        "dynamics": {key: config[key] for key in ("timestep_fs", "steps", "sample_interval")},
+        "qualification": "Configuration only; numerical, scientific and performance evidence is separate",
+    }
+    if mechanical and config["qm"].get("boundary") == "periodic-same-cell":
+        description["boundaries"] = {
+            "full_low": "periodic-3d", "region_low": "periodic-same-cell",
+            "qm": "periodic-same-cell", "embedding": "none",
+            "cell_angstrom": config["qm"]["supercell_angstrom"],
+            "stress": "unsupported",
+        }
+    elif mechanical and config["periodic"]:
+        description["boundaries"] = {
+            "full_low": "periodic-3d", "region_low": "isolated-molecule",
+            "qm": "isolated-molecule", "embedding": "none",
+            "coordinate_mapping": "native-unwrapped-images",
+            "cell": "fixed-native-cell", "all_qm_cancellation": "not-guaranteed",
+            "stress": "unsupported",
+        }
+    if hamiltonian == REFERENCE:
+        description["embedding"] = config["embedding"]
+        description["reference"] = config["reference"]
+    if hamiltonian == MOLECULAR_EE:
+        description["embedding"] = config["embedding"]
+        description["cross"] = config["cross"]
+    if "interaction_delta" in config:
+        description["interaction_delta"] = config["interaction_delta"]
+    if "fragment_interactions" in config:
+        description["fragment_interactions"] = config["fragment_interactions"]
+    if "fragment_response" in config:
+        description["fragment_response"] = config["fragment_response"]
+        description["selected_state_terms"] = ["anchor", "cluster_pair", "cluster_field"]
+    if "bias" in config:
+        from .bias import describe_bias
+
+        description["bias"] = describe_bias(config["bias"])
+        description["unbiased_physics_sha256"] = config["unbiased_physics_sha256"]
+        description["energy_contract"]["total_terms"].append({
+            "name": "static_distance_bias", "coefficient": 1,
+            "force_coordinates": "both restrained atoms",
+        })
+        description["assembly"]["additional_native_bias"] = "spring couple"
+    return description

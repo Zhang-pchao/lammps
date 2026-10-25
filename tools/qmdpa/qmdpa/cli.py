@@ -9,12 +9,13 @@ import sys
 import time
 from pathlib import Path
 
-from .backends import DeepMDBackend, PySCFBackend
+from .backends import DeepMDBackend
 from .config import file_digest, load_config
 from .core import SubtractiveCalculator
 from .lammps import ExternalCoupling
+from .providers import make_qm_provider
 from .region import FixedRegion
-from .runtime import _compare_restart, _frame, _quoted, _root_call, _validate_restart
+from .runtime import _attach_state, _compare_restart, _frame, _quoted, _root_call, _validate_restart
 
 
 def _write_manifest(output, config, *, world_size, restart):
@@ -40,6 +41,19 @@ def _timed_call(timings, name, function, *args):
 
 def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupling):
     """Run additional steps; each successful sample has a matching restart pair."""
+    if restart is not None:
+        try:
+            from mpi4py import MPI
+        except ImportError:
+            # Keep the existing serial-without-mpi4py path and its native check.
+            pass
+        else:
+            from .runtime import preflight_restart
+
+            preflight_restart(
+                config_path, restart, config_loader=config_loader, comm=MPI.COMM_WORLD,
+                output=output
+            )
     from lammps import lammps
 
     initialization_started = time.perf_counter()
@@ -49,6 +63,8 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         "checkpoint_wall_seconds": 0.0,
     }
     coupling = None
+    bias = None
+    provider_resources = None
 
     def metrics():
         return {
@@ -57,6 +73,8 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             "clock": "time.perf_counter",
             **timings,
             "coupling": None if coupling is None else coupling.statistics(),
+            **({"qm_provider": provider_resources.statistics()}
+               if provider_resources is not None else {}),
         }
 
     lmp = lammps(cmdargs=["-log", "none", "-screen", "none", "-nocite"])
@@ -104,7 +122,18 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                 f"velocity all create {config['temperature_K']} {config['velocity_seed']} "
                 "mom yes rot yes dist gaussian"
             )
-        coupling = make_coupling(lmp, comm, config)
+        if config.get("provider", {}).get("engine") == "abacus":
+            from .runtime import ProviderResources
+
+            provider_resources = ProviderResources(output / "qm-backend")
+            coupling = make_coupling(lmp, comm, config, provider_resources=provider_resources)
+        else:
+            coupling = make_coupling(lmp, comm, config)
+        if "bias" in config:
+            from .bias import NativeDistanceBias
+
+            bias = NativeDistanceBias(lmp, config)
+            coupling.native_bias = bias
         _root_call(
             comm,
             lambda: _write_manifest(
@@ -116,15 +145,21 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         )
         timings["initialization_wall_seconds"] = time.perf_counter() - initialization_started
         _timed_call(timings, "run_wall_seconds", coupling.run, 0)
-        initial = _frame(lmp, comm)
+        initial = _frame(lmp, comm, periodic=config["periodic"])
+        if bias is not None:
+            bias.capture(initial, comm)
+        _root_call(comm, lambda: _attach_state(initial, coupling, config))
         if previous is not None:
-            _root_call(comm, lambda: _compare_restart(initial, previous))
+            _root_call(comm, lambda: _compare_restart(initial, previous, config))
         _root_call(comm, lambda: (output / "frames.jsonl").write_text(json.dumps(initial) + "\n"))
         remaining = config["steps"]
         while remaining:
             count = min(remaining, config["sample_interval"])
             _timed_call(timings, "run_wall_seconds", coupling.run, count)
-            frame = _frame(lmp, comm)
+            frame = _frame(lmp, comm, periodic=config["periodic"])
+            if bias is not None:
+                bias.capture(frame, comm)
+            _root_call(comm, lambda frame=frame: _attach_state(frame, coupling, config))
             step = int(lmp.extract_global("ntimestep"))
             restart_path = output / f"restart-{step:012d}.bin"
             _timed_call(
@@ -150,6 +185,10 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
 
             _timed_call(timings, "checkpoint_wall_seconds", _root_call, comm, save_accepted)
             remaining -= count
+        if provider_resources is not None:
+            cleanup_errors = _root_call(comm, provider_resources.close)
+            if cleanup_errors:
+                raise RuntimeError("QM provider cleanup failed: " + "; ".join(cleanup_errors))
         _root_call(
             comm,
             lambda: (output / "result.json").write_text(
@@ -170,6 +209,10 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         if timings["initialization_wall_seconds"] is None:
             timings["initialization_wall_seconds"] = time.perf_counter() - initialization_started
         failure_message = f"{type(exc).__name__}: {exc}"
+        if provider_resources is not None:
+            # Close every registered owner resource while preserving the original
+            # calculation exception. The returned errors enter failure metrics.
+            _root_call(comm, provider_resources.close)
         if output_created:
             try:
                 _root_call(
@@ -179,7 +222,9 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                             {
                                 "status": "failed",
                                 "error": failure_message,
-                                "recovery": "Use the last accepted checkpoint; discard in-memory state.",
+                                "recovery": (
+                                    "Use the last accepted checkpoint; discard in-memory state."
+                                ),
                                 "metrics": metrics(),
                             },
                             indent=2,
@@ -191,7 +236,11 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                 pass  # Preserve the original error if diagnostic I/O also failed.
         raise
     finally:
-        lmp.close()
+        try:
+            if provider_resources is not None:
+                provider_resources.close()
+        finally:
+            lmp.close()
 
 
 def _mechanical_pair(lmp, config):
@@ -201,20 +250,40 @@ def _mechanical_pair(lmp, config):
     lmp.command("pair_coeff * * " + " ".join(config["type_symbols"]))
 
 
-def _mechanical_coupling(lmp, comm, config):
-    calculator = None
+def _mechanical_coupling(lmp, comm, config, *, provider_resources=None):
+    from .state_records import RecordingTDAProvider
+
+    calculator = state_observer = None
+    boundary = ("periodic-same-cell" if config["qm"].get("boundary") == "periodic-same-cell"
+                else "isolated")
 
     def make_calculator():
-        nonlocal calculator
+        nonlocal calculator, state_observer
+        if config["provider"]["engine"] == "abacus":
+            if provider_resources is None:
+                raise ValueError("ABACUS coupling requires an owned runtime directory")
+            provider = provider_resources.register(make_qm_provider(
+                config["qm"], provider=config["provider"], directory=provider_resources.directory
+            ))
+        else:
+            provider = make_qm_provider(config["qm"], provider=config["provider"])
+        if isinstance(provider, RecordingTDAProvider):
+            state_observer = provider
         calculator = SubtractiveCalculator(
-            DeepMDBackend(config["model"], charge_spin=config.get("region_charge_spin")),
-            PySCFBackend(**config["qm"]),
+            DeepMDBackend(config["model"], charge_spin=config.get("region_charge_spin")), provider,
+            region_boundary=boundary,
         )
 
     _root_call(comm, make_calculator)
     region = FixedRegion(tuple(config["region"]["atom_ids"]), tuple(config["region"]["symbols"]))
     coupling = ExternalCoupling(
-        lmp, region, calculator, comm=comm, type_symbols=tuple(config["type_symbols"])
+        lmp,
+        region,
+        calculator,
+        comm=comm,
+        type_symbols=tuple(config["type_symbols"]),
+        state_observer=state_observer,
+        region_boundary=boundary,
     )
     return coupling
 
@@ -238,9 +307,39 @@ def main(argv=None):
     runner.add_argument("config", type=Path)
     runner.add_argument("--output", required=True, type=Path)
     runner.add_argument("--restart", type=Path)
+    validator = commands.add_parser("validate", help="Validate a configuration without evaluation")
+    validator.add_argument("config", type=Path)
+    validator.add_argument("--restart", type=Path, help="Also verify restart input integrity")
+    for command, help_text in (
+        ("prepare-state", "Prepare a reference for a supported selected state"),
+        ("prepare-states", "Prepare several CPU RHF/PBE0 or GPU RHF references with one common solve"),
+    ):
+        state = commands.add_parser(command, help=help_text)
+        state.add_argument("request", type=Path)
+        state.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
-        run(args.config, args.output, restart=args.restart)
+        from .dispatch import describe_run, load_run_config
+        from .dispatch import run as run_configured
+
+        if args.command in ("prepare-state", "prepare-states"):
+            from .state_inputs import prepare_state, prepare_states
+
+            prepare = prepare_state if args.command == "prepare-state" else prepare_states
+            print(json.dumps(prepare(args.request, args.output), indent=2))
+        elif args.command == "validate":
+            config = load_run_config(args.config)
+            description = describe_run(config)
+            if args.restart is not None:
+                _validate_restart(args.restart, config)
+                description["restart"] = {
+                    "path": str(args.restart.resolve()),
+                    "status": "input-valid",
+                    "native_recomputed_state": "not evaluated",
+                }
+            print(json.dumps(description, indent=2))
+        else:
+            run_configured(args.config, args.output, restart=args.restart)
     except Exception as exc:
         print(f"QM/DPA failed: {exc}", file=sys.stderr)
         return 1

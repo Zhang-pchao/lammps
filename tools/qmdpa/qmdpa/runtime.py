@@ -27,6 +27,38 @@ def _root_call(comm, function):
     return value
 
 
+class ProviderResources:
+    """Owned external providers for one run; no calculation or automatic retry."""
+
+    def __init__(self, directory):
+        self.directory = Path(directory).resolve()
+        self._providers = []
+        self._closed = False
+        self._errors = []
+
+    def register(self, provider):
+        if self._closed:
+            raise RuntimeError("Cannot add a provider after run cleanup")
+        if not callable(getattr(provider, "close_checked", None)):
+            raise TypeError("External providers require checked resource cleanup")
+        self._providers.append(provider)
+        return provider
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            for provider in reversed(self._providers):
+                try:
+                    provider.close_checked()
+                except Exception as exc:
+                    self._errors.append(f"{type(exc).__name__}: {exc}")
+        return list(self._errors)
+
+    def statistics(self):
+        return {"closed": self._closed, "cleanup_errors": list(self._errors),
+                "providers": [dict(provider.statistics) for provider in self._providers]}
+
+
 def _quoted(path):
     value = str(path)
     if any(character in value for character in ('"', "$", "\n", "\r")):
@@ -65,7 +97,32 @@ def _validate_frame(frame):
         raise ValueError("Frame atom IDs must be unique and sorted")
 
 
-def _frame(lmp, comm):
+def _canonical_periodic_frame(frame, box):
+    """Keep wrapped coordinates and image counts equivalent across restart I/O.
+
+    LAMMPS may leave accepted coordinates outside the box until write_restart
+    remaps and migrates atoms. Transform the recorded representation only;
+    never mutate native coordinates, forces or velocities after a callback.
+    """
+    from .region import box_matrix
+
+    if len(box[5]) != 3 or not all(box[5]):
+        raise ValueError("Periodic accepted frames require full three-dimensional PBC")
+    cell = box_matrix(box)
+    xyz = np.array([atom["x"] for atom in frame["atoms"]], dtype=float)
+    images = np.array([atom["image"] for atom in frame["atoms"]], dtype=np.int64)
+    fractional = np.linalg.solve(cell.T, (xyz - np.asarray(box[0])).T).T
+    shifts = np.floor(fractional)
+    if not np.isfinite(shifts).all() or np.max(np.abs(shifts)) >= 2**52:
+        raise ValueError("Periodic frame image shifts exceed exact integer representation")
+    shifts = shifts.astype(np.int64)
+    wrapped = xyz - shifts @ cell
+    for atom, position, image in zip(frame["atoms"], wrapped, images + shifts):
+        atom["x"] = position.tolist()
+        atom["image"] = image.tolist()
+
+
+def _frame(lmp, comm, *, periodic=False):
     try:
         count = lmp.extract_setting("nlocal")
         rows = []
@@ -106,6 +163,9 @@ def _frame(lmp, comm):
             "atoms": atoms,
         }
         _validate_frame(frame)
+        if periodic:
+            _canonical_periodic_frame(frame, lmp.extract_box())
+            _validate_frame(frame)
 
     _root_call(comm, assemble)
     return frame
@@ -115,6 +175,12 @@ def _validate_restart(checkpoint_path, config):
     checkpoint = json.loads(Path(checkpoint_path).read_text())
     if checkpoint["physics_sha256"] != config["physics_sha256"]:
         raise ValueError("Restart physics configuration differs from this run")
+    from .state_records import validate_frame_state
+
+    validate_frame_state(checkpoint["frame"], config)
+    from .bias import validate_bias_frame
+
+    validate_bias_frame(checkpoint["frame"], config)
     restart = Path(checkpoint_path).resolve().parent / checkpoint["restart_file"]
     if file_digest(restart) != checkpoint["restart_sha256"]:
         raise ValueError("Restart binary checksum mismatch")
@@ -122,10 +188,61 @@ def _validate_restart(checkpoint_path, config):
     return checkpoint
 
 
-def _compare_restart(frame, checkpoint):
+def preflight_restart(config_path, checkpoint_path, *, config_loader, comm=None, output=None):
+    """Reject invalid restart inputs without initializing a native engine.
+
+    The native driver repeats validation before reading the restart, so a
+    successful preflight cannot bypass changed-input or recomputed-state checks.
+    Supply the launch communicator when called collectively.
+    """
+    if checkpoint_path is None:
+        return None
+    try:
+        return _root_call(
+            comm, lambda: _validate_restart(checkpoint_path, config_loader(config_path))
+        )
+    except Exception as exc:
+        failure_message = f"{type(exc).__name__}: {exc}"
+        if output is not None:
+            def save_failure():
+                directory = Path(output).resolve()
+                directory.mkdir(parents=True, exist_ok=False)
+                (directory / "failure.json").write_text(json.dumps({
+                    "status": "failed", "stage": "restart-preflight",
+                    "error": failure_message, "native_initialized": False,
+                    "recovery": "Use the last accepted checkpoint; no state was advanced.",
+                }, indent=2) + "\n")
+            try:
+                _root_call(comm, save_failure)
+            except RuntimeError:
+                pass  # Never replace old output or hide the original input error.
+        raise
+
+
+def _compare_restart(frame, checkpoint, config=None):
     reference = checkpoint["frame"]
+    from .bias import compare_bias_restart
+
+    compare_bias_restart(frame, reference, {} if config is None else config)
     _validate_frame(frame)
     _validate_frame(reference)
+    from .state_records import validate_frame_state
+
+    for item in (frame, reference):
+        validate_frame_state(item, {} if config is None else config)
+    actual_state, expected_state = frame.get("electronic_state"), reference.get("electronic_state")
+    if (actual_state is None) != (expected_state is None):
+        raise ValueError("Restart electronic-state record is missing")
+    if actual_state is not None and any(
+        actual_state[name] != expected_state[name] for name in ("reference_sha256", "selected_root")
+    ):
+        raise ValueError("Restart recomputation selected a different electronic state")
+    for role, actual in frame.get("auxiliary_electronic_states", {}).items():
+        expected = reference["auxiliary_electronic_states"][role]
+        if any(actual[name] != expected[name] for name in ("reference_sha256", "selected_root")):
+            raise ValueError("Restart recomputation selected a different auxiliary electronic state")
+        if abs(actual["provider_energy_ev"] - expected["provider_energy_ev"]) > 1e-6:
+            raise ValueError("Restart auxiliary provider energy differs by more than 1e-6 eV")
     if frame["step"] != reference["step"]:
         raise ValueError("Restart timestep mismatch")
     if [atom["id"] for atom in frame["atoms"]] != [atom["id"] for atom in reference["atoms"]]:
@@ -137,3 +254,28 @@ def _compare_restart(frame, checkpoint):
         expected = [atom[name] for atom in reference["atoms"]]
         if not np.allclose(actual, expected, atol=tolerance, rtol=0):
             raise ValueError(f"Restart {name} differs beyond tolerance {tolerance}")
+
+
+def _attach_state(frame, coupling, config):
+    """Validate the same successful callback before any accepted-frame write."""
+    from .state_records import configured_reference, validate_frame_state
+
+    if configured_reference(config) is None:
+        return
+    if getattr(getattr(coupling, "comm", None), "rank", 0) != 0:
+        raise ValueError("Electronic-state frame assembly belongs only to rank zero")
+    if coupling.failure is not None or coupling.last_step != frame["step"]:
+        raise ValueError("Electronic-state frame requires the successful current callback")
+    observer = coupling.state_observer
+    if observer is None:
+        raise ValueError("RHF/TDA coupling did not retain its electronic-state provider")
+    records = {"electronic_state": observer.accepted_record(frame)}
+    auxiliary = getattr(observer, "accepted_auxiliary_records", None)
+    if auxiliary is not None:
+        records["auxiliary_electronic_states"] = auxiliary(frame)
+    try:
+        validate_frame_state({**frame, **records}, config)
+    except BaseException:
+        observer.clear()
+        raise
+    frame.update(records)

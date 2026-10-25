@@ -12,7 +12,9 @@ from pathlib import Path
 
 import numpy as np
 
+from .providers import provider_contract, validate_provider, validate_provider_regions
 from .region import FixedRegion
+from .state_inputs import resolve_provider_reference
 
 
 def file_digest(path):
@@ -29,22 +31,47 @@ def _positive_integer(value, name, *, allow_zero=False):
     return value
 
 
-def software_identity():
+def software_identity(provider=None):
     """Identify the implementation and numerical dependencies for restart checks."""
     digest = hashlib.sha256()
     for source in sorted(Path(__file__).parent.glob("*.py")):
         digest.update(source.name.encode() + b"\0" + source.read_bytes())
     versions = {}
-    for name in ("numpy", "deepmd-kit", "pyscf"):
+    packages = ["numpy", "deepmd-kit", "pyscf"]
+    if provider is not None and provider["engine"] == "gpu4pyscf":
+        # Include wheel and source-install names without importing GPU libraries.
+        packages += ["scipy", "torch", "mpi4py", "gpu4pyscf", "cupy",
+                     "gpu4pyscf-cuda12x", "gpu4pyscf-cuda13x",
+                     "gpu4pyscf-libxc-cuda12x", "gpu4pyscf-libxc-cuda13x",
+                     "cupy-cuda12x", "cupy-cuda13x", "cutensor-cu12", "cutensor-cu13"]
+    if provider is not None and provider["engine"] == "abacus":
+        packages += ["ase", "abacuslite"]
+    for name in packages:
         try:
             versions[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             versions[name] = None
-    return {
+    result = {
         "coupling_sha256": digest.hexdigest(),
         "python": platform.python_version(),
         "packages": versions,
     }
+    if provider is not None and provider["engine"] == "abacus":
+        sources = {}
+        for name in ("ase", "abacuslite"):
+            try:
+                distribution = importlib.metadata.distribution(name)
+            except importlib.metadata.PackageNotFoundError:
+                sources[name] = None
+                continue
+            source = hashlib.sha256()
+            for entry in sorted(distribution.files or (), key=str):
+                if str(entry).endswith(".py"):
+                    source.update(str(entry).encode() + b"\0")
+                    source.update(Path(distribution.locate_file(entry)).read_bytes())
+            sources[name] = source.hexdigest()
+        result["backend_package_sources"] = sources
+    return result
 
 
 def validate_region(region):
@@ -68,8 +95,22 @@ def validate_region(region):
         raise ValueError("region.molecules must partition the declared region IDs exactly")
 
 
-def validate_qm(qm, *, electrostatic=False):
-    """Resolve supported finite PySCF settings without importing PySCF."""
+def validate_qm(qm, *, electrostatic=False, provider=None, base_dir=None):
+    """Resolve method-specific finite settings without importing PySCF."""
+    normalized = validate_provider(provider, electrostatic=electrostatic)
+    if normalized["engine"] == "abacus":
+        from .abacus import validate_mechanical_abacus_settings
+
+        return validate_mechanical_abacus_settings(qm, Path.cwd() if base_dir is None else base_dir)
+    if normalized["state"]["method"] != "ground":
+        from dataclasses import asdict
+
+        from .providers import load_tda_reference, tda_settings
+
+        method = normalized["state"]["method"]
+        reference = load_tda_reference(method, normalized["state"]["reference"],
+                                       engine=normalized["engine"])
+        return asdict(tda_settings(qm, method, reference))
     qm_defaults = {
         "xc": "pbe",
         "basis": "def2-svp",
@@ -84,9 +125,21 @@ def validate_qm(qm, *, electrostatic=False):
     }
     if electrostatic:
         qm_defaults.update(nlc_grid_level=None, include_qm_dipole=False)
-    if not isinstance(qm, dict) or set(qm).difference(qm_defaults):
+    allowed = set(qm_defaults) | {"nlc_grid_level", "density_fit"}
+    if not isinstance(qm, dict) or set(qm).difference(allowed):
         raise ValueError("qm contains unsupported PySCF configuration keys")
     qm = {**qm_defaults, **qm}
+    from .backends import validate_density_fit
+
+    density_fit = validate_density_fit(qm.get("density_fit"))
+    if density_fit is None:
+        # Keep conventional-integral inputs and normalized restart records unchanged.
+        qm.pop("density_fit", None)
+    else:
+        qm["density_fit"] = density_fit
+    if not electrostatic and qm.get("nlc_grid_level") is None:
+        # Preserve the ordinary ground-state defaults and normalized records.
+        qm.pop("nlc_grid_level", None)
     for key in ("xc", "basis"):
         if not isinstance(qm[key], str) or not qm[key].strip():
             raise ValueError(f"qm.{key} must be a nonempty string")
@@ -109,20 +162,44 @@ def validate_qm(qm, *, electrostatic=False):
         or grad_tol <= 0
     ):
         raise ValueError("qm.conv_tol_grad must be finite and positive or null")
+    if qm.get("nlc_grid_level") is not None:
+        _positive_integer(qm["nlc_grid_level"], "qm.nlc_grid_level", allow_zero=True)
     if electrostatic:
-        if qm["nlc_grid_level"] is not None:
-            _positive_integer(qm["nlc_grid_level"], "qm.nlc_grid_level", allow_zero=True)
         if type(qm["include_qm_dipole"]) is not bool:
             raise ValueError("qm.include_qm_dipole must be true or false")
+    if normalized["engine"] == "gpu4pyscf":
+        from .gpu_backends import validate_gpu_settings
+
+        qm = validate_gpu_settings(qm)
     return qm
 
 
 def load_config(path):
     """Resolve declared files and validate the deliberately small run schema."""
     path = Path(path).resolve()
-    config = json.loads(path.read_text())
+    from .charges import _invalid_constant, _unique_object
+
+    config = json.loads(
+        path.read_text(), object_pairs_hook=_unique_object, parse_constant=_invalid_constant
+    )
+    return _validate_config(config, path)
+
+
+def _validate_config(config, path):
+    """Validate a parsed request using its original file location for relative paths."""
+    from copy import deepcopy
+
+    config = deepcopy(config)
+    path = Path(path).resolve()
+    if not isinstance(config, dict):
+        raise ValueError("Mechanical configuration must be a JSON object")
+    if config.get("hamiltonian", "fixed-region-mechanical") != "fixed-region-mechanical":
+        raise ValueError("Mechanical configuration requires fixed-region-mechanical")
+    config["hamiltonian"] = "fixed-region-mechanical"
     allowed = {
+        "hamiltonian",
         "schema_version",
+        "provider",
         "data_file",
         "model",
         "model_sha256",
@@ -173,7 +250,15 @@ def load_config(path):
             or value[1] < 1
         ):
             raise ValueError(f"{key} requires integer charge and positive multiplicity")
-    qm = config["qm"] = validate_qm(config["qm"])
+    config["provider"] = validate_provider(resolve_provider_reference(config.get("provider"), path))
+    qm = config["qm"] = validate_qm(config["qm"], provider=config["provider"], base_dir=path.parent)
+    boundary = "periodic-same-cell" if qm.get("boundary") == "periodic-same-cell" else "isolated"
+    config["provider_contract"] = provider_contract(config["provider"], region_boundary=boundary)
+    validate_provider_regions(config["provider"], config["region"], periodic=config["periodic"],
+                              region_boundary=boundary)
+    if config["provider"]["engine"] == "abacus" and any(
+            symbol not in qm["pseudopotentials"] for symbol in config["region"]["symbols"]):
+        raise ValueError("An ABACUS region element has no declared pseudopotential")
     state = config.get("region_charge_spin")
     if state is not None and state != [qm["charge"], qm["multiplicity"]]:
         raise ValueError("Region DP and QM electronic states must match in this driver")
@@ -195,11 +280,14 @@ def load_config(path):
             raise ValueError("temperature_K must be finite and positive")
         config["temperature_K"] = temperature
         _positive_integer(config["velocity_seed"], "velocity_seed")
-    config["software"] = software_identity()
+    config["software"] = software_identity(config["provider"])
     physics = {
         key: config.get(key)
         for key in (
+            "hamiltonian",
             "model_sha256",
+            "provider",
+            "provider_contract",
             "software",
             "data_sha256",
             "type_symbols",

@@ -108,6 +108,24 @@ class DeepMDBackend:
             raise EvaluationError(f"DeePMD evaluation failed: {exc}") from exc
 
 
+def validate_density_fit(value):
+    """Normalize the explicit ground-state auxiliary basis without an engine import."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"auxbasis"}:
+        raise ValueError("density_fit requires exactly one explicit auxbasis name")
+    name = value["auxbasis"]
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("density_fit.auxbasis must be a nonempty basis name")
+    # External basis files need independent content identities; this first
+    # route accepts named bases from the installed PySCF distribution only.
+    import re
+
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_+*\-]*", name) is None:
+        raise ValueError("density_fit.auxbasis must name an installed basis, not a file")
+    return {"auxbasis": name}
+
+
 class PySCFBackend:
     """Isolated molecular DFT with checked SCF convergence and analytic forces.
 
@@ -117,7 +135,12 @@ class PySCFBackend:
     integration grid response in DFT gradients by default. No SCF restart or
     previous-frame force fallback is used. ``conv_tol_grad`` optionally controls
     the SCF orbital-gradient stopping criterion independently of energy change;
-    None retains the PySCF default.
+    None retains the PySCF default. ``nlc_grid_level`` optionally sets the
+    nonlocal-correlation grid independently of ``grid_level``; None leaves
+    that grid at the PySCF default. Optional ``density_fit={"auxbasis": name}``
+    uses official Coulomb/exchange fitting with auxiliary-basis response enabled
+    in every force evaluation. It changes the integral approximation and is
+    not an exact-reuse optimization; None preserves conventional integrals.
     """
 
     def __init__(
@@ -131,13 +154,19 @@ class PySCFBackend:
         conv_tol_grad=None,
         max_cycle=100,
         grid_level=3,
+        nlc_grid_level=None,
         grid_response=True,
         threads=None,
+        density_fit=None,
     ):
+        self.density_fit = validate_density_fit(density_fit)
         self.charge = _integer(charge, "Charge")
         self.multiplicity = _integer(multiplicity, "Multiplicity", 1)
         self.max_cycle = _integer(max_cycle, "Maximum SCF cycles", 1)
         self.grid_level = _integer(grid_level, "Integration grid level", 0)
+        self.nlc_grid_level = (
+            None if nlc_grid_level is None else _integer(nlc_grid_level, "NLC grid level", 0)
+        )
         if type(grid_response) is not bool:
             raise ValueError("grid_response must be true or false")
         self.grid_response = grid_response
@@ -184,13 +213,32 @@ class PySCFBackend:
             verbose=0,
         )
         method = self._dft.RKS(molecule) if molecule.spin == 0 else self._dft.UKS(molecule)
+        if self.density_fit is not None:
+            method = method.density_fit(
+                auxbasis=self.density_fit["auxbasis"], only_dfj=False
+            )
         method.xc = self.xc
         method.conv_tol = self.conv_tol
         if self.conv_tol_grad is not None:
             method.conv_tol_grad = self.conv_tol_grad
         method.max_cycle = self.max_cycle
         method.grids.level = self.grid_level
+        if self.nlc_grid_level is not None:
+            method.nlcgrids.level = self.nlc_grid_level
         return method
+
+    def _make_gradient(self, method):
+        """Use the same complete gradient controls for isolated and embedded QM."""
+        gradient = method.nuc_grad_method()
+        gradient.grid_response = self.grid_response
+        if self.density_fit is not None:
+            if (getattr(method, "with_df", None) is None
+                    or not hasattr(gradient, "auxbasis_response")):
+                raise EvaluationError(
+                    "PySCF density fitting requires an auxiliary-basis response gradient"
+                )
+            gradient.auxbasis_response = True
+        return gradient
 
     def evaluate(self, geometry: Geometry) -> Evaluation:
         if geometry.periodic:
@@ -200,8 +248,7 @@ class PySCFBackend:
             energy = method.kernel()
             if not method.converged:
                 raise EvaluationError(f"PySCF SCF did not converge within {self.max_cycle} cycles")
-            gradient_method = method.nuc_grad_method()
-            gradient_method.grid_response = self.grid_response
+            gradient_method = self._make_gradient(method)
             gradient = gradient_method.kernel()
             forces = -np.asarray(gradient) * (self._hartree_ev / self._bohr_angstrom)
             if forces.shape != geometry.positions.shape:
