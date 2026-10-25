@@ -54,11 +54,15 @@ def _validate_config(config, path):
     )
     if provider != {"engine": "pyscf", "device": "cpu", "state": {"method": "ground"}}:
         raise ValueError("Reference dynamics currently requires CPU PySCF ground state")
+    embedded_qm = validate_qm(config["qm"], electrostatic=True, provider=provider)
     common = {k: v for k, v in config.items() if k not in extra}
+    # The shared mechanical validator checks files/dynamics with ground settings;
+    # the embedded-only dipole diagnostic is validated above and retained below.
+    common["qm"] = {k: v for k, v in embedded_qm.items() if k != "include_qm_dipole"}
     common.update(hamiltonian="fixed-region-mechanical", region=config["qm_region"])
     normalized = validate_common(common, path)
     normalized.pop("region")
-    normalized["qm"] = validate_qm(config["qm"], electrostatic=True, provider=provider)
+    normalized["qm"] = embedded_qm
     normalized.update({k: config[k] for k in extra})
     normalized["hamiltonian"] = HAMILTONIAN
     qm, env = normalized["qm_region"], normalized["environment_region"]

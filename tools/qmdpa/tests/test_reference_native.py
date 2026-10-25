@@ -84,6 +84,24 @@ def test_reference_total_assembly_and_selection(request_config):
     assert describe_run(selected)["reference"] == value["reference"]
 
 
+@pytest.mark.parametrize("include_dipole", [False, True])
+def test_normalized_embedded_settings_can_be_staged_again(request_config, include_dipole):
+    raw, _path = request_config
+    raw["qm"]["include_qm_dipole"] = include_dipole
+    original = load(request_config)
+    raw["qm"] = original["qm"]
+    raw["provider"] = original["provider"]
+    staged = load(request_config)
+    assert staged["qm"] == original["qm"]
+    assert staged["physics_sha256"] == original["physics_sha256"]
+
+
+def test_invalid_embedded_diagnostic_is_not_hidden_by_common_validation(request_config):
+    request_config[0]["qm"]["include_qm_dipole"] = "true"
+    with pytest.raises(ValueError, match="include_qm_dipole"):
+        load(request_config)
+
+
 def test_budget_does_not_change_reference_identity(request_config):
     original = load(request_config)["physics_sha256"]
     request_config[0].update(steps=15, sample_interval=3)
