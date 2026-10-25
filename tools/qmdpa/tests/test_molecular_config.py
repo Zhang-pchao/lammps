@@ -42,7 +42,9 @@ def document():
     return data
 
 
-def test_unified_config_describes_total_native_assembly_and_canonical_family(tmp_path):
+def test_unified_config_describes_total_native_assembly_and_canonical_family(tmp_path, monkeypatch):
+    # Keep the direct and dispatched loads on the same synthetic identity.
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "fixture")
     cfg = load(tmp_path, document())
     path = tmp_path / "config.json"
     via_unified = dispatch.load_run_config(path)

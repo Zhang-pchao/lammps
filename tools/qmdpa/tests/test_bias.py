@@ -35,7 +35,11 @@ def restraint(ids=(1, 2), k=0.2, target=0.5):
 
 
 @pytest.mark.parametrize("kind", ["mechanical", "additive", "gap"])
-def test_unified_loader_binds_bias_without_changing_coupling(tmp_path, gap_config, kind):
+def test_unified_loader_binds_bias_without_changing_coupling(
+    tmp_path, gap_config, kind, monkeypatch
+):
+    # These unevaluated configurations have synthetic dependency identities.
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "test-version")
     raw = {"mechanical": mechanical, "additive": additive}.get(kind)
     raw = raw(tmp_path) if raw is not None else gap_config
     before = dispatch.load_run_config(save(tmp_path, raw))

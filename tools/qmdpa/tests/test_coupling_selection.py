@@ -25,21 +25,23 @@ __all__ = ['charge_case', 'case', 'gap_config']
 
 
 def compare(tmp_path, value, choice):
-    old = dispatch.load_run_config(save(tmp_path, value))
-    selected = copy.deepcopy(value)
-    selected.pop("hamiltonian", None)
-    selected["coupling"] = choice
-    path = save(tmp_path, selected)
-    original = path.read_bytes()
-    new = dispatch.load_run_config(path)
-    assert path.read_bytes() == original
-    assert new == old
-    assert "coupling" not in new
-    assert dispatch.describe_run(new)["coupling"] == choice
-    # An explicit, agreeing model identifier is equally valid.
-    selected["hamiltonian"] = old["hamiltonian"]
-    assert dispatch.load_run_config(save(tmp_path, selected)) == old
-    return new
+    # Match the other configuration fixtures without requiring backend installs.
+    with patch("qmdpa.config.importlib.metadata.version", return_value="test-version"):
+        old = dispatch.load_run_config(save(tmp_path, value))
+        selected = copy.deepcopy(value)
+        selected.pop("hamiltonian", None)
+        selected["coupling"] = choice
+        path = save(tmp_path, selected)
+        original = path.read_bytes()
+        new = dispatch.load_run_config(path)
+        assert path.read_bytes() == original
+        assert new == old
+        assert "coupling" not in new
+        assert dispatch.describe_run(new)["coupling"] == choice
+        # An explicit, agreeing model identifier is equally valid.
+        selected["hamiltonian"] = old["hamiltonian"]
+        assert dispatch.load_run_config(save(tmp_path, selected)) == old
+        return new
 
 
 @pytest.mark.parametrize("embedding", ["mechanical", "electrostatic"])
