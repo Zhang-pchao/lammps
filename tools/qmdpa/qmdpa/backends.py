@@ -258,3 +258,16 @@ class PySCFBackend:
             raise
         except Exception as exc:
             raise EvaluationError(f"PySCF evaluation failed: {exc}") from exc
+
+
+def make_qm_backend(settings, *, directory):
+    """Construct the selected QM provider; optional engines remain lazy imports."""
+    options = dict(settings)
+    engine = options.pop("engine", "pyscf")
+    if engine == "pyscf":
+        return PySCFBackend(**options)
+    if engine == "abacus":
+        from .abacus import AbacusBackend
+
+        return AbacusBackend(**options, directory=directory)
+    raise ValueError("Unknown QM engine")

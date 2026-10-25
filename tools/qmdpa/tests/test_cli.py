@@ -125,6 +125,66 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown"):
             self.load(config)
 
+    def test_provider_engine_default_and_explicit_pyscf_are_equivalent(self):
+        implicit = self.load()
+        self.assertEqual(implicit["provider"]["engine"], "pyscf")
+        self.config["provider"] = {
+            "engine": "pyscf", "device": "cpu", "state": {"method": "ground"}
+        }
+        self.assertEqual(implicit["physics_sha256"], self.load()["physics_sha256"])
+        self.config["qm"]["engine"] = "pyscf"
+        with self.assertRaises(ValueError):
+            self.load()
+
+    def test_abacus_runtime_and_reference_settings_enter_restart_identity(self):
+        executable = self.directory / "abacus"
+        executable.write_bytes(b"unit-test executable identity only")
+        executable.chmod(0o700)
+        pseudo = self.directory / "H.upf"
+        pseudo.write_bytes(b"unit-test pseudopotential identity only")
+        self.config["provider"] = {
+            "engine": "abacus", "device": "cpu", "state": {"method": "ground"}
+        }
+        self.config["qm"] = {
+            "execution_mode": "fileio",
+            "coordinate_gauge": "arithmetic-centroid",
+            "executable": "abacus",
+            "executable_sha256": file_digest(executable),
+            "pseudopotentials": {
+                symbol: {"path": "H.upf", "sha256": file_digest(pseudo)} for symbol in ("H", "O")
+            },
+            "supercell_angstrom": [12.0, 12.0, 12.0],
+            "coordinate_offset_angstrom": [6.0, 6.0, 6.0],
+        }
+        first = self.load()
+        self.assertEqual(first["qm"]["executable"], str(executable))
+        self.assertEqual(first["qm"]["pseudopotentials"]["H"]["path"], str(pseudo))
+        explicit_default = deepcopy(self.config)
+        explicit_default["qm"]["ks_solver"] = "cg"
+        explicit_default["qm"]["execution_mode"] = "fileio"
+        explicit_default["qm"]["coordinate_gauge"] = "arithmetic-centroid"
+        self.assertEqual(first["physics_sha256"], self.load(explicit_default)["physics_sha256"])
+        for key, value in (
+            ("ecutwfc", 80.0),
+            ("scf_thr", 1e-11),
+            ("ks_solver", "dav"),
+            ("ks_solver", "dav_subspace"),
+            ("supercell_angstrom", [14.0, 14.0, 14.0]),
+            ("coordinate_offset_angstrom", [6.1, 6.0, 6.0]),
+        ):
+            candidate = deepcopy(self.config)
+            candidate["qm"][key] = value
+            self.assertNotEqual(first["physics_sha256"], self.load(candidate)["physics_sha256"])
+        cold = deepcopy(self.config)
+        cold["qm"]["scf_thr"] = 1e-11
+        checkpoint = self.directory / "socket-checkpoint.json"
+        checkpoint.write_text(json.dumps({"physics_sha256": first["physics_sha256"]}))
+        with self.assertRaisesRegex(ValueError, "physics configuration differs"):
+            _validate_restart(checkpoint, self.load(cold))
+        pseudo.write_bytes(b"different pseudopotential")
+        with self.assertRaisesRegex(ValueError, "SHA256|checksum|digest"):
+            self.load()
+
     def test_budget_and_output_frequency_do_not_change_physics_identity(self):
         first = self.load()["physics_sha256"]
         self.config.update(steps=1000, sample_interval=10)
