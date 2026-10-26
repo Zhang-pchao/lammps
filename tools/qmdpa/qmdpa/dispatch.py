@@ -28,7 +28,10 @@ WATER_BUFFER = "finite-water-buffer-mechanical"
 REACTIVE_WATER = "finite-reactive-water-mechanical"
 REFERENCE = "finite-electrostatic-reference-subtractive"
 PERIODIC_EE = "periodic-electrostatic-reference-subtractive"
+EHRENFEST = "finite-two-state-ehrenfest-mechanical"
 _ROUTES = {
+    EHRENFEST: ("ehrenfest_config", "load_ehrenfest_config", "ehrenfest_cli",
+                 "_zero_pair", "_ehrenfest_coupling"),
     PERIODIC_EE: ("periodic_ee_config", "load_periodic_ee_config", "periodic_ee_cli",
                    "_zero_pair", "_periodic_ee_coupling"),
     REACTIVE_WATER: ("reactive_config", "load_reactive_config", "reactive_cli",
@@ -83,6 +86,11 @@ def _normalize_selection(raw):
             or set(choice) - required - {"ee_model", "me_model"}):
         raise ValueError("coupling requires surface, embedding and an optional matching me_model or ee_model")
     surface, embedding = choice["surface"], choice["embedding"]
+    if choice == {"surface": "two-state", "embedding": "mechanical", "me_model": "ehrenfest"}:
+        if "hamiltonian" in config and config["hamiltonian"] != EHRENFEST:
+            raise ValueError("Ehrenfest selector conflicts with the explicit Hamiltonian")
+        config["hamiltonian"] = EHRENFEST
+        return config
     if surface not in ("ground", "selected"):
         raise ValueError("coupling.surface must be ground or selected")
     if embedding == "mechanical":
@@ -128,6 +136,8 @@ def _normalize_selection(raw):
 
 
 def _describe_selection(config):
+    if config["hamiltonian"] == EHRENFEST:
+        return {"surface": "two-state", "embedding": "mechanical", "me_model": "ehrenfest"}
     mechanical = config["hamiltonian"] in (MECHANICAL, GROUND_FRAGMENT_HAMILTONIAN, MOLECULAR, WATER_BUFFER, REACTIVE_WATER)
     result = {"surface": "ground" if config["provider"]["state"]["method"] == "ground" else "selected",
               "embedding": "mechanical" if mechanical else "electrostatic"}
@@ -150,6 +160,14 @@ def _energy_contract(config):
     """Describe existing terms; no backend calls or extra electronic calculations."""
     hamiltonian = config["hamiltonian"]
     selected = config["provider"]["state"]["method"] != "ground"
+    if hamiltonian == EHRENFEST:
+        return {"native_baseline": "zero", "external_energy": "complete-expectation-potential",
+                "state_total": "U_i=DPA(full)+E_i(Q)-DPA(Q)",
+                "potential": "sum_i |c_i|^2 U_i",
+                "force_definition": "population-weighted-state-forces-minus-2-Re(conj(c0)*c1)-gap-d01",
+                "derivative_coupling": "d01=<0|grad 1>; environment rows zero",
+                "electronic_generator": "diag(U)-i*hbar*(v.d)",
+                "scope": "Two fixed-reference real singlets; no ETF, hopping, SOC or adaptive region"}
     if hamiltonian == MOLECULAR_EE:
         return {
             "total_terms": [{"name": "normalized_weighted_complete_additive_totals",
@@ -251,6 +269,8 @@ def load_run_config(path):
     raw = _normalize_selection(raw)
     # Legacy schema-1 mechanical configurations predate an explicit model ID.
     hamiltonian = raw.get("hamiltonian", MECHANICAL)
+    if hamiltonian == EHRENFEST and any((has_bias, has_sampling, has_thermostat, has_execution)):
+        raise ValueError("Ehrenfest currently admits plain finite NVE without sampling or execution extensions")
     module, loader, _, _, _ = _route(hamiltonian)
     config = (_function(module, "_validate_config")(raw, path) if has_selector or has_bias or has_sampling or has_thermostat or has_execution
               else _function(module, loader)(path))
@@ -307,6 +327,8 @@ def describe_run(config):
     _route(hamiltonian)
     mechanical = hamiltonian == MECHANICAL
     regions = (
+        {"full": config["full_region"], "qm": config["qm_region"]}
+        if hamiltonian == EHRENFEST else
         {"full": config["full_region"], "groups": config["groups"],
          "reactive_region": config["reactive_region"], "partitions": config["partitions"]}
         if hamiltonian == REACTIVE_WATER else
@@ -355,6 +377,11 @@ def describe_run(config):
             "cell": "fixed-native-cell", "all_qm_cancellation": "not-guaranteed",
             "stress": "unsupported",
         }
+    if hamiltonian == EHRENFEST:
+        description["electronic_dynamics"] = {
+            "algorithm": "two-state-ehrenfest", "initial_amplitudes": config["initial_amplitudes"],
+            "reference_sha256": config["pair_reference"]["sha256"],
+            "nuclear_momentum": "not separately conserved by the uncorrected NAC convention"}
     if hamiltonian == PERIODIC_EE:
         description["embedding"] = config["qm"]["periodic_field"]
         description["reference"] = config["reference"]

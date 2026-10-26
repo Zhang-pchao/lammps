@@ -445,3 +445,13 @@ class PeriodicReferenceExternalCoupling(AdditiveExternalCoupling):
 
         periodic = Geometry(geometry.atom_ids, geometry.symbols, geometry.positions, self._cell)
         return _evaluate(self.calculator, periodic)
+
+
+class EhrenfestExternalCoupling(AdditiveExternalCoupling):
+    """Reuse complete zero-pair transport while advancing electronic history."""
+
+    _calculator_kind = "two-state-ehrenfest"
+
+    def _evaluate_geometry(self, geometry):
+        step = int(self.lmp.extract_global("ntimestep"))
+        return self.calculator.evaluate(geometry, step)

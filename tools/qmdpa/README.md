@@ -71,6 +71,10 @@ one common SCF/TDA solve.
 The unified prepare-states command prepares its named references and portable
 files; see [STATE_INPUTS.md](STATE_INPUTS.md).
 
+A separate [two-state Ehrenfest route](EHRENFEST.md) adds signed SA-CASSCF
+derivative couplings, coherent electronic propagation and native nuclear NVE,
+with its own source, state and restart contracts.
+
 The bounded CPU ground mechanical ABACUS route uses the existing official
 ASE/abacuslite worker. See [ABACUS.md](ABACUS.md) for its finite-supercell and explicit same-cell periodic routes,
 source identity and checked cleanup requirements.

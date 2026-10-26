@@ -187,6 +187,9 @@ def _validate_restart(checkpoint_path, config):
 
     validate_thermostat_frame(checkpoint["frame"], config)
     validate_sampling_frame(checkpoint["frame"], config)
+    from .ehrenfest_runtime import validate_frame as validate_ehrenfest_frame
+
+    validate_ehrenfest_frame(checkpoint["frame"], config)
     from .water_buffer import validate_buffer_frame
 
     validate_buffer_frame(checkpoint["frame"], config)
@@ -253,6 +256,9 @@ def _compare_restart(frame, checkpoint, config=None):
 
     compare_thermostat_restart(frame, reference, {} if config is None else config)
     compare_sampling_restart(frame, reference, {} if config is None else config)
+    from .ehrenfest_runtime import compare_restart as compare_ehrenfest_restart
+
+    compare_ehrenfest_restart(frame, reference, {} if config is None else config)
     _validate_frame(frame)
     _validate_frame(reference)
     from .state_records import validate_frame_state
@@ -305,6 +311,9 @@ def _attach_state(frame, coupling, config):
         if coupling.failure is not None or coupling.last_step != frame["step"]:
             raise ValueError("Reactive-water frame requires the successful current callback")
         frame["reactive_water"] = reactive_frame_record(frame, config)
+    from .ehrenfest_runtime import attach_frame as attach_ehrenfest_frame
+
+    attach_ehrenfest_frame(frame, coupling, config)
     if configured_reference(config) is None:
         return
     if getattr(getattr(coupling, "comm", None), "rank", 0) != 0:

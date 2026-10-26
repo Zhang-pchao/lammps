@@ -185,3 +185,13 @@ variable occupancy and reactive regrouping are rejected.
 The ground mechanical me_model = water-buffer selector routes to the protected
 finite water-buffer schema in [WATER_BUFFER.md](WATER_BUFFER.md). It has its own
 reference, complete subset family and boundary guard; no other mode inherits it.
+
+## Two-state coherent dynamics
+
+The exact selector `{surface: two-state, embedding: mechanical, me_model: ehrenfest}`
+selects the separate finite CPU SA-CASSCF(2,2) route. It requires a prepared signed
+pair reference, normalized complex amplitudes and explicit full/QM molecular
+regions. Only plain native NVE and strict raw DPA inference are admitted.
+See [EHRENFEST.md](EHRENFEST.md) for the complete potential, coherent force,
+source patch and restart contract. Ordinary selected-state inputs retain their
+single-surface meaning.

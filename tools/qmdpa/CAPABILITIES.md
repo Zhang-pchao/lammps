@@ -20,6 +20,12 @@ forces for CPU RHF/PBE0 and GPU RHF. It does not propagate simultaneous
 electronic populations or provide nonadiabatic couplings. Native selected
 dynamics follows one declared fixed-reference surface.
 
+Development 0.4.0.dev7 separately admits finite fixed-QM CPU two-singlet
+SA-CASSCF(2,2) Ehrenfest ME with strict raw DPA inference and plain native NVE.
+Signed full-wavefunction correspondence, complete coherent forces and
+immutable electronic history are defined in EHRENFEST.md. This is not a
+TDA/NAD, hopping, periodic or adaptive-state capability.
+
 Dynamic complete-molecule ME and additive EE retain a fixed core, exactly k
 same-composition candidates and every possible k-subset. They retain all weight
 derivatives and reject missing coverage. They do not infer bonds, move protons

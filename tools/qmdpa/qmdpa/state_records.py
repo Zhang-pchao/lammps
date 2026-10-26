@@ -68,6 +68,10 @@ def configured_reference(config):
     state = config.get("provider", {}).get("state", {"method": "ground"})
     if state["method"] == "ground":
         return None
+    if (state["method"] == "sa-casscf22"
+            and config.get("hamiltonian") == "finite-two-state-ehrenfest-mechanical"):
+        # Coherent amplitudes have their own complete history validation.
+        return None
     if state["method"] not in ("rhf-tda", "pbe0-tda") or config.get("periodic") is not False:
         raise ValueError("Native state records require finite selected TDA")
     reference = load_tda_reference(state["method"], state["reference"],

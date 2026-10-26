@@ -44,3 +44,17 @@ Changing package/source/dependency identity starts a new run. Do not edit an
 old checkpoint's physics hash to make it load. A deployment does not replace
 the separate scientific, long-dynamics or complete-cost comparisons needed for
 an application. Official upstream submission requires its own human review.
+
+## SA-CASSCF NAC overlay
+
+The two-state Ehrenfest provider requires the source-pinned PySCF 2.14.0 bra
+response-offset correction. Build an isolated overlay with the companion's
+`environment/build_pyscf_nac_overlay.py --base <installed-pyscf> --source
+<reviewed-pyscf-source>/nac/sacasscf.py --rhf-source
+<reviewed-pyscf-source>/grad/tdrhf.py --output <fresh-output>`. It validates
+both the NAC correction and retained RHF response-hook hashes, records every installed input and
+leaves the base untouched. Put `<fresh-output>/python` on PYTHONPATH and set
+PYSCF_EXT_PATH to the parent of the installed PySCF package. The prepared pair
+reference additionally binds all provider source modules. A changed source
+requires fresh reference and runtime qualification; the version label alone
+never identifies this dependency.

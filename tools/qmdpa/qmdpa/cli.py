@@ -144,6 +144,9 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             coupling = make_coupling(lmp, comm, config, provider_resources=provider_resources)
         else:
             coupling = make_coupling(lmp, comm, config)
+        from .ehrenfest_runtime import restore_frame as restore_ehrenfest_frame
+
+        _root_call(comm, lambda: restore_ehrenfest_frame(previous, coupling, config))
         if "bias" in config:
             from .bias import NativeDistanceBias
 
