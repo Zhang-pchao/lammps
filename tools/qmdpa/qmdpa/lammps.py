@@ -314,6 +314,7 @@ class AdditiveExternalCoupling(ExternalCoupling):
     """
 
     _calculator_kind = "additive"
+    _region_boundary = "isolated"
 
     def __init__(
         self,
@@ -338,12 +339,17 @@ class AdditiveExternalCoupling(ExternalCoupling):
             comm=comm,
             type_symbols=type_symbols,
             state_observer=state_observer,
+            region_boundary=self._region_boundary,
         )
 
     @staticmethod
-    def _validate_native_assembly(lmp, region, type_symbols):
+    def _validate_boundaries(lmp):
         if any(lmp.extract_box()[5]):
             raise ValueError("All-atom additive coupling requires nonperiodic boundaries")
+
+    @classmethod
+    def _validate_native_assembly(cls, lmp, region, type_symbols):
+        cls._validate_boundaries(lmp)
         if lmp.extract_global("pair_style") != "zero":
             raise ValueError("All-atom additive coupling requires exactly pair_style zero")
         for name in (
@@ -416,3 +422,26 @@ class ReferenceExternalCoupling(AdditiveExternalCoupling):
                  fix_id="qmdpa_reference", comm=None):
         super().__init__(lmp, region, calculator, type_symbols=type_symbols,
                          fix_id=fix_id, comm=comm)
+
+
+class PeriodicReferenceExternalCoupling(AdditiveExternalCoupling):
+    """Complete same-cell periodic totals with the shared zero-pair safeguards."""
+
+    _calculator_kind = "periodic-reference-subtractive"
+    _region_boundary = "periodic-same-cell"
+
+    @staticmethod
+    def _validate_boundaries(lmp):
+        box = lmp.extract_box()
+        cell = box_matrix(box)
+        if not all(box[5]) or not np.array_equal(cell, np.diag(np.diag(cell))):
+            raise ValueError("Periodic totals require full PBC and an orthorhombic fixed box")
+
+    def _prepare_positions(self, positions, images):
+        return ExternalCoupling._prepare_positions(self, positions, images)
+
+    def _evaluate_geometry(self, geometry):
+        from .core import Geometry
+
+        periodic = Geometry(geometry.atom_ids, geometry.symbols, geometry.positions, self._cell)
+        return _evaluate(self.calculator, periodic)

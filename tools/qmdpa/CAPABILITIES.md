@@ -8,7 +8,7 @@ QM method and partition must be established for the intended application.
 | --- | --- | --- | --- | --- |
 | CPU PySCF | HF/DFT under declared settings; optional ground density fitting | Source-pinned RHF/TDA and explicit PBE0/TDA profiles | Matched RHF or PBE0 | Ground ME and additive EE, finite neutral singlet |
 | GPU4PySCF | Conventional RHF or named-density-fitted PBE/PBE0; ground ME also admits a periodic full DPA system with a finite molecular region | Dense conventional RHF/TDA only | Matched RHF only | Not admitted |
-| ABACUS CPU | Ground ME only: finite-supercell approximation or explicit same-cell orthorhombic periodic replacement; CPU PW/PBE/Gamma; qualification remains configuration-specific | Not admitted | Not admitted | Not admitted |
+| ABACUS CPU | Ground ME: finite-supercell approximation or explicit same-cell orthorhombic periodic replacement; CPU PW/PBE/Gamma; qualification remains configuration-specific | Not admitted | Not admitted | Not admitted |
 
 CPU RHF selected gradients require the inspected PySCF instance-level CPHF
 hook described in EXCITED.md. Stock PySCF with the same version label is not
@@ -63,7 +63,22 @@ charges and deterministic raw inference; see REFERENCE.md. Its numerical
 qualification does not establish a physically unique DPA electrostatic split. None of these
 decomposes a black-box DPA into electrostatic, exchange, induction or dispersion.
 
-CP2K and SHARC integration are deferred. ABACUS GPU/selected/EE, GPU selected
-DFT, reactive partitioning, nonadiabatic dynamics and automatic D3/D4 additions
+CP2K and SHARC integration are deferred. ABACUS GPU/selected, GPU selected
+DFT, general reactive partitioning, nonadiabatic dynamics and automatic D3/D4 additions
 are not advertised as implemented. Future backends must provide the same
 complete energy/force/state contracts through their official interfaces.
+
+Development 0.4.0.dev4 adds official OPES_METAD with classical reactive
+soft-Voronoi water CVs and exact accepted history; see SAMPLING.md.
+Development 0.4.0.dev5 adds a bounded finite ground reactive-water Hamiltonian
+with explicit proton reassignment, integer electron allocation, optional
+neutral-water subsets and every weight derivative. It also admits the bounded
+OPES combination. See REACTIVE_WATER.md; this is separate from fixed-k mixing.
+
+Development 0.4.0.dev6 adds fixed-region, neutral, same-cell periodic Gaussian
+reference-subtractive EE with CPU ABACUS ground PW/PBE. The shared reference
+assembler returns complete totals through zero-pair transport. The field,
+reference and ownership conventions are defined in PERIODIC_EE.md; this is
+neither additive EE nor a qualification of all ABACUS electrostatic combinations.
+All development entries require source/runtime-specific evidence and retain
+separate scientific, long-time and performance gates.

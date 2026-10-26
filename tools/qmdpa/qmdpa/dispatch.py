@@ -27,7 +27,10 @@ MOLECULAR_EE = "finite-molecular-additive"
 WATER_BUFFER = "finite-water-buffer-mechanical"
 REACTIVE_WATER = "finite-reactive-water-mechanical"
 REFERENCE = "finite-electrostatic-reference-subtractive"
+PERIODIC_EE = "periodic-electrostatic-reference-subtractive"
 _ROUTES = {
+    PERIODIC_EE: ("periodic_ee_config", "load_periodic_ee_config", "periodic_ee_cli",
+                   "_zero_pair", "_periodic_ee_coupling"),
     REACTIVE_WATER: ("reactive_config", "load_reactive_config", "reactive_cli",
                      "_zero_pair", "_reactive_coupling"),
     REFERENCE: ("reference_config", "load_reference_config", "reference_cli",
@@ -97,9 +100,9 @@ def _normalize_selection(raw):
         if "me_model" in choice:
             raise ValueError("Electrostatic coupling cannot specify me_model")
         model = choice.get("ee_model")
-        if model == "reference-subtractive" and surface != "ground":
+        if model in ("reference-subtractive", "periodic-reference-subtractive") and surface != "ground":
             raise ValueError("Reference-subtractive dynamics currently requires ground state")
-        if model not in ("reference-subtractive", "additive", "molecular-additive", "gap-anchor", "gap-anchor-cross-delta", "gap-anchor-fragment-response"):
+        if model not in ("reference-subtractive", "periodic-reference-subtractive", "additive", "molecular-additive", "gap-anchor", "gap-anchor-cross-delta", "gap-anchor-fragment-response"):
             raise ValueError("Electrostatic coupling requires explicit ee_model additive, gap-anchor, gap-anchor-cross-delta or gap-anchor-fragment-response")
         if model == "gap-anchor" and surface == "ground":
             raise ValueError("Ground gap-anchor reduces to GS-ME; select mechanical explicitly")
@@ -107,7 +110,8 @@ def _normalize_selection(raw):
             raise ValueError("The corrected native driver currently requires a selected PBE0 state")
         if model == "molecular-additive" and surface != "ground":
             raise ValueError("Molecular additive coupling requires the ground surface")
-        hamiltonian = MOLECULAR_EE if model == "molecular-additive" else "finite-electrostatic-" + model
+        hamiltonian = (PERIODIC_EE if model == "periodic-reference-subtractive" else
+                       MOLECULAR_EE if model == "molecular-additive" else "finite-electrostatic-" + model)
     else:
         raise ValueError("coupling.embedding must be mechanical or electrostatic")
     if "hamiltonian" in config and config["hamiltonian"] != hamiltonian:
@@ -136,7 +140,8 @@ def _describe_selection(config):
     if config["hamiltonian"] == REACTIVE_WATER:
         result["me_model"] = "reactive-water"
     if not mechanical:
-        result["ee_model"] = ("molecular-additive" if config["hamiltonian"] == MOLECULAR_EE
+        result["ee_model"] = ("periodic-reference-subtractive" if config["hamiltonian"] == PERIODIC_EE else
+                              "molecular-additive" if config["hamiltonian"] == MOLECULAR_EE
                               else config["hamiltonian"].removeprefix("finite-electrostatic-"))
     return result
 
@@ -189,6 +194,10 @@ def _energy_contract(config):
         terms = [("low_full", 1, "AB"), ("low_qm", -1, "A"),
                  ("isolated_ground", 1, "A"), ("fragment_pair_deltas", 1, "declared"),
                  ("declared_environment_one_body", 1, "declared")]
+        baseline = "zero"
+    elif hamiltonian == PERIODIC_EE:
+        terms = [("low_full", 1, "AB"), ("low_qm", -1, "A"),
+                 ("periodic_embedded_ground", 1, "AB"), ("periodic_gaussian_reference", -1, "AB")]
         baseline = "zero"
     elif hamiltonian == REFERENCE:
         terms = [("low_full", 1, "AB"), ("low_qm", -1, "A"),
@@ -276,8 +285,8 @@ def _setup_pair(lmp, config):
 def _make_coupling(lmp, comm, config, *, provider_resources=None):
     _, _, module, _, factory = _route(config["hamiltonian"])
     if provider_resources is not None:
-        if config["hamiltonian"] != MECHANICAL or config["provider"]["engine"] != "abacus":
-            raise ValueError("External provider resources require ABACUS mechanical coupling")
+        if config["hamiltonian"] not in (MECHANICAL, PERIODIC_EE) or config["provider"]["engine"] != "abacus":
+            raise ValueError("External provider resources require an admitted ABACUS coupling")
         return _function(module, factory)(lmp, comm, config, provider_resources=provider_resources)
     return _function(module, factory)(lmp, comm, config)
 
@@ -345,6 +354,15 @@ def describe_run(config):
             "coordinate_mapping": "native-unwrapped-images",
             "cell": "fixed-native-cell", "all_qm_cancellation": "not-guaranteed",
             "stress": "unsupported",
+        }
+    if hamiltonian == PERIODIC_EE:
+        description["embedding"] = config["qm"]["periodic_field"]
+        description["reference"] = config["reference"]
+        description["boundaries"] = {
+            "full_low": "periodic-3d", "region_low": "periodic-same-cell",
+            "qm": "periodic-same-cell", "embedding": "neutral-gaussian-3d-mean-zero",
+            "cell_angstrom": config["qm"]["supercell_angstrom"], "stress": "unsupported",
+            "empty_environment": "use-explicit-same-cell-mechanical-route",
         }
     if hamiltonian == REFERENCE:
         description["embedding"] = config["embedding"]

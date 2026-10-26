@@ -71,6 +71,7 @@ def _calculator_arguments(request):
             "basis_type": "pw",
             "dft_functional": "PBE",
             "ecutwfc": settings["ecutwfc"],
+            **({"ecutrho": settings["ecutrho"]} if "ecutrho" in settings else {}),
             "scf_thr": settings["scf_thr"],
             "scf_nmax": settings["scf_nmax"],
             "ks_solver": settings["ks_solver"],
@@ -79,6 +80,11 @@ def _calculator_arguments(request):
             "symmetry": -1,
             "cal_force": 1,
             "cal_stress": 0,
+            **({"gaussian_charge_file": "QMDPA_FIELD",
+                "gaussian_charge_kmax": settings["periodic_field"]["kmax"],
+                "ecutrho": settings.get("ecutrho", 4.0 * settings["ecutwfc"]),
+                "device": "cpu", "precision": "double", "gamma_only": False}
+               if "periodic_field" in settings else {}),
         },
     }
 
@@ -187,6 +193,22 @@ class _FileIOSession:
             raise RuntimeError("A FileIO worker accepts exactly one evaluation")
         self.evaluated = True
         geometry, atoms = _geometry_and_atoms(request, self.settings)
+        environment = field = None
+        field_hash = None
+        if "periodic_field" in self.settings:
+            from .core import Geometry
+            from .periodic_field import PeriodicGaussianField, native_field_text
+
+            data = request["environment"]
+            environment = Geometry(tuple(data["atom_ids"]), tuple(data["symbols"]),
+                                   data["positions_angstrom"], data["cell_angstrom"])
+            field = PeriodicGaussianField(**self.settings["periodic_field"])
+            field.validate_geometries(geometry, environment)
+            field_path = self.calculation / "QMDPA_FIELD"
+            field_path.write_text(native_field_text(field, environment))
+            field_hash = _digest(field_path)
+        elif "environment" in request:
+            raise ValueError("Unexpected environment without a periodic field")
         self.calculator.calculate(
             atoms=atoms, properties=["energy", "forces"], system_changes=all_changes
         )
@@ -207,6 +229,18 @@ class _FileIOSession:
         ):
             raise RuntimeError("ABACUS FileIO SCF evidence exceeds the declared limits")
         response = _evaluation_response(geometry, self.calculator)
+        if field is not None:
+            from .periodic_field import parse_native_field_result
+
+            if _digest(self.calculation / "QMDPA_FIELD") != field_hash:
+                raise ValueError("Native evaluation changed its authoritative Gaussian field")
+            force, diagnostics = parse_native_field_result(log, field)
+            response.update(
+                environment_atom_ids=list(environment.atom_ids),
+                environment_symbols=list(environment.symbols),
+                environment_forces_ev_per_angstrom=force.tolist(),
+                periodic_field_diagnostics=diagnostics,
+            )
         evidence = {
             "positions_angstrom": geometry.positions.tolist(),
             "native_positions_angstrom": atoms.positions.tolist(),
@@ -215,7 +249,9 @@ class _FileIOSession:
             "terminal_density_deviation": residual,
             "scf_iterations": iteration,
             "input_sha256": {
-                name: _digest(self.calculation / name) for name in ("INPUT", "STRU", "KPT")
+                name: _digest(self.calculation / name)
+                for name in (("INPUT", "STRU", "KPT", "QMDPA_FIELD")
+                             if field is not None else ("INPUT", "STRU", "KPT"))
             },
         }
         (self.directory / "result.json").write_text(

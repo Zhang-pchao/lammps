@@ -359,3 +359,6 @@ embedded-excitation-gap model, its five-term ledger and qualification limits.
 The unified entry point supports the scoped [static distance bias](BIAS.md).
 See [ground-state CV sampling](SAMPLING.md) for the separately identified
 development interface for PLUMED restraints and native NVT.
+
+Fixed-region periodic Gaussian reference subtraction is a separate development
+route with complete totals and explicit field accounting; see [PERIODIC_EE.md](PERIODIC_EE.md).

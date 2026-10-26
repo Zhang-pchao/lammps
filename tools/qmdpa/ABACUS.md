@@ -70,7 +70,9 @@ failure record includes cleanup diagnostics. Complete backend request time and
 counts enter result metrics. LAMMPS MPI distributes atoms; this ABACUS executable
 route is serial and is not a parallel or GPU electronic-structure implementation.
 
-Selected-state, EE, adaptive and stress/NPT ABACUS routes are rejected.
+Selected-state, adaptive and stress/NPT ABACUS routes are rejected.
+A separate bounded periodic Gaussian EE route is described in PERIODIC_EE.md;
+this mechanical route continues to reject embedded fields.
 Full-system periodicity requires the explicit same-cell route below. The other PySCF/GPU provider modes keep their own contracts.
 Native and numerical qualification belongs to a matching source/runtime record,
 not to this configuration example or a successful process-contract test.

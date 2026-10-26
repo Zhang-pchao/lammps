@@ -91,7 +91,7 @@ def validate_abacus_settings(settings, base_dir):
     """
     if not isinstance(settings, dict):
         raise ValueError("ABACUS settings must be a mapping")
-    unknown = set(settings).difference(_REQUIRED | _DEFAULTS.keys() | {"runtime_files", "boundary"})
+    unknown = set(settings).difference(_REQUIRED | _DEFAULTS.keys() | {"runtime_files", "boundary", "periodic_field", "ecutrho"})
     missing = _REQUIRED.difference(settings)
     if unknown or missing:
         raise ValueError(
@@ -124,6 +124,10 @@ def validate_abacus_settings(settings, base_dir):
         raise ValueError("Unknown ABACUS coordinate_gauge")
     for key in ("ecutwfc", "scf_thr", "timeout_seconds"):
         result[key] = _number(result[key], key)
+    if "ecutrho" in result:
+        result["ecutrho"] = _number(result["ecutrho"], "ecutrho")
+        if result["ecutrho"] < 4.0 * result["ecutwfc"]:
+            raise ValueError("ecutrho must be at least four times ecutwfc")
     if type(result["scf_nmax"]) is not int or result["scf_nmax"] <= 0:
         raise ValueError("scf_nmax must be a positive integer")
     for key in ("supercell_angstrom", "coordinate_offset_angstrom"):
@@ -141,6 +145,15 @@ def validate_abacus_settings(settings, base_dir):
             raise ValueError("Periodic ABACUS requires fileio, periodic-wrap and zero offset")
     elif result["coordinate_gauge"] == "periodic-wrap":
         raise ValueError("periodic-wrap requires the explicit periodic-same-cell boundary")
+    if "periodic_field" in settings:
+        from .periodic_field import PeriodicGaussianField
+
+        if boundary != "periodic-same-cell" or result["execution_mode"] != "fileio":
+            raise ValueError("Periodic Gaussian embedding requires same-cell cold FileIO")
+        field = PeriodicGaussianField(**settings["periodic_field"])
+        if field.cell_angstrom.tolist() != result["supercell_angstrom"]:
+            raise ValueError("Periodic field and ABACUS cell lengths differ")
+        result["periodic_field"] = field.record()
     result["executable"], result["executable_sha256"] = _identity(
         result["executable"], result["executable_sha256"], base_dir, "ABACUS executable"
     )
@@ -179,6 +192,8 @@ def validate_abacus_settings(settings, base_dir):
 def validate_mechanical_abacus_settings(settings, base_dir):
     """Admit the existing cold, centroid-mapped ground mechanical model only."""
     resolved = validate_abacus_settings(settings, base_dir)
+    if "periodic_field" in resolved:
+        raise ValueError("Mechanical coupling cannot silently add a periodic field")
     gauge = ("periodic-wrap" if resolved.get("boundary") == "periodic-same-cell"
              else "arithmetic-centroid")
     if (resolved["execution_mode"] != "fileio"
@@ -251,6 +266,7 @@ class AbacusBackend:
         coordinate_gauge="fixed-offset",
         execution_mode="socket",
         ecutwfc=60,
+        ecutrho=None,
         scf_thr=1e-9,
         scf_nmax=100,
         ks_solver="cg",
@@ -259,6 +275,7 @@ class AbacusBackend:
         timeout_seconds=120,
         runtime_files=None,
         boundary=None,
+        periodic_field=None,
         directory,
     ):
         waitid_flags = ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
@@ -284,11 +301,18 @@ class AbacusBackend:
                 "charge": charge,
                 "multiplicity": multiplicity,
                 "timeout_seconds": timeout_seconds,
+                **({"ecutrho": ecutrho} if ecutrho is not None else {}),
                 **({"runtime_files": runtime_files} if runtime_files is not None else {}),
                 **({"boundary": boundary} if boundary is not None else {}),
+                **({"periodic_field": periodic_field} if periodic_field is not None else {}),
             },
             Path.cwd(),
         )
+        self._periodic_field = None
+        if "periodic_field" in self._settings:
+            from .periodic_field import PeriodicGaussianField
+
+            self._periodic_field = PeriodicGaussianField(**self._settings["periodic_field"])
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=False)
         self._process = None
@@ -569,7 +593,7 @@ class AbacusBackend:
             self._diagnostic("cleanup.json", {"errors": errors})
         return errors
 
-    def evaluate(self, geometry):
+    def evaluate(self, geometry, environment=None):
         from .core import Evaluation, EvaluationError
 
         if self._failure is not None:
@@ -583,6 +607,13 @@ class AbacusBackend:
             elif geometry.periodic:
                 raise ValueError("ABACUS correction requires nonperiodic input geometry")
             identity = (geometry.atom_ids, geometry.symbols)
+            if self._periodic_field is not None:
+                if environment is None:
+                    raise ValueError("Periodic embedded evaluation requires environment coordinates")
+                self._periodic_field.validate_geometries(geometry, environment)
+                identity += (environment.atom_ids, environment.symbols)
+            elif environment is not None:
+                raise ValueError("Environment coordinates require an explicit periodic field")
             if self._identity is not None and identity != self._identity:
                 raise ValueError("ABACUS atom IDs and symbols must stay fixed")
             if any(s not in self._settings["pseudopotentials"] for s in geometry.symbols):
@@ -599,6 +630,12 @@ class AbacusBackend:
             response = self._exchange(
                 {
                     "op": "evaluate",
+                    **({"environment": {
+                        "atom_ids": list(environment.atom_ids),
+                        "symbols": list(environment.symbols),
+                        "positions_angstrom": environment.positions.tolist(),
+                        "cell_angstrom": environment.cell.tolist(),
+                    }} if environment is not None else {}),
                     "geometry": {
                         "atom_ids": list(geometry.atom_ids),
                         "symbols": list(geometry.symbols),
@@ -617,6 +654,19 @@ class AbacusBackend:
             result = Evaluation(response["energy_ev"], response["forces_ev_per_angstrom"])
             if result.forces.shape != geometry.positions.shape:
                 raise ValueError("ABACUS force count differs from the input atoms")
+            if self._periodic_field is not None:
+                from .embedding import EmbeddedEvaluation
+
+                if (response.get("environment_atom_ids") != list(environment.atom_ids)
+                        or response.get("environment_symbols") != list(environment.symbols)):
+                    raise ValueError("ABACUS environment response identities differ")
+                if response.get("periodic_field_diagnostics", {}).get("field") != self._periodic_field.record():
+                    raise ValueError("ABACUS returned a different periodic field identity")
+                result = EmbeddedEvaluation(
+                    result.energy, geometry.atom_ids, environment.atom_ids, result.forces,
+                    response["environment_forces_ev_per_angstrom"],
+                    response["periodic_field_diagnostics"],
+                )
             if self._settings["execution_mode"] == "fileio":
                 self._finish_fileio(deadline)
             self._check_runtime_files()

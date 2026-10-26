@@ -135,6 +135,7 @@ class ReferenceSubtractiveCalculator:
     """
 
     model = ReferenceTerms.model
+    _terms_type = ReferenceTerms
 
     def __init__(
         self,
@@ -150,13 +151,7 @@ class ReferenceSubtractiveCalculator:
         environment_ids = _atom_ids(environment_atom_ids)
         if set(qm_ids).intersection(environment_ids):
             raise ValueError("QM and environment atom IDs must be disjoint")
-        if not isinstance(reference_cross_backend, FixedChargeCrossCoulomb):
-            raise TypeError("The reference backend must be FixedChargeCrossCoulomb")
-        if (
-            reference_cross_backend.qm_charges.atom_ids != qm_ids
-            or reference_cross_backend.environment_charges.atom_ids != environment_ids
-        ):
-            raise ValueError("Reference charge IDs must match the configured regions in order")
+        self._validate_reference(reference_cross_backend, qm_ids, environment_ids)
         self.full_low_backend = full_low_backend
         self.region_low_backend = region_low_backend
         self.embedded_backend = embedded_backend
@@ -165,6 +160,19 @@ class ReferenceSubtractiveCalculator:
         self._environment_atom_ids = environment_ids
         self._full_atom_ids = qm_ids + environment_ids
         self._identity = None
+
+    @staticmethod
+    def _validate_reference(reference, qm_ids, environment_ids):
+        if not isinstance(reference, FixedChargeCrossCoulomb):
+            raise TypeError("The reference backend must be FixedChargeCrossCoulomb")
+        if (reference.qm_charges.atom_ids != qm_ids
+                or reference.environment_charges.atom_ids != environment_ids):
+            raise ValueError("Reference charge IDs must match the configured regions in order")
+
+    @staticmethod
+    def _validate_boundary(full_geometry):
+        if full_geometry.periodic:
+            raise ValueError("Reference subtraction requires a nonperiodic full geometry")
 
     @property
     def qm_atom_ids(self):
@@ -176,8 +184,7 @@ class ReferenceSubtractiveCalculator:
 
     def evaluate_terms(self, full_geometry: Geometry) -> ReferenceTerms:
         """Evaluate the four terms once and include both sets of response forces."""
-        if full_geometry.periodic:
-            raise ValueError("Reference subtraction requires a nonperiodic full geometry")
+        self._validate_boundary(full_geometry)
         if set(full_geometry.atom_ids) != set(self._full_atom_ids):
             raise ValueError("Fixed regions must cover all input atoms exactly")
         full_ordered = full_geometry.select(self._full_atom_ids)
@@ -214,7 +221,7 @@ class ReferenceSubtractiveCalculator:
             full_low.energy + embedded.energy_ev - region_result.energy - reference.energy_ev,
             forces,
         )
-        return ReferenceTerms(
+        return self._terms_type(
             full_geometry.atom_ids,
             self.qm_atom_ids,
             self.environment_atom_ids,
