@@ -17,6 +17,7 @@ new potential, electronic-state algorithm, integrator or checkpoint format.
 | finite-electrostatic-reference-subtractive | Zero | Full DPA - region DPA + embedded QM - reference cross Coulomb | REFERENCE.md |
 | finite-electrostatic-gap-anchor | Zero | Complete gap-anchor total | GAP_ANCHOR.md |
 | finite-molecular-mechanical | Zero | Full DPA plus weighted QM corrections and switching forces | MOLECULAR_ADAPTIVE.md |
+| finite-water-buffer-mechanical | Zero | Full DPA plus calibrated variable-water corrections and every switching force | WATER_BUFFER.md |
 | finite-molecular-additive | Zero | Weighted complete additive totals and switching forces | MOLECULAR_ADDITIVE.md |
 | finite-electrostatic-gap-anchor-cross-delta | Zero | Gap-anchor plus explicit cross difference | INTERACTION_DELTA.md |
 | finite-electrostatic-gap-anchor-fragment-response | Zero | Explicit fragment-response selected total | CLUSTER_RESPONSE.md |
@@ -180,3 +181,7 @@ candidate family and all weight derivatives are explicit; the EE route also
 requires one full atom-ID charge table and explicit cross LJ parameters.
 See MOLECULAR_ADAPTIVE.md and MOLECULAR_ADDITIVE.md. Selected molecular surfaces,
 variable occupancy and reactive regrouping are rejected.
+
+The ground mechanical me_model = water-buffer selector routes to the protected
+finite water-buffer schema in [WATER_BUFFER.md](WATER_BUFFER.md). It has its own
+reference, complete subset family and boundary guard; no other mode inherits it.

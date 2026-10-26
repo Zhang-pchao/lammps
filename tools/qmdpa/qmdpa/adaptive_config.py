@@ -23,6 +23,10 @@ from .molecular_adaptive import MolecularMechanicalMixer, QuinticMolecularWeight
 from .molecular_additive import AdditivePartition, MolecularAdditiveMixer, subset_charges
 from .providers import provider_contract, validate_provider
 from .selection_config import FixedGroup, read_json
+from .water_buffer import HAMILTONIAN as WATER_BUFFER
+from .water_buffer import SWITCH as WATER_SWITCH
+from .water_buffer import QuinticWaterBufferWeights, WaterBoundaryGuard, WaterBufferMechanicalMixer
+from .water_reference import validate_reference
 
 HAMILTONIAN = "finite-two-partition-mechanical"
 MOLECULAR_HAMILTONIAN = "finite-molecular-mechanical"
@@ -99,11 +103,33 @@ def build_mixer(config, low, high_providers):
             switch=QuinticMolecularWeights(**{k: v for k, v in config["switch"].items() if k != "method"}),
             charges=FixedEmbeddingCharges(**config["embedding"]),
         )
+    specifications = config["partitions"]
+    water = config["hamiltonian"] == WATER_BUFFER
+    if water:
+        _, delta, source = validate_reference(
+            config["buffer_reference"], model_sha256=config["model_sha256"],
+            qm=config["qm"], provider=config["provider"])
+        specifications = []
+        for raw in config["partitions"]:
+            partition = dict(raw)
+            count = len(set(partition["qm_group_ids"]) - set(config["core_group_ids"]))
+            expected = -count*delta
+            if (("energy_offset_ev" in partition and partition["energy_offset_ev"] != expected)
+                    or ("offset_source" in partition and partition["offset_source"] != source)):
+                raise ValueError("Declared partition offset differs from the water reference")
+            partition.update(energy_offset_ev=expected, offset_source=source)
+            specifications.append(partition)
     partitions = tuple(
         MechanicalPartition(calculator=SubtractiveCalculator(low, high), **partition)
-        for partition, high in zip(config["partitions"], providers, strict=True)
+        for partition, high in zip(specifications, providers, strict=True)
     )
     switch = {key: value for key, value in config["switch"].items() if key != "method"}
+    if water:
+        return WaterBufferMechanicalMixer(
+            low, groups=groups, core_group_ids=config["core_group_ids"],
+            partitions=partitions, switch=QuinticWaterBufferWeights(**switch),
+            guard=WaterBoundaryGuard(**config["water_guard"]),
+            reference_delta_ev=delta, reference_source=source)
     if config["hamiltonian"] == MOLECULAR_HAMILTONIAN:
         return MolecularMechanicalMixer(
             low, groups=groups, core_group_ids=config["core_group_ids"],
@@ -124,8 +150,9 @@ def _validate_config(config, path):
     """Validate the same explicit route for file and unified selector inputs."""
     path = Path(path).resolve()
     additive = config.get("hamiltonian") == MOLECULAR_ADDITIVE if isinstance(config, dict) else False
+    water = isinstance(config, dict) and config.get("hamiltonian") == WATER_BUFFER
     molecular = isinstance(config, dict) and config.get("hamiltonian") in (
-        MOLECULAR_HAMILTONIAN, MOLECULAR_ADDITIVE)
+        MOLECULAR_HAMILTONIAN, MOLECULAR_ADDITIVE, WATER_BUFFER)
     _fields(
         config,
         (
@@ -146,6 +173,7 @@ def _validate_config(config, path):
             "timestep_fs",
             "steps",
         ) + (("core_group_ids",) if molecular else ())
+          + (("buffer_reference", "water_guard") if water else ())
           + (("environment_charge_spin", "embedding", "cross") if additive
              else ("full_charge_spin", "region_charge_spin")),
         ("sample_interval", "temperature_K", "velocity_seed"),
@@ -153,7 +181,7 @@ def _validate_config(config, path):
     )
     if type(config["schema_version"]) is not int or config["schema_version"] != 1:
         raise ValueError("schema_version must be integer 1")
-    if config["hamiltonian"] not in (HAMILTONIAN, MOLECULAR_HAMILTONIAN, MOLECULAR_ADDITIVE):
+    if config["hamiltonian"] not in (HAMILTONIAN, MOLECULAR_HAMILTONIAN, MOLECULAR_ADDITIVE, WATER_BUFFER):
         raise ValueError("Unsupported adaptive Hamiltonian")
     if config["periodic"] is not False:
         raise ValueError("Adaptive molecular dynamics requires a nonperiodic fixed box")
@@ -214,12 +242,20 @@ def _validate_config(config, path):
     switch = config["switch"]
     if molecular:
         _list(config["core_group_ids"], "core_group_ids")
-        _fields(switch, ("method", "center_atom_id", "candidate_anchors", "occupancy",
-                        "inner_radius_angstrom", "outer_radius_angstrom"),
+        _fields(switch, ("method", "center_atom_id", "candidate_anchors",
+                        "inner_radius_angstrom", "outer_radius_angstrom")
+                + (() if water else ("occupancy",)),
                 ("max_partitions",), name="Molecular switch")
         _list(switch["candidate_anchors"], "candidate_anchors")
-        if switch["method"] != MOLECULAR_SWITCH:
-            raise ValueError(f"switch.method must be {MOLECULAR_SWITCH}")
+        expected_switch = WATER_SWITCH if water else MOLECULAR_SWITCH
+        if switch["method"] != expected_switch:
+            raise ValueError(f"switch.method must be {expected_switch}")
+        if water:
+            _fields(config["water_guard"], ("min_oh_angstrom", "max_oh_angstrom",
+                                           "min_foreign_oh_angstrom"), name="Water guard")
+            config["buffer_reference"], _, _ = validate_reference(
+                config["buffer_reference"], model_sha256=config["model_sha256"],
+                qm=qm, provider=config["provider"])
     else:
         _fields(
             switch,
@@ -230,8 +266,8 @@ def _validate_config(config, path):
             raise ValueError(f"switch.method must be {SWITCH_METHOD}")
     # Metadata-only construction reuses every mixer state/group/family check.
     # No evaluate method or engine construction is involved in this validation.
-    state = dict(charge=qm["charge"], multiplicity=qm["multiplicity"],
-                 xc=qm["xc"], basis=qm["basis"])
+    state = {"charge": qm["charge"], "multiplicity": qm["multiplicity"],
+             "xc": qm["xc"], "basis": qm["basis"]}
     if additive:
         _fields(config["embedding"], ("atom_ids", "charges_e", "source"),
                 ("radii_angstrom",), name="Full-system embedding table")
@@ -252,6 +288,8 @@ def _validate_config(config, path):
         high = (SimpleNamespace(**state),) * len(partitions)
         low_state = config["region_charge_spin"]
     validated = build_mixer(config, SimpleNamespace(charge_spin=low_state), high)
+    if water:
+        config["water_guard"] = vars(validated.guard).copy()
     mapping = sorted(
         (atom, symbol)
         for group in validated.groups
@@ -295,10 +333,10 @@ def _validate_config(config, path):
     if molecular:
         config["core_group_ids"] = list(validated.core_group_ids)
         config["switch"] = {
-            "method": MOLECULAR_SWITCH,
+            "method": WATER_SWITCH if water else MOLECULAR_SWITCH,
             "center_atom_id": validated.switch.center_atom_id,
             "candidate_anchors": [list(x) for x in validated.switch.candidate_anchors],
-            "occupancy": validated.switch.occupancy,
+            **({} if water else {"occupancy": validated.switch.occupancy}),
             "inner_radius_angstrom": validated.switch.inner_radius_angstrom,
             "outer_radius_angstrom": validated.switch.outer_radius_angstrom,
             "max_partitions": validated.switch.max_partitions,

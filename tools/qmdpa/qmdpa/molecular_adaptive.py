@@ -53,6 +53,38 @@ class MolecularWeights:
             object.__setattr__(self, name, value)
 
 
+def _radial_preferences(geometry, center_atom_id, candidate_anchors,
+                        inner_radius_angstrom, outer_radius_angstrom):
+    """Shared compact quintic preferences and complete center reaction."""
+    if not isinstance(geometry, Geometry) or geometry.periodic:
+        raise ValueError("Molecular weights require a nonperiodic geometry")
+    lookup = {atom: i for i, atom in enumerate(geometry.atom_ids)}
+    try:
+        center = lookup[center_atom_id]
+        rows = [lookup[atom] for _, atom in candidate_anchors]
+    except KeyError as exc:
+        raise ValueError("Every molecular anchor must be present") from exc
+    delta = geometry.positions[rows] - geometry.positions[center]
+    radii = np.linalg.norm(delta, axis=1)
+    if not np.isfinite(radii).all() or np.any(radii == 0):
+        raise ValueError("Molecular anchors must have finite, nonzero center distances")
+    preference = np.zeros(len(rows))
+    derivatives = np.zeros((len(rows), len(geometry.atom_ids), 3))
+    width = outer_radius_angstrom - inner_radius_angstrom
+    for i, (row, radius) in enumerate(zip(rows, radii)):
+        if radius <= inner_radius_angstrom:
+            preference[i] = 1
+        elif radius < outer_radius_angstrom:
+            t = (radius - inner_radius_angstrom) / width
+            u = t if t <= 0.5 else 1 - t
+            tail = u ** 3 * (10 + u * (-15 + 6 * u))
+            preference[i] = 1 - tail if t <= 0.5 else tail
+            radial = -30 * t ** 2 * (1 - t) ** 2 / width
+            derivatives[i, row] = radial * delta[i] / radius
+            derivatives[i, center] = -derivatives[i, row]
+    return preference, derivatives, radii
+
+
 @dataclass(frozen=True)
 class QuinticMolecularWeights:
     """Select k of the declared candidate groups with smooth finite weights.
@@ -99,39 +131,16 @@ class QuinticMolecularWeights:
         return tuple(combinations(tuple(g for g, _ in self.candidate_anchors), self.occupancy))
 
     def evaluate(self, geometry: Geometry):
-        if not isinstance(geometry, Geometry) or geometry.periodic:
-            raise ValueError("Molecular weights require a nonperiodic geometry")
-        lookup = {atom: i for i, atom in enumerate(geometry.atom_ids)}
-        try:
-            center = lookup[self.center_atom_id]
-            rows = [lookup[atom] for _, atom in self.candidate_anchors]
-        except KeyError as exc:
-            raise ValueError("Every molecular anchor must be present") from exc
-        delta = geometry.positions[rows] - geometry.positions[center]
-        radii = np.linalg.norm(delta, axis=1)
-        if not np.isfinite(radii).all() or np.any(radii == 0):
-            raise ValueError("Molecular anchors must have finite, nonzero center distances")
-        preference = np.zeros(len(rows))
-        derivatives = np.zeros((len(rows), len(geometry.atom_ids), 3))
-        width = self.outer_radius_angstrom - self.inner_radius_angstrom
-        for i, (row, radius) in enumerate(zip(rows, radii)):
-            if radius <= self.inner_radius_angstrom:
-                preference[i] = 1
-            elif radius < self.outer_radius_angstrom:
-                t = (radius - self.inner_radius_angstrom) / width
-                u = t if t <= 0.5 else 1 - t
-                tail = u ** 3 * (10 + u * (-15 + 6 * u))
-                preference[i] = 1 - tail if t <= 0.5 else tail
-                radial = -30 * t ** 2 * (1 - t) ** 2 / width
-                derivatives[i, row] = radial * delta[i] / radius
-                derivatives[i, center] = -derivatives[i, row]
+        preference, derivatives, radii = _radial_preferences(
+            geometry, self.center_atom_id, self.candidate_anchors,
+            self.inner_radius_angstrom, self.outer_radius_angstrom)
         if np.count_nonzero(preference > 0) < self.occupancy:
             raise EvaluationError("Too few candidate molecules inside the outer radius for occupancy")
         # All subsets have the same degree. A common scale cancels in the
         # normalized quotient, including its derivative, and avoids tiny products.
         scale = np.max(preference)
         factors, dfactors = preference / scale, derivatives / scale
-        subsets = tuple(combinations(range(len(rows)), self.occupancy))
+        subsets = tuple(combinations(range(len(preference)), self.occupancy))
         values = np.array([np.prod(factors[list(subset)]) for subset in subsets])
         gradients = np.zeros((len(subsets), len(geometry.atom_ids), 3))
         for index, subset in enumerate(subsets):
@@ -164,10 +173,10 @@ class MolecularAdaptiveTerms:
 
 
 def _configure_family(self, groups, core_group_ids, partitions, switch,
-                      partition_type, high_attribute):
+                      partition_type, high_attribute, *, switch_type=QuinticMolecularWeights):
     """Validate the shared complete molecular family without evaluating a provider."""
-    if not isinstance(switch, QuinticMolecularWeights):
-        raise TypeError("Molecular exchange requires QuinticMolecularWeights")
+    if not isinstance(switch, switch_type):
+        raise TypeError(f"Molecular exchange requires {switch_type.__name__}")
     groups = tuple(groups)
     if not groups or any(not isinstance(g, FixedGroup) for g in groups):
         raise ValueError("Explicit complete FixedGroup declarations are required")
@@ -243,8 +252,11 @@ class MolecularMechanicalMixer:
                           MechanicalPartition, "high")
         self.full_low = full_low
 
-    def evaluate_terms(self, geometry):
+    def _validate_geometry(self, geometry):
         self._coverage.select(geometry)
+
+    def evaluate_terms(self, geometry):
+        self._validate_geometry(geometry)
         weights = self.switch.evaluate(geometry)
         for partition in self.partitions:
             partition.validate_provider_state()

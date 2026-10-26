@@ -24,6 +24,7 @@ from .interaction_delta_config import CORRECTED_GAP_HAMILTONIAN
 MECHANICAL = "fixed-region-mechanical"
 MOLECULAR = "finite-molecular-mechanical"
 MOLECULAR_EE = "finite-molecular-additive"
+WATER_BUFFER = "finite-water-buffer-mechanical"
 REFERENCE = "finite-electrostatic-reference-subtractive"
 _ROUTES = {
     REFERENCE: ("reference_config", "load_reference_config", "reference_cli",
@@ -40,6 +41,7 @@ _ROUTES = {
     ),
 }
 _ROUTES[MOLECULAR_EE] = _ROUTES[MOLECULAR]
+_ROUTES[WATER_BUFFER] = _ROUTES[MOLECULAR]
 _ROUTES[CORRECTED_GAP_HAMILTONIAN] = _ROUTES["finite-electrostatic-gap-anchor"]
 _ROUTES[FRAGMENT_GAP_HAMILTONIAN] = _ROUTES["finite-electrostatic-gap-anchor"]
 _ROUTES[GROUND_FRAGMENT_HAMILTONIAN] = (
@@ -81,12 +83,12 @@ def _normalize_selection(raw):
         if "ee_model" in choice:
             raise ValueError("Mechanical coupling cannot specify ee_model")
         model = choice.get("me_model")
-        if model not in (None, "fragment-response", "molecular"):
-            raise ValueError("Mechanical me_model must be fragment-response or molecular when supplied")
-        if model in ("fragment-response", "molecular") and surface != "ground":
+        if model not in (None, "fragment-response", "molecular", "water-buffer"):
+            raise ValueError("Mechanical me_model must be fragment-response, molecular or water-buffer when supplied")
+        if model in ("fragment-response", "molecular", "water-buffer") and surface != "ground":
             raise ValueError("Mechanical fragment response currently requires the ground surface")
         hamiltonian = {"fragment-response": GROUND_FRAGMENT_HAMILTONIAN,
-                       "molecular": MOLECULAR, None: MECHANICAL}[model]
+                       "molecular": MOLECULAR, "water-buffer": WATER_BUFFER, None: MECHANICAL}[model]
     elif embedding == "electrostatic":
         if "me_model" in choice:
             raise ValueError("Electrostatic coupling cannot specify me_model")
@@ -118,13 +120,15 @@ def _normalize_selection(raw):
 
 
 def _describe_selection(config):
-    mechanical = config["hamiltonian"] in (MECHANICAL, GROUND_FRAGMENT_HAMILTONIAN, MOLECULAR)
+    mechanical = config["hamiltonian"] in (MECHANICAL, GROUND_FRAGMENT_HAMILTONIAN, MOLECULAR, WATER_BUFFER)
     result = {"surface": "ground" if config["provider"]["state"]["method"] == "ground" else "selected",
               "embedding": "mechanical" if mechanical else "electrostatic"}
     if config["hamiltonian"] == GROUND_FRAGMENT_HAMILTONIAN:
         result["me_model"] = "fragment-response"
     if config["hamiltonian"] == MOLECULAR:
         result["me_model"] = "molecular"
+    if config["hamiltonian"] == WATER_BUFFER:
+        result["me_model"] = "water-buffer"
     if not mechanical:
         result["ee_model"] = ("molecular-additive" if config["hamiltonian"] == MOLECULAR_EE
                               else config["hamiltonian"].removeprefix("finite-electrostatic-"))
@@ -145,7 +149,7 @@ def _energy_contract(config):
             "partition_policy": config["switch"],
             "scope": "Fixed-charge complete fixed-occupancy family; no excited-state map or mutual polarization",
         }
-    if hamiltonian == MOLECULAR:
+    if hamiltonian in (MOLECULAR, WATER_BUFFER):
         return {
             "total_terms": [{"name": "low_full", "coefficient": 1, "force_coordinates": "all"},
                             {"name": "normalized_weighted_ground_corrections", "coefficient": 1,
@@ -153,7 +157,9 @@ def _energy_contract(config):
             "native_baseline": "zero", "external_energy": "complete-total",
             "force_definition": "weighted-complete-forces-minus-energy-times-weight-gradients",
             "partition_policy": config["switch"],
-            "scope": "Complete fixed-occupancy family; no reactive regrouping or excited-state map",
+            "scope": ("Protected aqueous core with variable complete-water subsets and fixed reference offsets"
+                      if hamiltonian == WATER_BUFFER else
+                      "Complete fixed-occupancy family; no reactive regrouping or excited-state map"),
         }
     if hamiltonian == MECHANICAL:
         quantum_term = ("periodic_ground" if config["qm"].get("boundary") == "periodic-same-cell"
@@ -277,7 +283,7 @@ def describe_run(config):
     regions = (
         {"full": config["full_region"], "groups": config["groups"],
          "core_group_ids": config["core_group_ids"], "partitions": config["partitions"]}
-        if hamiltonian in (MOLECULAR, MOLECULAR_EE) else
+        if hamiltonian in (MOLECULAR, MOLECULAR_EE, WATER_BUFFER) else
         {"qm": config["region"]}
         if mechanical else
         {"qm": config["qm_region"], "environment": config["environment_region"]}
@@ -323,6 +329,9 @@ def describe_run(config):
     if hamiltonian == REFERENCE:
         description["embedding"] = config["embedding"]
         description["reference"] = config["reference"]
+    if hamiltonian == WATER_BUFFER:
+        description["buffer_reference"] = config["buffer_reference"]
+        description["water_guard"] = config["water_guard"]
     if hamiltonian == MOLECULAR_EE:
         description["embedding"] = config["embedding"]
         description["cross"] = config["cross"]

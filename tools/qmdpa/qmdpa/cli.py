@@ -345,12 +345,20 @@ def main(argv=None):
         state = commands.add_parser(command, help=help_text)
         state.add_argument("request", type=Path)
         state.add_argument("--output", required=True, type=Path)
+    reference = commands.add_parser("prepare-water-reference",
+                                    help="Prepare a fixed isolated-water buffer reference")
+    reference.add_argument("request", type=Path)
+    reference.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
         from .dispatch import describe_run, load_run_config
         from .dispatch import run as run_configured
 
-        if args.command in ("prepare-state", "prepare-states"):
+        if args.command == "prepare-water-reference":
+            from .water_reference import prepare_reference
+
+            print(json.dumps(prepare_reference(args.request, args.output), indent=2))
+        elif args.command in ("prepare-state", "prepare-states"):
             from .state_inputs import prepare_state, prepare_states
 
             prepare = prepare_state if args.command == "prepare-state" else prepare_states

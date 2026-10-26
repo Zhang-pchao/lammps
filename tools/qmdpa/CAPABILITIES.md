@@ -26,6 +26,15 @@ derivatives and reject missing coverage. They do not infer bonds, move protons
 between groups, change occupancy, cut covalent bonds, map excited states across
 orbital spaces, or implement periodic EE and mutual polarization.
 
+Development 0.4.0.dev3 adds a distinct protected aqueous core with a variable
+whole-water buffer, using every subset of one to six declared candidate waters.
+It uses a bound isolated-water energy reference and all switching derivatives.
+Core-internal proton movement is permitted; outer water identity loss, a proton
+crossing the protected boundary and undeclared water coverage fail explicitly.
+See WATER_BUFFER.md. It does not change the existing fixed-k ME/EE model or
+qualify general reactive regrouping. CPU ground ME, finite boundaries, raw
+deterministic inference and NVE define the initial validation scope.
+
 The default native integrator remains fixed-cell LAMMPS NVE. Development
 0.4.0.dev1 adds native NHC NVT and official PLUMED sampling for finite,
 fixed-region CPU PySCF ground ME: distance or distance-difference harmonic

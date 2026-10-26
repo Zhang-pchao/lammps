@@ -85,3 +85,6 @@ Inactive partition corrections are None, never fabricated zero evaluations.
 The current ledger records numerical and native qualifications for each source
 snapshot. No selected-state exchange, variable occupancy, dynamic EE, periodic
 electrostatics, stress or reactive regrouping is implied by this ground-ME API.
+
+A separate variable-count protected-water model is described in
+[WATER_BUFFER.md](WATER_BUFFER.md); the fixed-k model above remains unchanged.

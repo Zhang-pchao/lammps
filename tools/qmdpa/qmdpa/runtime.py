@@ -187,6 +187,9 @@ def _validate_restart(checkpoint_path, config):
 
     validate_thermostat_frame(checkpoint["frame"], config)
     validate_sampling_frame(checkpoint["frame"], config)
+    from .water_buffer import validate_buffer_frame
+
+    validate_buffer_frame(checkpoint["frame"], config)
     from .metadynamics import validate_checkpoint_history
 
     validate_checkpoint_history(checkpoint, checkpoint_path, config)
@@ -230,6 +233,11 @@ def preflight_restart(config_path, checkpoint_path, *, config_loader, comm=None,
 
 def _compare_restart(frame, checkpoint, config=None):
     reference = checkpoint["frame"]
+    from .water_buffer import validate_buffer_frame
+
+    if config is not None:
+        validate_buffer_frame(frame, config)
+        validate_buffer_frame(reference, config)
     from .bias import compare_bias_restart
 
     compare_bias_restart(frame, reference, {} if config is None else config)
@@ -276,7 +284,13 @@ def _compare_restart(frame, checkpoint, config=None):
 def _attach_state(frame, coupling, config):
     """Validate the same successful callback before any accepted-frame write."""
     from .state_records import configured_reference, validate_frame_state
+    from .water_buffer import HAMILTONIAN as WATER_BUFFER
+    from .water_buffer import frame_record
 
+    if config.get("hamiltonian") == WATER_BUFFER:
+        if coupling.failure is not None or coupling.last_step != frame["step"]:
+            raise ValueError("Water-buffer frame requires the successful current callback")
+        frame["water_buffer"] = frame_record(frame, config)
     if configured_reference(config) is None:
         return
     if getattr(getattr(coupling, "comm", None), "rank", 0) != 0:
