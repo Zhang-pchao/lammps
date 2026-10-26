@@ -176,7 +176,10 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         remaining = config["steps"]
         while remaining:
             count = min(remaining, config["sample_interval"])
-            _timed_call(timings, "run_wall_seconds", coupling.run, count)
+            if "sampling" in config:
+                _timed_call(timings, "run_wall_seconds", bias.advance, coupling, count)
+            else:
+                _timed_call(timings, "run_wall_seconds", coupling.run, count)
             if "sampling" in config:
                 _timed_call(timings, "run_wall_seconds", bias.refresh, coupling)
             frame = _frame(lmp, comm, periodic=config["periodic"])

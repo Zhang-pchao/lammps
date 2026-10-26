@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import metadynamics
+from . import metadynamics, opes, water_cv
 from .bias import MIN_DISTANCE_ANGSTROM, NativeBiasAtoms, _coordinates, _scalar
 from .config import file_digest
 from .dynamics import extend_identity, positive_scalar, require_ground_me
@@ -48,24 +48,20 @@ def bind_sampling(config, raw, base_dir):
     if not path.is_file() or file_digest(path) != kernel["sha256"]:
         raise ValueError("PLUMED kernel SHA256 differs from the declared file")
     cv = raw["cv"]
-    if not isinstance(cv, dict) or set(cv) != {"form", "atom_ids"}:
-        raise ValueError("sampling.cv requires form and atom_ids")
-    sizes = {"distance": 2, "distance-difference": 3}
-    if not isinstance(cv["form"], str) or cv["form"] not in sizes:
-        raise ValueError("sampling.cv.form must be distance or distance-difference")
-    ids = cv["atom_ids"]
-    if (not isinstance(ids, list) or len(ids) != sizes[cv["form"]]
-            or any(type(i) is not int or i <= 0 for i in ids)
-            or len(set(ids)) != len(ids)):
-        raise ValueError("sampling.cv requires distinct positive integer atom IDs")
-    if not set(ids) <= set(config["region"]["atom_ids"]):
-        raise ValueError("All sampling CV atoms must remain in the fixed QM region")
-    if cv["form"] == "distance":
-        ids = sorted(ids)
+    if isinstance(cv, dict) and cv.get("form") == water_cv.FORM:
+        value_cv = water_cv.validate_cv(cv, config)
+    else:
+        value_cv = _distance_cv(cv, config)
     bias = raw["bias"]
     if not isinstance(bias, dict):
         raise ValueError("sampling.bias must be a declared bias object")  # noqa: TRY004 - Configuration API.
-    if bias.get("form") == metadynamics.FORM:
+    if bias.get("form") == opes.FORM:
+        if value_cv["form"] != water_cv.FORM:
+            raise ValueError("OPES currently requires the water self-ionization CV pair")
+        value_bias = opes.validate_bias(bias, config)
+    elif value_cv["form"] == water_cv.FORM:
+        raise ValueError("Water Voronoi sampling currently requires OPES")
+    elif bias.get("form") == metadynamics.FORM:
         value_bias = metadynamics.validate_bias(bias, config)
     else:
         if set(bias) != {"form", "center_angstrom", "k_ev_per_angstrom2"}:
@@ -83,14 +79,46 @@ def bind_sampling(config, raw, base_dir):
     value = {
         "engine": "plumed",
         "kernel": {"path": str(path), "sha256": kernel["sha256"]},
-        "cv": {"form": cv["form"], "atom_ids": ids},
+        "cv": value_cv,
         "bias": value_bias,
     }
     extend_identity(config, "sampling", value)
     return config
 
 
+def _distance_cv(cv, config):
+    if not isinstance(cv, dict) or set(cv) != {"form", "atom_ids"}:
+        raise ValueError("sampling.cv requires form and atom_ids")
+    sizes = {"distance": 2, "distance-difference": 3}
+    if not isinstance(cv["form"], str) or cv["form"] not in sizes:
+        raise ValueError("sampling.cv.form must be distance or distance-difference")
+    ids = cv["atom_ids"]
+    if (not isinstance(ids, list) or len(ids) != sizes[cv["form"]]
+            or any(type(i) is not int or i <= 0 for i in ids)
+            or len(set(ids)) != len(ids)):
+        raise ValueError("sampling.cv requires distinct positive integer atom IDs")
+    if not set(ids) <= set(config["region"]["atom_ids"]):
+        raise ValueError("All sampling CV atoms must remain in the fixed QM region")
+    return {"form": cv["form"], "atom_ids": sorted(ids) if cv["form"] == "distance" else ids}
+
+
+def history_contract(config):
+    if opes.active(config):
+        return opes
+    return metadynamics if metadynamics.active(config) else None
+
+
+def validate_checkpoint_history(checkpoint, checkpoint_path, config):
+    contract = history_contract(config)
+    if contract is not None:
+        contract.validate_checkpoint_history(checkpoint, checkpoint_path, config)
+    elif checkpoint.get("sampling_history") is not None:
+        raise ValueError("Unexpected sampling checkpoint history")
+
+
 def cv_value(cv, coordinates):
+    if cv["form"] == water_cv.FORM:
+        return water_cv.values(cv, coordinates)
     ids = cv["atom_ids"]
     pairs = [(ids[0], ids[1])]
     if cv["form"] == "distance-difference":
@@ -106,7 +134,9 @@ def render_plumed(sampling, directory, *, restart=False):
     directory = Path(directory)
     ids = sampling["cv"]["atom_ids"]
     rows = (["RESTART"] if restart else []) + ["UNITS LENGTH=A ENERGY=eV TIME=ps"]
-    if sampling["cv"]["form"] == "distance":
+    if sampling["cv"]["form"] == water_cv.FORM:
+        rows += water_cv.render(sampling["cv"])
+    elif sampling["cv"]["form"] == "distance":
         rows.append(f"qmdpa_cv: DISTANCE ATOMS={ids[0]},{ids[1]} NOPBC")
     else:
         rows += [
@@ -116,7 +146,9 @@ def render_plumed(sampling, directory, *, restart=False):
              "COEFFICIENTS=1,-1 PERIODIC=NO"),
         ]
     bias = sampling["bias"]
-    if bias["form"] == "harmonic":
+    if bias["form"] == opes.FORM:
+        rows.append(opes.render(bias, directory, _path_token, restart=restart))
+    elif bias["form"] == "harmonic":
         rows.append(
             "qmdpa_bias: RESTRAINT ARG=qmdpa_cv "
             f"AT={bias['center_angstrom']:.17g} KAPPA={bias['k_ev_per_angstrom2']:.17g}"
@@ -129,8 +161,10 @@ def render_plumed(sampling, directory, *, restart=False):
             f"TEMP={bias['temperature_K']:.17g} FILE={_path_token(directory / 'HILLS')} "
             "FMT={ %.17g}"
         )
+    observables = (",".join((*water_cv.LABELS, "qmdpa_iondistance"))
+                   if sampling["cv"]["form"] == water_cv.FORM else "qmdpa_cv")
     rows += [
-        ("PRINT ARG=qmdpa_cv,qmdpa_bias.bias "
+        (f"PRINT ARG={observables},qmdpa_bias.bias "
          f"FILE={_path_token(directory / 'COLVAR')} STRIDE=1 FMT={{ %.17g}}"),
         "FLUSH STRIDE=1",
     ]
@@ -175,7 +209,9 @@ class NativePlumedBias(NativeBiasAtoms):
             raise ValueError("A native sampling fix already exists")
         self.directory = Path(output) / "sampling"
         self.input_path = self.directory / "plumed.dat"
-        self.time_dependent = metadynamics.active(config)
+        self.history = history_contract(config)
+        self.time_dependent = self.history is not None
+        self.history_file = "STATE" if opes.active(config) else "HILLS"
         self.input_text = render_plumed(
             self.sampling, self.directory, restart=self.time_dependent and previous is not None
         )
@@ -184,9 +220,13 @@ class NativePlumedBias(NativeBiasAtoms):
             self.directory.mkdir()
             if self.time_dependent and previous is not None:
                 source = Path(previous["sampling_history_path"])
-                if metadynamics.history_record(source, config, previous["frame"]["step"]) != previous["frame"]["sampling"]["history"]:
-                    raise ValueError("WTMetaD accepted history changed before loading")
-                shutil.copyfile(source, self.directory / "HILLS")
+                if self.history.history_record(source, config, previous["frame"]["step"]) != previous["frame"]["sampling"]["history"]:
+                    raise ValueError("Sampling accepted history changed before loading")
+                target = "PARENT_STATE" if opes.active(config) else "HILLS"
+                shutil.copyfile(source, self.directory / target)
+                if opes.active(config):
+                    # Before the next deposition, the parent is the exact current state.
+                    shutil.copyfile(source, self.directory / "STATE")
             self.input_path.write_text(self.input_text)
             return file_digest(self.input_path)
         self.input_sha256 = _root_call(comm, prepare)
@@ -225,27 +265,40 @@ class NativePlumedBias(NativeBiasAtoms):
                    if atom["id"] in self.ids}
             frame["sampling"] = {
                 "engine": "plumed",
-                "cv_angstrom": cv_value(self.sampling["cv"], xyz),
+                ("cv_values" if opes.active(self.config) else "cv_angstrom"):
+                    cv_value(self.sampling["cv"], xyz),
                 "bias_energy_eV": energy,
                 "unbiased_potential_eV": frame["potential_eV"] - energy,
             }
             if self.time_dependent:
-                frame["sampling"]["history"] = metadynamics.history_record(
-                    self.directory / "HILLS", self.config, frame["step"]
+                frame["sampling"]["history"] = self.history.history_record(
+                    self.directory / self.history_file, self.config, frame["step"]
                 )
             validate_sampling_frame(frame, self.config)
         _root_call(comm, attach)
+
+    def advance(self, coupling, count):
+        # OPES can change the force at deposition, including through normalization
+        # and kernel merging. Refresh after EVERY step, independently of output
+        # cadence, so the next half-kick and any restart use the same current force.
+        if opes.active(self.config):
+            for _ in range(count):
+                coupling.run(1)
+                coupling.run(0)
+        else:
+            coupling.run(count)
 
     def refresh(self, coupling):
         # Capture the post-deposition potential with unchanged coordinates.
         # Fixed-width hills have zero force at their deposition center.
         # The native fix suppresses a second history update at this MD step.
-        if self.time_dependent:
+        if metadynamics.active(self.config):
             coupling.run(0)
 
     def save_history(self, checkpoint, output):
         if self.time_dependent:
-            metadynamics.snapshot_history(checkpoint, output, self.directory / "HILLS", self.config)
+            self.history.snapshot_history(
+                checkpoint, output, self.directory / self.history_file, self.config)
 
 
 def validate_sampling_frame(frame, config):
@@ -254,23 +307,34 @@ def validate_sampling_frame(frame, config):
         if record is not None:
             raise ValueError("Unexpected sampling frame record")
         return
-    fields = {"engine", "cv_angstrom", "bias_energy_eV", "unbiased_potential_eV"}
-    if metadynamics.active(config):
+    cv_field = "cv_values" if opes.active(config) else "cv_angstrom"
+    fields = {"engine", cv_field, "bias_energy_eV", "unbiased_potential_eV"}
+    contract = history_contract(config)
+    if contract is not None:
         fields.add("history")
     if not isinstance(record, dict) or set(record) != fields:
         raise ValueError("Missing or invalid sampling frame record")
-    if metadynamics.active(config):
-        metadynamics.validate_frame_history(frame, config)
+    if contract is not None:
+        contract.validate_frame_history(frame, config)
     if record["engine"] != "plumed":
         raise ValueError("Sampling frame engine differs")
-    for name in ("cv_angstrom", "bias_energy_eV", "unbiased_potential_eV"):
+    for name in ("bias_energy_eV", "unbiased_potential_eV"):
         if type(record[name]) not in (int, float) or not math.isfinite(record[name]):
             raise ValueError("Sampling frame values must be finite scalars")
     cv = config["sampling"]["cv"]
     expected = set(cv["atom_ids"])
     xyz = _coordinates([(atom["id"], atom["x"]) for atom in frame["atoms"]
                         if atom["id"] in expected], expected)
-    if abs(cv_value(cv, xyz) - record["cv_angstrom"]) > 1e-10:
+    observed = record[cv_field]
+    expected_cv = cv_value(cv, xyz)
+    if opes.active(config):
+        if not isinstance(observed, dict) or set(observed) != set(water_cv.OBSERVABLES):
+            raise ValueError("Sampling frame water CV fields differ")
+        pairs = [(observed[key], expected_cv[key]) for key in water_cv.OBSERVABLES]
+    else:
+        pairs = [(observed, expected_cv)]
+    if any(type(value) not in (int, float) or not math.isfinite(value)
+           or abs(value - target) > 1e-10 for value, target in pairs):
         raise ValueError("Sampling frame CV differs from its coordinates")
     if abs(frame["potential_eV"] - record["bias_energy_eV"]
            - record["unbiased_potential_eV"]) > 1e-9:
@@ -280,10 +344,15 @@ def validate_sampling_frame(frame, config):
 def compare_sampling_restart(frame, reference, config):
     for item in (frame, reference):
         validate_sampling_frame(item, config)
-    if metadynamics.active(config) and frame["sampling"]["history"] != reference["sampling"]["history"]:
-        raise ValueError("Restart WTMetaD accepted history differs")
+    if history_contract(config) is not None and frame["sampling"]["history"] != reference["sampling"]["history"]:
+        raise ValueError("Restart sampling accepted history differs")
     if "sampling" in config:
-        for key, atol in (("cv_angstrom", 1e-10), ("bias_energy_eV", 1e-9),
-                          ("unbiased_potential_eV", 1e-6)):
+        if opes.active(config):
+            for key in water_cv.OBSERVABLES:
+                if abs(frame["sampling"]["cv_values"][key] - reference["sampling"]["cv_values"][key]) > 1e-10:
+                    raise ValueError(f"Restart sampling {key} differs")
+        elif abs(frame["sampling"]["cv_angstrom"] - reference["sampling"]["cv_angstrom"]) > 1e-10:
+            raise ValueError("Restart sampling cv_angstrom differs")
+        for key, atol in (("bias_energy_eV", 1e-9), ("unbiased_potential_eV", 1e-6)):
             if abs(frame["sampling"][key] - reference["sampling"][key]) > atol:
                 raise ValueError(f"Restart sampling {key} differs")

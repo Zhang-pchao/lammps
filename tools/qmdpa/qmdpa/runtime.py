@@ -190,7 +190,7 @@ def _validate_restart(checkpoint_path, config):
     from .water_buffer import validate_buffer_frame
 
     validate_buffer_frame(checkpoint["frame"], config)
-    from .metadynamics import validate_checkpoint_history
+    from .sampling import validate_checkpoint_history
 
     validate_checkpoint_history(checkpoint, checkpoint_path, config)
     restart = Path(checkpoint_path).resolve().parent / checkpoint["restart_file"]

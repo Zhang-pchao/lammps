@@ -153,3 +153,70 @@ the same units and bias convention for later analysis. Convergence needs
 sufficient exploration, independent evidence and uncertainty assessment.
 This software contract does not qualify a free-energy surface or a physical
 transition rate.
+
+## OPES and water self-ionization CVs (development candidate)
+
+The new candidate uses the official `OPES_METAD`, `VORONOI_COORDINATION` and
+`VORONOI_DISTANCE` actions. The Voronoi actions were merged through
+[PLUMED PR 1442](https://github.com/plumed/plumed2/pull/1442); select a kernel
+containing those actions and pin its checksum. A stable version number alone
+does not establish action availability or numerical qualification.
+
+Replace the CV and bias objects with the following explicit example:
+
+```json
+"cv": {
+  "form": "water-self-ionization-voronoi",
+  "oxygen_ids": [1, 4],
+  "hydrogen_ids": [2, 3, 5, 6],
+  "coordination_kappa_per_angstrom": 7.0,
+  "distance_kappa_per_angstrom": 8.0
+},
+"bias": {
+  "form": "opes-metad",
+  "sigma": [0.15, 0.04],
+  "sigma_min": [0.06, 0.01],
+  "barrier_ev": 0.1,
+  "pace_steps": 100,
+  "bias_factor": 5.0
+}
+```
+
+This first profile requires at least two O atoms, twice as many H atoms, and all
+selected atoms inside the fixed finite QM region. Atom selections are explicit;
+no molecule index or nearest-oxygen assignment defines this bias. The neutral
+occupancy reference is two. Ionization is the sum of squared smooth occupancy
+defects. Ion distance is minus the distance-weighted pair product of defects.
+The two OPES arguments, in width-list order, are the classical log-distance
+transform and ionization. The transform is `1.1*log((d+0.1)/1.1)` at `d<=1` and
+`d-1` otherwise, with the numeric distance in Angstrom; it is C1 at the join.
+Exact all-pair assignments and explicit NOPBC are used. Soft defects are CVs,
+not fractional QM charges or a reactive-region reassignment algorithm.
+
+The thermostat supplies temperature. PACE, sample interval and final step must
+allow complete STATE checkpoints: sample interval and step count must be
+multiples of PACE. Sigma is supplied initially and may decrease under official
+OPES rules to sigma_min; adaptive variance estimation and multiple walkers are
+outside this profile. Parameters above describe an interface, not a converged
+water-ionization sampling protocol.
+
+The live `sampling/STATE` is never the recovery authority after a failed segment.
+Each accepted frame owns `sampling-state-*.STATE`, its SHA256, exact step,
+deposition counter and compressed-kernel count. Keep it with the checkpoint JSON
+and native restart binary. Continuation uses `STATE_RFILE=PARENT_STATE`; KERNELS
+alone does not contain the complete exact OPES state. Missing, stale, changed or
+multiple-snapshot states fail validation before native continuation.
+
+OPES updates may change the force at deposition through normalization or kernel
+merging. The candidate advances one step at a time and refreshes the force after
+each step without a second history update, independently of output cadence.
+This makes the force for the next half-kick and restart consistent. It requires
+a native fix that suppresses duplicate updates at the same MD step; test both
+continuous/split and serial/MPI routes with the exact runtime. This conservative
+implementation makes no throughput claim. The OPES bias work is not the WTMetaD
+hill-height sum, so that quantity is not recorded or used here.
+
+The candidate's independent CV derivatives, frozen-history complete forces,
+real-backend lifecycle and installed-package gates must pass before promotion.
+This interface alone does not qualify free energies, rates, reactive repartitioning,
+periodic electrostatics, nonadiabatic dynamics or an arbitrary combination.
