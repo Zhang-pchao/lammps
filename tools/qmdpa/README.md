@@ -16,6 +16,10 @@ or official Kokkos inference with its own precision and restart contract.
 
 The [protected finite water buffer](WATER_BUFFER.md) adds variable whole-water
 occupancy around a fixed aqueous reactive core with explicit boundary guards.
+The separate [reactive-water model](REACTIVE_WATER.md) declares proton ownership
+topologies and conservatively adapts the neutral QM fragment; its qualification
+is independent of the protected fixed-core route. Its optional NVT and
+complete-pool OPES/Voronoi combination has a separate acceptance contract.
 
 ## Installation
 

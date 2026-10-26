@@ -25,8 +25,11 @@ MECHANICAL = "fixed-region-mechanical"
 MOLECULAR = "finite-molecular-mechanical"
 MOLECULAR_EE = "finite-molecular-additive"
 WATER_BUFFER = "finite-water-buffer-mechanical"
+REACTIVE_WATER = "finite-reactive-water-mechanical"
 REFERENCE = "finite-electrostatic-reference-subtractive"
 _ROUTES = {
+    REACTIVE_WATER: ("reactive_config", "load_reactive_config", "reactive_cli",
+                     "_zero_pair", "_reactive_coupling"),
     REFERENCE: ("reference_config", "load_reference_config", "reference_cli",
                 "_zero_pair", "_reference_coupling"),
     MOLECULAR: ("adaptive_config", "load_adaptive_config", "adaptive_cli",
@@ -83,12 +86,13 @@ def _normalize_selection(raw):
         if "ee_model" in choice:
             raise ValueError("Mechanical coupling cannot specify ee_model")
         model = choice.get("me_model")
-        if model not in (None, "fragment-response", "molecular", "water-buffer"):
-            raise ValueError("Mechanical me_model must be fragment-response, molecular or water-buffer when supplied")
-        if model in ("fragment-response", "molecular", "water-buffer") and surface != "ground":
+        if model not in (None, "fragment-response", "molecular", "water-buffer", "reactive-water"):
+            raise ValueError("Mechanical me_model must be fragment-response, molecular, water-buffer or reactive-water when supplied")
+        if model in ("fragment-response", "molecular", "water-buffer", "reactive-water") and surface != "ground":
             raise ValueError("Mechanical fragment response currently requires the ground surface")
         hamiltonian = {"fragment-response": GROUND_FRAGMENT_HAMILTONIAN,
-                       "molecular": MOLECULAR, "water-buffer": WATER_BUFFER, None: MECHANICAL}[model]
+                       "molecular": MOLECULAR, "water-buffer": WATER_BUFFER,
+                       "reactive-water": REACTIVE_WATER, None: MECHANICAL}[model]
     elif embedding == "electrostatic":
         if "me_model" in choice:
             raise ValueError("Electrostatic coupling cannot specify me_model")
@@ -120,7 +124,7 @@ def _normalize_selection(raw):
 
 
 def _describe_selection(config):
-    mechanical = config["hamiltonian"] in (MECHANICAL, GROUND_FRAGMENT_HAMILTONIAN, MOLECULAR, WATER_BUFFER)
+    mechanical = config["hamiltonian"] in (MECHANICAL, GROUND_FRAGMENT_HAMILTONIAN, MOLECULAR, WATER_BUFFER, REACTIVE_WATER)
     result = {"surface": "ground" if config["provider"]["state"]["method"] == "ground" else "selected",
               "embedding": "mechanical" if mechanical else "electrostatic"}
     if config["hamiltonian"] == GROUND_FRAGMENT_HAMILTONIAN:
@@ -129,6 +133,8 @@ def _describe_selection(config):
         result["me_model"] = "molecular"
     if config["hamiltonian"] == WATER_BUFFER:
         result["me_model"] = "water-buffer"
+    if config["hamiltonian"] == REACTIVE_WATER:
+        result["me_model"] = "reactive-water"
     if not mechanical:
         result["ee_model"] = ("molecular-additive" if config["hamiltonian"] == MOLECULAR_EE
                               else config["hamiltonian"].removeprefix("finite-electrostatic-"))
@@ -148,6 +154,17 @@ def _energy_contract(config):
             "force_definition": "weighted-complete-forces-minus-energy-times-weight-gradients",
             "partition_policy": config["switch"],
             "scope": "Fixed-charge complete fixed-occupancy family; no excited-state map or mutual polarization",
+        }
+    if hamiltonian == REACTIVE_WATER:
+        return {
+            "total_terms": [{"name": "low_full", "coefficient": 1, "force_coordinates": "all"},
+                            {"name": "weighted_reactive_ground_corrections", "coefficient": 1,
+                             "force_coordinates": "all"}],
+            "native_baseline": "zero", "external_energy": "complete-total",
+            "force_definition": "weighted-complete-forces-minus-energy-times-weight-gradients",
+            "partition_policy": config["reactive_region"],
+            "reference": "isolated-water-difference-per-additional-QM-oxygen",
+            "scope": "Declared finite proton channels; all ionic defects and mixed transfer endpoints in neutral QM",
         }
     if hamiltonian in (MOLECULAR, WATER_BUFFER):
         return {
@@ -282,6 +299,9 @@ def describe_run(config):
     mechanical = hamiltonian == MECHANICAL
     regions = (
         {"full": config["full_region"], "groups": config["groups"],
+         "reactive_region": config["reactive_region"], "partitions": config["partitions"]}
+        if hamiltonian == REACTIVE_WATER else
+        {"full": config["full_region"], "groups": config["groups"],
          "core_group_ids": config["core_group_ids"], "partitions": config["partitions"]}
         if hamiltonian in (MOLECULAR, MOLECULAR_EE, WATER_BUFFER) else
         {"qm": config["region"]}
@@ -329,7 +349,7 @@ def describe_run(config):
     if hamiltonian == REFERENCE:
         description["embedding"] = config["embedding"]
         description["reference"] = config["reference"]
-    if hamiltonian == WATER_BUFFER:
+    if hamiltonian in (WATER_BUFFER, REACTIVE_WATER):
         description["buffer_reference"] = config["buffer_reference"]
         description["water_guard"] = config["water_guard"]
     if hamiltonian == MOLECULAR_EE:

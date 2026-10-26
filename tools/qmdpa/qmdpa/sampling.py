@@ -38,6 +38,10 @@ def bind_sampling(config, raw, base_dir):
         raise ValueError("sampling requires engine, kernel, cv and bias")
     if raw["engine"] != "plumed":
         raise ValueError("sampling.engine must be plumed")
+    if config["hamiltonian"] == "finite-reactive-water-mechanical" and (
+            not isinstance(raw["cv"], dict) or raw["cv"].get("form") != water_cv.FORM
+            or not isinstance(raw["bias"], dict) or raw["bias"].get("form") != opes.FORM):
+        raise ValueError("Reactive-water sampling requires OPES with the complete declared water-pool CV")
     kernel = raw["kernel"]
     if not isinstance(kernel, dict) or set(kernel) != {"path", "sha256"}:
         raise ValueError("sampling.kernel requires path and sha256")

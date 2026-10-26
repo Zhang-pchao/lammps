@@ -125,12 +125,22 @@ def validate_qm(qm, *, electrostatic=False, provider=None, base_dir=None):
     }
     if electrostatic:
         qm_defaults.update(nlc_grid_level=None, include_qm_dipole=False)
-    allowed = set(qm_defaults) | {"nlc_grid_level", "density_fit"}
+    allowed = set(qm_defaults) | {"nlc_grid_level", "density_fit", "scf_level_shift_hartree", "scf_solver"}
     if not isinstance(qm, dict) or set(qm).difference(allowed):
         raise ValueError("qm contains unsupported PySCF configuration keys")
     qm = {**qm_defaults, **qm}
-    from .backends import validate_density_fit
+    from .backends import validate_density_fit, validate_scf_level_shift, validate_scf_solver
 
+    solver = validate_scf_solver(qm.get("scf_solver"), qm["conv_tol_grad"])
+    if solver is None:
+        qm.pop("scf_solver", None)
+    elif electrostatic or normalized["engine"] != "pyscf":
+        raise ValueError("The diis-newton solver currently requires isolated CPU ground PySCF")
+    shift = validate_scf_level_shift(qm.get("scf_level_shift_hartree"))
+    if shift is None:
+        qm.pop("scf_level_shift_hartree", None)
+    else:
+        qm["scf_level_shift_hartree"] = shift
     density_fit = validate_density_fit(qm.get("density_fit"))
     if density_fit is None:
         # Keep conventional-integral inputs and normalized restart records unchanged.

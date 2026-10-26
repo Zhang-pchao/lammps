@@ -190,6 +190,9 @@ def _validate_restart(checkpoint_path, config):
     from .water_buffer import validate_buffer_frame
 
     validate_buffer_frame(checkpoint["frame"], config)
+    from .reactive_config import validate_reactive_frame
+
+    validate_reactive_frame(checkpoint["frame"], config)
     from .sampling import validate_checkpoint_history
 
     validate_checkpoint_history(checkpoint, checkpoint_path, config)
@@ -238,6 +241,10 @@ def _compare_restart(frame, checkpoint, config=None):
     if config is not None:
         validate_buffer_frame(frame, config)
         validate_buffer_frame(reference, config)
+        from .reactive_config import validate_reactive_frame
+
+        validate_reactive_frame(frame, config)
+        validate_reactive_frame(reference, config)
     from .bias import compare_bias_restart
 
     compare_bias_restart(frame, reference, {} if config is None else config)
@@ -291,6 +298,13 @@ def _attach_state(frame, coupling, config):
         if coupling.failure is not None or coupling.last_step != frame["step"]:
             raise ValueError("Water-buffer frame requires the successful current callback")
         frame["water_buffer"] = frame_record(frame, config)
+    from .reactive_config import frame_record as reactive_frame_record
+    from .reactive_water import HAMILTONIAN as REACTIVE_WATER
+
+    if config.get("hamiltonian") == REACTIVE_WATER:
+        if coupling.failure is not None or coupling.last_step != frame["step"]:
+            raise ValueError("Reactive-water frame requires the successful current callback")
+        frame["reactive_water"] = reactive_frame_record(frame, config)
     if configured_reference(config) is None:
         return
     if getattr(getattr(coupling, "comm", None), "rank", 0) != 0:

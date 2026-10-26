@@ -31,9 +31,18 @@ def validate_cv(raw, config):
             raise ValueError("Water CV selections require distinct positive integer atom IDs")
     if len(oxygen) < 2 or len(hydrogen) != 2 * len(oxygen) or set(oxygen) & set(hydrogen):
         raise ValueError("Water CV requires disjoint neutral O/H selections with at least two oxygens")
-    symbols = dict(zip(config["region"]["atom_ids"], config["region"]["symbols"], strict=True))
+    if config["hamiltonian"] == "finite-reactive-water-mechanical":
+        pool = set(config["reactive_region"]["pool_group_ids"])
+        symbols = {a: s for group in config["groups"] if group["group_id"] in pool
+                   for a, s in zip(group["atom_ids"], group["symbols"], strict=True)}
+        # Keep the observation domain fixed while QM membership changes. An
+        # instantaneous QM-only selection would introduce discontinuous bias.
+        if set(oxygen + hydrogen) != set(symbols):
+            raise ValueError("Water CV must cover the complete declared reactive pool")
+    else:
+        symbols = dict(zip(config["region"]["atom_ids"], config["region"]["symbols"], strict=True))
     if any(symbols.get(i) != "O" for i in oxygen) or any(symbols.get(i) != "H" for i in hydrogen):
-        raise ValueError("Water CV selections must match O/H atoms inside the fixed QM region")
+        raise ValueError("Water CV selections must match O/H atoms in the admitted sampling region")
     return {
         "form": FORM, "oxygen_ids": sorted(oxygen), "hydrogen_ids": sorted(hydrogen),
         "atom_ids": sorted(oxygen + hydrogen),

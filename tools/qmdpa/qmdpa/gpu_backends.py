@@ -14,6 +14,10 @@ from .embedding import FixedEmbeddingCharges, PySCFElectrostaticBackend
 def validate_gpu_settings(settings):
     """Validate the bounded GPU method without loading optional quantum engines."""
     settings = dict(settings)
+    if settings.get("scf_solver") is not None:
+        raise ValueError("The diis-newton solver currently requires isolated CPU ground PySCF")
+    if settings.get("scf_level_shift_hartree") is not None:
+        raise ValueError("Explicit SCF level shifting currently requires the CPU PySCF adapter")
     xc = settings.get("xc", "pbe")
     if not isinstance(xc, str) or xc.strip().lower() not in ("hf", "pbe", "pbe0"):
         raise ValueError("GPU4PySCF adapter supports conventional RHF or density-fitted PBE/PBE0")

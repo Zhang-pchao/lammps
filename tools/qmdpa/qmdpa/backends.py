@@ -126,6 +126,26 @@ def validate_density_fit(value):
     return {"auxbasis": name}
 
 
+def validate_scf_level_shift(value):
+    """Optional solver control; the reported energy uses the unshifted Fock operator."""
+    if value is None:
+        return None
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not np.isfinite(value) or value < 0):
+        raise ValueError("scf_level_shift_hartree must be finite and nonnegative or null")
+    return float(value)
+
+
+def validate_scf_solver(value, gradient_tolerance):
+    if value is None:
+        return None
+    if value != "diis-newton":
+        raise ValueError("scf_solver must be diis-newton or null")
+    if gradient_tolerance is None:
+        raise ValueError("The diis-newton solver requires an explicit conv_tol_grad")
+    return value
+
+
 class PySCFBackend:
     """Isolated molecular DFT with checked SCF convergence and analytic forces.
 
@@ -141,6 +161,8 @@ class PySCFBackend:
     uses official Coulomb/exchange fitting with auxiliary-basis response enabled
     in every force evaluation. It changes the integral approximation and is
     not an exact-reuse optimization; None preserves conventional integrals.
+    Optional scf_level_shift_hartree uses the official SCF convergence control;
+    it adds no physical energy term and never triggers an automatic retry.
     """
 
     def __init__(
@@ -158,7 +180,11 @@ class PySCFBackend:
         grid_response=True,
         threads=None,
         density_fit=None,
+        scf_level_shift_hartree=None,
+        scf_solver=None,
     ):
+        self.scf_solver = validate_scf_solver(scf_solver, conv_tol_grad)
+        self.scf_level_shift_hartree = validate_scf_level_shift(scf_level_shift_hartree)
         self.density_fit = validate_density_fit(density_fit)
         self.charge = _integer(charge, "Charge")
         self.multiplicity = _integer(multiplicity, "Multiplicity", 1)
@@ -222,6 +248,9 @@ class PySCFBackend:
         if self.conv_tol_grad is not None:
             method.conv_tol_grad = self.conv_tol_grad
         method.max_cycle = self.max_cycle
+        shift = validate_scf_level_shift(self.scf_level_shift_hartree)
+        if shift is not None:
+            method.level_shift = shift
         method.grids.level = self.grid_level
         if self.nlc_grid_level is not None:
             method.nlcgrids.level = self.nlc_grid_level
@@ -240,14 +269,34 @@ class PySCFBackend:
             gradient.auxbasis_response = True
         return gradient
 
+    def _solve_method(self, method):
+        """Run the declared solver once; optional refinement is always explicit."""
+        energy = method.kernel()
+        if self.scf_solver == "diis-newton":
+            # Official second-order optimization starts from the prescribed DIIS
+            # result even if that first stage did not reach convergence. This is
+            # one declared two-stage solver, never an exception-triggered retry.
+            method = method.newton()
+            method.ah_lindep = 1e-20
+            # The inner solver tests sqrt(ah_conv_tol). Keep it well below
+            # the requested physical gradient to avoid a zero-update stall.
+            method.ah_conv_tol = min(1e-24, (.1*self.conv_tol_grad)**2)
+            method.ah_start_tol = min(1e-10, .1*self.conv_tol_grad)
+            energy = method.kernel(method.mo_coeff, method.mo_occ)
+        if not method.converged:
+            raise EvaluationError(f"PySCF SCF did not converge within {self.max_cycle} cycles")
+        if self.scf_solver == "diis-newton":
+            residual = float(np.linalg.norm(method.get_grad(method.mo_coeff, method.mo_occ)))
+            if not np.isfinite(residual) or residual > self.conv_tol_grad:
+                raise EvaluationError("Final SCF orbital gradient exceeds the declared tolerance")
+        return method, energy
+
     def evaluate(self, geometry: Geometry) -> Evaluation:
         if geometry.periodic:
             raise ValueError("The PySCF molecular backend requires an isolated geometry")
         try:
             method = self._make_method(geometry)
-            energy = method.kernel()
-            if not method.converged:
-                raise EvaluationError(f"PySCF SCF did not converge within {self.max_cycle} cycles")
+            method, energy = self._solve_method(method)
             gradient_method = self._make_gradient(method)
             gradient = gradient_method.kernel()
             forces = -np.asarray(gradient) * (self._hartree_ev / self._bohr_angstrom)

@@ -1,8 +1,10 @@
 # Ground-state CV sampling
 
-This development interface is limited to finite fixed-region ground-state ME
-with CPU PySCF. Numerical admission belongs to an identified runtime and test
-record. Existing NVE and static-distance inputs retain their meanings.
+This development interface uses finite CPU PySCF ground ME. Fixed-region
+sampling supports the profiles below. The separately defined reactive-water
+model admits NHC NVT and complete-pool OPES/Voronoi only; see
+[its contract](REACTIVE_WATER.md). Numerical admission belongs to an identified
+runtime and test record. Existing NVE and static-distance inputs retain their meanings.
 
 Use the unified entry point, `qmdpa validate` or `qmdpa run`. An optional
 `thermostat` selects the official LAMMPS Nose-Hoover chain integrator:
@@ -182,9 +184,13 @@ Replace the CV and bias objects with the following explicit example:
 }
 ```
 
-This first profile requires at least two O atoms, twice as many H atoms, and all
-selected atoms inside the fixed finite QM region. Atom selections are explicit;
-no molecule index or nearest-oxygen assignment defines this bias. The neutral
+The fixed-region profile requires at least two O atoms, twice as many H atoms,
+and all selected atoms inside the finite QM region. For the reactive-water
+Hamiltonian, select every O and H in its declared reactive pool. That selection
+stays fixed while QM membership changes; a neutral pool water may leave QM
+without losing its CV/bias derivatives. Instantaneous QM-only CV selections,
+partial pools and permanent-environment CV atoms are rejected. Atom selections
+are explicit; no molecule index or nearest-oxygen assignment defines this bias. The neutral
 occupancy reference is two. Ionization is the sum of squared smooth occupancy
 defects. Ion distance is minus the distance-weighted pair product of defects.
 The two OPES arguments, in width-list order, are the classical log-distance

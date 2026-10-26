@@ -127,6 +127,8 @@ class PySCFElectrostaticBackend(PySCFBackend):
         include_qm_dipole=False,
         **qm_settings,
     ):
+        if qm_settings.get("scf_solver") is not None:
+            raise ValueError("The diis-newton solver currently requires isolated CPU ground PySCF")
         if not isinstance(charges, FixedEmbeddingCharges):
             raise ValueError("charges must be explicit FixedEmbeddingCharges")
         if type(include_qm_dipole) is not bool:

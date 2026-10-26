@@ -2,7 +2,7 @@
 # LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
 # Copyright (2026) Pengchao Zhang <pczhang1997@gmail.com>
 # SPDX-License-Identifier: GPL-2.0-only
-"""Optional native constant-temperature integration for finite ground ME."""
+"""Native constant-temperature integration for admitted finite ground ME models."""
 
 import hashlib
 import json
@@ -10,11 +10,12 @@ import math
 
 
 def require_ground_me(config):
-    if (config["hamiltonian"] != "fixed-region-mechanical" or config["periodic"]
+    if (config["hamiltonian"] not in ("fixed-region-mechanical",
+                                    "finite-reactive-water-mechanical") or config["periodic"]
             or config["provider"]["engine"] != "pyscf"
             or config["provider"]["device"] != "cpu"
             or config["provider"]["state"]["method"] != "ground"):
-        raise ValueError("Sampling currently requires finite fixed-region CPU PySCF ground ME")
+        raise ValueError("Sampling requires finite fixed-region or reactive-water CPU PySCF ground ME")
 
 
 def positive_scalar(value, name):

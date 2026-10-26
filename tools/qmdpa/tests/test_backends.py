@@ -203,6 +203,21 @@ def pyscf_modules(method, observed):
 
 
 class PySCFContractTests(unittest.TestCase):
+    def test_explicit_level_shift_and_unchanged_default(self):
+        for shift in (None, 0., .3):
+            method = FakeSCF()
+            method.level_shift = .125
+            with patch.dict(sys.modules, pyscf_modules(method, {})):
+                backend = PySCFBackend(scf_level_shift_hartree=shift)
+                backend.evaluate(water())
+            self.assertEqual(method.level_shift, .125 if shift is None else shift)
+
+    def test_invalid_level_shift_rejected_before_optional_import(self):
+        for shift in (True, -.1, float("nan"), float("inf"), "0.3", []):
+            with self.subTest(shift=shift), self.assertRaisesRegex(ValueError, "scf_level_shift"):
+                PySCFBackend(scf_level_shift_hartree=shift)
+
+
     def test_units_force_sign_spin_and_thread_setting(self):
         observed = {}
         method = FakeSCF()
