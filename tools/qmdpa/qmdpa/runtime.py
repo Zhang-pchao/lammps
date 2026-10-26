@@ -190,6 +190,9 @@ def _validate_restart(checkpoint_path, config):
     from .ehrenfest_runtime import validate_frame as validate_ehrenfest_frame
 
     validate_ehrenfest_frame(checkpoint["frame"], config)
+    from .selected_adaptive_runtime import validate_frame as validate_selected_frame
+
+    validate_selected_frame(checkpoint["frame"], config)
     from .water_buffer import validate_buffer_frame
 
     validate_buffer_frame(checkpoint["frame"], config)
@@ -259,6 +262,9 @@ def _compare_restart(frame, checkpoint, config=None):
     from .ehrenfest_runtime import compare_restart as compare_ehrenfest_restart
 
     compare_ehrenfest_restart(frame, reference, {} if config is None else config)
+    from .selected_adaptive_runtime import compare_restart as compare_selected_restart
+
+    compare_selected_restart(frame, reference, {} if config is None else config)
     _validate_frame(frame)
     _validate_frame(reference)
     from .state_records import validate_frame_state
@@ -314,6 +320,9 @@ def _attach_state(frame, coupling, config):
     from .ehrenfest_runtime import attach_frame as attach_ehrenfest_frame
 
     attach_ehrenfest_frame(frame, coupling, config)
+    from .selected_adaptive_runtime import attach_frame as attach_selected_frame
+
+    attach_selected_frame(frame, coupling, config)
     if configured_reference(config) is None:
         return
     if getattr(getattr(coupling, "comm", None), "rank", 0) != 0:

@@ -147,3 +147,8 @@ failed. Incomplete file output may remain under .states-pending for diagnosis;
 it is not a completed collection. Existing output directories are never replaced.
 The command prepares references only and does not calculate state gradients.
 The [state-set API](MULTISTATE.md) performs shared energy/full-force evaluation.
+
+Common-core selected molecular families use the separate
+`qmdpa prepare-state-family REQUEST.json --output FAMILY.json` command.
+See [SELECTED_ADAPTIVE.md](SELECTED_ADAPTIVE.md); a family of cross-partition
+references is not a multi-root electronic-propagation state.

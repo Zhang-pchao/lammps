@@ -248,6 +248,11 @@ class MolecularMechanicalMixer:
     hamiltonian = "finite-molecular-mechanical"
 
     def __init__(self, full_low, *, groups, core_group_ids, partitions, switch):
+        partitions = tuple(partitions)
+        if (self.hamiltonian == "finite-molecular-mechanical"
+                and any(isinstance(p, MechanicalPartition) and p.electronic_state != "ground"
+                        for p in partitions)):
+            raise ValueError("The ground molecular model cannot admit selected-state partitions")
         _configure_family(self, groups, core_group_ids, partitions, switch,
                           MechanicalPartition, "high")
         self.full_low = full_low

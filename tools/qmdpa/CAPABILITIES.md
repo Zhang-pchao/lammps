@@ -6,7 +6,7 @@ QM method and partition must be established for the intended application.
 
 | Provider | Ground fixed ME / additive EE | Selected fixed ME / additive EE | Plain selected gap-anchor | Molecular dynamic family |
 | --- | --- | --- | --- | --- |
-| CPU PySCF | HF/DFT under declared settings; optional ground density fitting | Source-pinned RHF/TDA and explicit PBE0/TDA profiles | Matched RHF or PBE0 | Ground ME and additive EE, finite neutral singlet |
+| CPU PySCF | HF/DFT under declared settings; optional ground density fitting | Source-pinned RHF/TDA and explicit PBE0/TDA profiles | Matched RHF or PBE0 | Ground ME and additive EE; separate selected common-core RHF/TDA ME family |
 | GPU4PySCF | Conventional RHF or named-density-fitted PBE/PBE0; ground ME also admits a periodic full DPA system with a finite molecular region | Dense conventional RHF/TDA only | Matched RHF only | Not admitted |
 | ABACUS CPU | Ground ME: finite-supercell approximation or explicit same-cell orthorhombic periodic replacement; CPU PW/PBE/Gamma; qualification remains configuration-specific | Not admitted | Not admitted | Not admitted |
 
@@ -26,7 +26,14 @@ Signed full-wavefunction correspondence, complete coherent forces and
 immutable electronic history are defined in EHRENFEST.md. This is not a
 TDA/NAD, hopping, periodic or adaptive-state capability.
 
-Dynamic complete-molecule ME and additive EE retain a fixed core, exactly k
+Development 0.4.0.dev8 adds a separate finite selected-state molecular ME
+family: CPU RHF/TDA, a common intact chromophore core and complete fixed-k
+same-composition candidates. Own/core and bilateral cross-AO transition-density
+correspondence guard every active state; all switching derivatives are retained.
+See SELECTED_ADAPTIVE.md. This does not combine adaptive regions with Ehrenfest,
+EE, reactive reassignment, periodic boundaries or enhanced sampling.
+
+Ground dynamic complete-molecule ME and additive EE retain a fixed core, exactly k
 same-composition candidates and every possible k-subset. They retain all weight
 derivatives and reject missing coverage. They do not infer bonds, move protons
 between groups, change occupancy, cut covalent bonds, map excited states across

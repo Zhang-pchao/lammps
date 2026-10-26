@@ -29,7 +29,10 @@ REACTIVE_WATER = "finite-reactive-water-mechanical"
 REFERENCE = "finite-electrostatic-reference-subtractive"
 PERIODIC_EE = "periodic-electrostatic-reference-subtractive"
 EHRENFEST = "finite-two-state-ehrenfest-mechanical"
+SELECTED_FAMILY = "finite-molecular-selected-mechanical"
 _ROUTES = {
+    SELECTED_FAMILY: ("selected_adaptive_config", "load_selected_adaptive_config",
+                      "selected_adaptive_cli", "_zero_pair", "_selected_adaptive_coupling"),
     EHRENFEST: ("ehrenfest_config", "load_ehrenfest_config", "ehrenfest_cli",
                  "_zero_pair", "_ehrenfest_coupling"),
     PERIODIC_EE: ("periodic_ee_config", "load_periodic_ee_config", "periodic_ee_cli",
@@ -86,6 +89,11 @@ def _normalize_selection(raw):
             or set(choice) - required - {"ee_model", "me_model"}):
         raise ValueError("coupling requires surface, embedding and an optional matching me_model or ee_model")
     surface, embedding = choice["surface"], choice["embedding"]
+    if choice == {"surface": "selected", "embedding": "mechanical", "me_model": "molecular-common-core"}:
+        if "hamiltonian" in config and config["hamiltonian"] != SELECTED_FAMILY:
+            raise ValueError("Selected-family selector conflicts with the explicit Hamiltonian")
+        config["hamiltonian"] = SELECTED_FAMILY
+        return config
     if choice == {"surface": "two-state", "embedding": "mechanical", "me_model": "ehrenfest"}:
         if "hamiltonian" in config and config["hamiltonian"] != EHRENFEST:
             raise ValueError("Ehrenfest selector conflicts with the explicit Hamiltonian")
@@ -136,6 +144,8 @@ def _normalize_selection(raw):
 
 
 def _describe_selection(config):
+    if config["hamiltonian"] == SELECTED_FAMILY:
+        return {"surface": "selected", "embedding": "mechanical", "me_model": "molecular-common-core"}
     if config["hamiltonian"] == EHRENFEST:
         return {"surface": "two-state", "embedding": "mechanical", "me_model": "ehrenfest"}
     mechanical = config["hamiltonian"] in (MECHANICAL, GROUND_FRAGMENT_HAMILTONIAN, MOLECULAR, WATER_BUFFER, REACTIVE_WATER)
@@ -168,6 +178,13 @@ def _energy_contract(config):
                 "derivative_coupling": "d01=<0|grad 1>; environment rows zero",
                 "electronic_generator": "diag(U)-i*hbar*(v.d)",
                 "scope": "Two fixed-reference real singlets; no ETF, hopping, SOC or adaptive region"}
+    if hamiltonian == SELECTED_FAMILY:
+        return {"native_baseline": "zero", "external_energy": "complete-total",
+                "potential": "DPA(full)+sum_a w_a*(E_selected,a-DPA(Qa))",
+                "force_definition": "weighted-complete-forces-minus-energy-times-weight-gradients",
+                "partition_policy": config["switch"],
+                "correspondence": "own-reference-and-common-core-and-all-directed-active-pairs",
+                "scope": "Finite neutral CPU RHF/TDA, fixed core, complete same-composition fixed-k family"}
     if hamiltonian == MOLECULAR_EE:
         return {
             "total_terms": [{"name": "normalized_weighted_complete_additive_totals",
@@ -334,7 +351,7 @@ def describe_run(config):
         if hamiltonian == REACTIVE_WATER else
         {"full": config["full_region"], "groups": config["groups"],
          "core_group_ids": config["core_group_ids"], "partitions": config["partitions"]}
-        if hamiltonian in (MOLECULAR, MOLECULAR_EE, WATER_BUFFER) else
+        if hamiltonian in (MOLECULAR, MOLECULAR_EE, WATER_BUFFER, SELECTED_FAMILY) else
         {"qm": config["region"]}
         if mechanical else
         {"qm": config["qm_region"], "environment": config["environment_region"]}
@@ -377,6 +394,11 @@ def describe_run(config):
             "cell": "fixed-native-cell", "all_qm_cancellation": "not-guaranteed",
             "stress": "unsupported",
         }
+    if hamiltonian == SELECTED_FAMILY:
+        description["state_family"] = {
+            "reference_sha256": config["family_reference"]["sha256"],
+            "metric": "unsigned normalized cross-AO transition-density operator overlap",
+            "electronic_propagation": False}
     if hamiltonian == EHRENFEST:
         description["electronic_dynamics"] = {
             "algorithm": "two-state-ehrenfest", "initial_amplitudes": config["initial_amplitudes"],

@@ -345,6 +345,7 @@ def main(argv=None):
     validator.add_argument("config", type=Path)
     validator.add_argument("--restart", type=Path, help="Also verify restart input integrity")
     for command, help_text in (
+        ("prepare-state-family", "Prepare a common-core RHF/TDA molecular family"),
         ("prepare-state", "Prepare a reference for a supported selected state"),
         ("prepare-states", "Prepare several CPU RHF/PBE0 or GPU RHF references with one common solve"),
     ):
@@ -360,7 +361,11 @@ def main(argv=None):
         from .dispatch import describe_run, load_run_config
         from .dispatch import run as run_configured
 
-        if args.command == "prepare-water-reference":
+        if args.command == "prepare-state-family":
+            from .state_family import prepare_family
+
+            print(json.dumps(prepare_family(args.request, args.output), indent=2))
+        elif args.command == "prepare-water-reference":
             from .water_reference import prepare_reference
 
             print(json.dumps(prepare_reference(args.request, args.output), indent=2))

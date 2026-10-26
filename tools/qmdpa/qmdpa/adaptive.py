@@ -95,13 +95,16 @@ class MechanicalPartition:
         offset = _real(self.energy_offset_ev, "energy_offset_ev")
         if offset != 0.0 or self.offset_source is not None:
             _text(self.offset_source, "A declared energy offset source")
-        if self.electronic_state != "ground":
-            raise ValueError("Only declared ground-state partitions are supported")
+        self._validate_electronic_state()
         object.__setattr__(self, "qm_group_ids", tuple(sorted(groups)))
         object.__setattr__(self, "qm_charge", charge)
         object.__setattr__(self, "qm_multiplicity", multiplicity)
         object.__setattr__(self, "energy_offset_ev", offset)
         self.validate_provider_state()
+
+    def _validate_electronic_state(self):
+        if self.electronic_state != "ground":
+            raise ValueError("Only declared ground-state partitions are supported")
 
     def validate_provider_state(self):
         """Check declared states without importing or selecting a scientific engine."""

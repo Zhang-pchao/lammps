@@ -68,6 +68,10 @@ def configured_reference(config):
     state = config.get("provider", {}).get("state", {"method": "ground"})
     if state["method"] == "ground":
         return None
+    if (state["method"] == "common-core-rhf-tda"
+            and config.get("hamiltonian") == "finite-molecular-selected-mechanical"):
+        # All partition states and correspondences have their own frame validator.
+        return None
     if (state["method"] == "sa-casscf22"
             and config.get("hamiltonian") == "finite-two-state-ehrenfest-mechanical"):
         # Coherent amplitudes have their own complete history validation.

@@ -366,3 +366,6 @@ development interface for PLUMED restraints and native NVT.
 
 Fixed-region periodic Gaussian reference subtraction is a separate development
 route with complete totals and explicit field accounting; see [PERIODIC_EE.md](PERIODIC_EE.md).
+
+The separate finite selected-state molecular family and its common-core
+correspondence contract are documented in [SELECTED_ADAPTIVE.md](SELECTED_ADAPTIVE.md).
