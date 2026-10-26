@@ -214,11 +214,13 @@ def load_run_config(path):
     sampling = raw.pop("sampling", None)
     has_thermostat = "thermostat" in raw
     thermostat = raw.pop("thermostat", None)
+    has_execution = "execution" in raw
+    execution = raw.pop("execution", None)
     raw = _normalize_selection(raw)
     # Legacy schema-1 mechanical configurations predate an explicit model ID.
     hamiltonian = raw.get("hamiltonian", MECHANICAL)
     module, loader, _, _, _ = _route(hamiltonian)
-    config = (_function(module, "_validate_config")(raw, path) if has_selector or has_bias or has_sampling or has_thermostat
+    config = (_function(module, "_validate_config")(raw, path) if has_selector or has_bias or has_sampling or has_thermostat or has_execution
               else _function(module, loader)(path))
     if path.read_bytes() != original:
         raise ValueError("Configuration changed while selecting and validating its Hamiltonian")
@@ -236,6 +238,10 @@ def load_run_config(path):
         from .sampling import bind_sampling
 
         bind_sampling(config, sampling, path.parent)
+    if has_execution:
+        from .execution import bind_execution
+
+        bind_execution(config, execution)
     return config
 
 
@@ -346,4 +352,7 @@ def describe_run(config):
         })
     if "thermostat" in config:
         description["dynamics"]["thermostat"] = config["thermostat"]
+    if "execution" in config:
+        description["execution"] = config["execution"]
+        description["assembly"]["native_pair"] = config["execution"]["pair_style"]
     return description

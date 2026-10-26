@@ -34,6 +34,13 @@ accepted history. The low-level DPA device is separately identified. See
 SAMPLING.md for admitted inputs, history and analysis contracts. This does
 not change the frozen 0.3.0 release or qualify adaptive/selected-state sampling.
 
+Development 0.4.0.dev2 adds an explicit practical float32 DPA4C execution
+profile and the official CUDA deepmd/kk pair for finite fixed-region,
+neutral-singlet CPU ground ME. It uses an independent precision budget and
+retains strict geometry/identity checks. NVE, one GPU and ordinary or Kokkos
+inference are the initial scope; see EXECUTION.md. Historical strict
+float32 failures and other configurations retain their original status.
+
 MPI distributes atoms
 and communicates callback results; it does not parallelize a quantum solve
 across ranks or GPUs. Source-bound restart and failure checks remain mandatory.

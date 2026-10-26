@@ -57,7 +57,17 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             )
     from lammps import lammps
 
+    from .execution import native_arguments, register_native_cleanup, verify_native
+
+    try:
+        from mpi4py import MPI
+    except ImportError:
+        launch_comm = None
+    else:
+        launch_comm = MPI.COMM_WORLD
     initialization_started = time.perf_counter()
+    prepared_config = _root_call(launch_comm, lambda: config_loader(config_path))
+
     timings = {
         "initialization_wall_seconds": None,
         "run_wall_seconds": 0.0,
@@ -80,14 +90,15 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                if provider_resources is not None else {}),
         }
 
-    lmp = lammps(cmdargs=["-log", "none", "-screen", "none", "-nocite"])
+    lmp = lammps(cmdargs=native_arguments(prepared_config))
+    register_native_cleanup(lmp, prepared_config)
     comm = lmp.get_mpi_comm()
     if comm is None and lmp.extract_setting("world_size") != 1:
         lmp.close()
         raise RuntimeError("An MPI run requires mpi4py linked to the same MPI implementation")
     output_created = False
     try:
-        config = _root_call(comm, lambda: config_loader(config_path))
+        config = prepared_config
         output = Path(output).resolve()
         _root_call(comm, lambda: output.mkdir(parents=True, exist_ok=False))
         output_created = True
@@ -109,6 +120,7 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         else:
             lmp.command(f"read_restart {_quoted(previous['restart_path'])}")
         setup_pair(lmp, config)
+        verify_native(lmp, config)
         lmp.commands_list(
             [
                 "neighbor 2.0 bin",
@@ -260,7 +272,9 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
 def _mechanical_pair(lmp, config):
     condition = config.get("full_charge_spin")
     suffix = "" if condition is None else " charge_spin " + " ".join(map(str, condition))
-    lmp.command(f"pair_style deepmd {_quoted(config['model'])}{suffix}")
+    from .execution import pair_style
+
+    lmp.command(f"pair_style {pair_style(config)} {_quoted(config['model'])}{suffix}")
     lmp.command("pair_coeff * * " + " ".join(config["type_symbols"]))
 
 

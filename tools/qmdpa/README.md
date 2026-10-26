@@ -11,6 +11,9 @@ backend/method matrix, [CONFIGURATION.md](CONFIGURATION.md) for selectors, and
 [DEPLOYMENT.md](DEPLOYMENT.md) for isolated package installation and runtime
 requirements. Qualification remains specific to source, method and inputs.
 
+The explicit [practical DPA4C execution profile](EXECUTION.md) selects ordinary
+or official Kokkos inference with its own precision and restart contract.
+
 ## Installation
 
 Use Python 3.10 or newer, NumPy, a shared LAMMPS build with EXTRA-FIX and the

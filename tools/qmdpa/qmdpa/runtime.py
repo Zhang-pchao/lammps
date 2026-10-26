@@ -261,9 +261,12 @@ def _compare_restart(frame, checkpoint, config=None):
         raise ValueError("Restart timestep mismatch")
     if [atom["id"] for atom in frame["atoms"]] != [atom["id"] for atom in reference["atoms"]]:
         raise ValueError("Restart atom identity mismatch")
-    if not np.isclose(frame["potential_eV"], reference["potential_eV"], atol=1e-6, rtol=0):
-        raise ValueError("Recomputed restart potential differs by more than 1e-6 eV")
-    for name, tolerance in (("x", 1e-12), ("v", 1e-12), ("f", 1e-5), ("image", 0)):
+    from .execution import restart_limits
+
+    energy_limit, force_limit, energy_label = restart_limits({} if config is None else config)
+    if not np.isclose(frame["potential_eV"], reference["potential_eV"], atol=energy_limit, rtol=0):
+        raise ValueError(f"Recomputed restart potential differs by more than {energy_label} eV")
+    for name, tolerance in (("x", 1e-12), ("v", 1e-12), ("f", force_limit), ("image", 0)):
         actual = [atom[name] for atom in frame["atoms"]]
         expected = [atom[name] for atom in reference["atoms"]]
         if not np.allclose(actual, expected, atol=tolerance, rtol=0):
