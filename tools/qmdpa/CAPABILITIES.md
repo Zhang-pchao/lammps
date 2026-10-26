@@ -26,7 +26,15 @@ derivatives and reject missing coverage. They do not infer bonds, move protons
 between groups, change occupancy, cut covalent bonds, map excited states across
 orbital spaces, or implement periodic EE and mutual polarization.
 
-The native integrator is existing fixed-cell LAMMPS NVE. MPI distributes atoms
+The default native integrator remains fixed-cell LAMMPS NVE. Development
+0.4.0.dev1 adds native NHC NVT and official PLUMED sampling for finite,
+fixed-region CPU PySCF ground ME: distance or distance-difference harmonic
+restraints, and a bounded well-tempered metadynamics route with immutable
+accepted history. The low-level DPA device is separately identified. See
+SAMPLING.md for admitted inputs, history and analysis contracts. This does
+not change the frozen 0.3.0 release or qualify adaptive/selected-state sampling.
+
+MPI distributes atoms
 and communicates callback results; it does not parallelize a quantum solve
 across ranks or GPUs. Source-bound restart and failure checks remain mandatory.
 Pressure/virial and NPT are not qualified. Small-system serial/MPI/restart and

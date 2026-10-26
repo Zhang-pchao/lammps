@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
 # https://www.lammps.org/, Sandia National Laboratories
 # SPDX-License-Identifier: GPL-2.0-only
@@ -205,15 +206,19 @@ def load_run_config(path):
     original = path.read_bytes()
     raw = json.loads(original, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
     if not isinstance(raw, dict):
-        raise ValueError("Run configuration must be a JSON object")
+        raise ValueError("Run configuration must be a JSON object")  # noqa: TRY004 - Configuration API.
     has_selector = "coupling" in raw
     has_bias = "bias" in raw
     bias = raw.pop("bias", None)
+    has_sampling = "sampling" in raw
+    sampling = raw.pop("sampling", None)
+    has_thermostat = "thermostat" in raw
+    thermostat = raw.pop("thermostat", None)
     raw = _normalize_selection(raw)
     # Legacy schema-1 mechanical configurations predate an explicit model ID.
     hamiltonian = raw.get("hamiltonian", MECHANICAL)
     module, loader, _, _, _ = _route(hamiltonian)
-    config = (_function(module, "_validate_config")(raw, path) if has_selector or has_bias
+    config = (_function(module, "_validate_config")(raw, path) if has_selector or has_bias or has_sampling or has_thermostat
               else _function(module, loader)(path))
     if path.read_bytes() != original:
         raise ValueError("Configuration changed while selecting and validating its Hamiltonian")
@@ -223,6 +228,14 @@ def load_run_config(path):
         from .bias import bind_bias
 
         bind_bias(config, bias)
+    if has_thermostat:
+        from .dynamics import bind_thermostat
+
+        bind_thermostat(config, thermostat)
+    if has_sampling:
+        from .sampling import bind_sampling
+
+        bind_sampling(config, sampling, path.parent)
     return config
 
 
@@ -324,4 +337,13 @@ def describe_run(config):
             "force_coordinates": "both restrained atoms",
         })
         description["assembly"]["additional_native_bias"] = "spring couple"
+    if "sampling" in config:
+        description["sampling"] = config["sampling"]
+        description["assembly"]["additional_native_bias"] = "plumed"
+        description["energy_contract"]["total_terms"].append({
+            "name": "plumed_bias", "coefficient": 1,
+            "force_coordinates": "declared CV atoms",
+        })
+    if "thermostat" in config:
+        description["dynamics"]["thermostat"] = config["thermostat"]
     return description

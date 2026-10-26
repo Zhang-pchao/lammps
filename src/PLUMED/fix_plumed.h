@@ -58,6 +58,7 @@ class FixPlumed : public Fix {
   class Compute *c_press;    // Compute for the pressure
   int plumedNeedsEnergy;     // Flag to trigger calculation of the
                              // energy and virial
+  bigint last_update;       // last MD step whose PLUMED history was updated
   char *id_pe, *id_press;    // ID for potential energy and pressure compute
 };
 

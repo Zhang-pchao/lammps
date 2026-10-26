@@ -2,3 +2,4 @@ include *.md
 include LICENSE
 recursive-include tests *.py
 recursive-include examples *.md *.json *.data
+include SAMPLING.md

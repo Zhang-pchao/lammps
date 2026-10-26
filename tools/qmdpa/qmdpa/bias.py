@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
 # Copyright (2026) Pengchao Zhang <pczhang1997@gmail.com>
 # SPDX-License-Identifier: GPL-2.0-only
@@ -109,7 +110,27 @@ def _distances(bias, coordinates):
     return values
 
 
-class NativeDistanceBias:
+class NativeBiasAtoms:
+    """Collect finite biased atoms within the existing callback collective."""
+
+    def local_packet(self, nlocal, tags, positions):
+        """Collect restrained IDs in the existing callback collective."""
+        if not nlocal:
+            return []
+        tags, xyz = np.asarray(tags), np.asarray(positions)
+        if tags.shape != (nlocal,) or tags.dtype.kind not in "iu" or xyz.shape != (nlocal, 3):
+            raise ValueError("Bias requires valid owned atom IDs and coordinates")
+        images = self.lmp.numpy.extract_atom("image")
+        rows = []
+        for index, atom_id in enumerate(tags):
+            if atom_id in self.ids:
+                if any(self.lmp.decode_image_flags(int(images[index]))):
+                    raise ValueError("Nonperiodic bias atoms must have zero image flags")
+                rows.append((int(atom_id), xyz[index].tolist()))
+        return rows
+
+
+class NativeDistanceBias(NativeBiasAtoms):
     """Configure native forces and observe native values; do not compute a force."""
 
     def __init__(self, lmp, config):
@@ -140,22 +161,6 @@ class NativeDistanceBias:
             lmp.command(f"fix_modify {fix} energy yes")
             self.fix_ids.append(fix)
 
-    def local_packet(self, nlocal, tags, positions):
-        """Collect restrained IDs in the existing callback collective."""
-        if not nlocal:
-            return []
-        tags, xyz = np.asarray(tags), np.asarray(positions)
-        if tags.shape != (nlocal,) or tags.dtype.kind not in "iu" or xyz.shape != (nlocal, 3):
-            raise ValueError("Bias requires valid owned atom IDs and coordinates")
-        images = self.lmp.numpy.extract_atom("image")
-        rows = []
-        for index, atom_id in enumerate(tags):
-            if atom_id in self.ids:
-                if any(self.lmp.decode_image_flags(int(images[index]))):
-                    raise ValueError("Nonperiodic bias atoms must have zero image flags")
-                rows.append((int(atom_id), xyz[index].tolist()))
-        return rows
-
     def validate_packets(self, packets):
         """Reject undefined distances before a quantum call or accepted state."""
         coordinates = _coordinates([row for packet in packets for row in packet], self.ids)
@@ -170,7 +175,7 @@ class NativeDistanceBias:
                        [float(self.lmp.extract_fix(fix, 0, 1, axis)) for axis in range(3)]]
                       for fix in self.fix_ids]
             packet = (None, values)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Preserve collective or top-level failure reporting.
             packet = (f"{type(exc).__name__}: {exc}", None)
         packets = [packet] if comm is None else comm.gather(packet, root=0)
 

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
 # Copyright (2026) Pengchao Zhang <pczhang1997@gmail.com>
 # SPDX-License-Identifier: GPL-2.0-only
@@ -17,7 +18,7 @@ def _root_call(comm, function):
     if comm is None or comm.rank == 0:
         try:
             result = (None, function())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Preserve collective or top-level failure reporting.
             result = (f"{type(exc).__name__}: {exc}", None)
     if comm is not None:
         result = comm.bcast(result, root=0)
@@ -50,7 +51,7 @@ class ProviderResources:
             for provider in reversed(self._providers):
                 try:
                     provider.close_checked()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Preserve collective or top-level failure reporting.
                     self._errors.append(f"{type(exc).__name__}: {exc}")
         return list(self._errors)
 
@@ -142,7 +143,7 @@ def _frame(lmp, comm, *, periodic=False):
                 for i in range(count)
             ]
         packet = (None, rows)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Preserve collective or top-level failure reporting.
         packet = (f"{type(exc).__name__}: {exc}", None)
     packets = [packet] if comm is None else comm.gather(packet, root=0)
     frame = None
@@ -181,6 +182,14 @@ def _validate_restart(checkpoint_path, config):
     from .bias import validate_bias_frame
 
     validate_bias_frame(checkpoint["frame"], config)
+    from .dynamics import validate_thermostat_frame
+    from .sampling import validate_sampling_frame
+
+    validate_thermostat_frame(checkpoint["frame"], config)
+    validate_sampling_frame(checkpoint["frame"], config)
+    from .metadynamics import validate_checkpoint_history
+
+    validate_checkpoint_history(checkpoint, checkpoint_path, config)
     restart = Path(checkpoint_path).resolve().parent / checkpoint["restart_file"]
     if file_digest(restart) != checkpoint["restart_sha256"]:
         raise ValueError("Restart binary checksum mismatch")
@@ -224,6 +233,11 @@ def _compare_restart(frame, checkpoint, config=None):
     from .bias import compare_bias_restart
 
     compare_bias_restart(frame, reference, {} if config is None else config)
+    from .dynamics import compare_thermostat_restart
+    from .sampling import compare_sampling_restart
+
+    compare_thermostat_restart(frame, reference, {} if config is None else config)
+    compare_sampling_restart(frame, reference, {} if config is None else config)
     _validate_frame(frame)
     _validate_frame(reference)
     from .state_records import validate_frame_state

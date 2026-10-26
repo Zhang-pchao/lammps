@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
 # Copyright (2026) Pengchao Zhang <pczhang1997@gmail.com>
 # SPDX-License-Identifier: GPL-2.0-only
@@ -62,6 +63,8 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         "run_wall_seconds": 0.0,
         "checkpoint_wall_seconds": 0.0,
     }
+    from .dynamics import capture_thermostat, integrator_command
+
     coupling = None
     bias = None
     provider_resources = None
@@ -111,7 +114,7 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                 "neighbor 2.0 bin",
                 "neigh_modify every 1 delay 0 check yes",
                 f"timestep {config['timestep_fs'] / 1000:.17g}",
-                "fix qmdpa_integrator all nve",
+                integrator_command(config),
                 "thermo_style custom step temp pe ke etotal",
                 "thermo_modify norm no",
                 "thermo 1",
@@ -134,6 +137,11 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
 
             bias = NativeDistanceBias(lmp, config)
             coupling.native_bias = bias
+        if "sampling" in config:
+            from .sampling import NativePlumedBias
+
+            bias = NativePlumedBias(lmp, config, output, comm, previous)
+            coupling.native_bias = bias
         _root_call(
             comm,
             lambda: _write_manifest(
@@ -148,6 +156,7 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         initial = _frame(lmp, comm, periodic=config["periodic"])
         if bias is not None:
             bias.capture(initial, comm)
+        capture_thermostat(lmp, initial, comm, config)
         _root_call(comm, lambda: _attach_state(initial, coupling, config))
         if previous is not None:
             _root_call(comm, lambda: _compare_restart(initial, previous, config))
@@ -156,9 +165,12 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         while remaining:
             count = min(remaining, config["sample_interval"])
             _timed_call(timings, "run_wall_seconds", coupling.run, count)
+            if "sampling" in config:
+                _timed_call(timings, "run_wall_seconds", bias.refresh, coupling)
             frame = _frame(lmp, comm, periodic=config["periodic"])
             if bias is not None:
                 bias.capture(frame, comm)
+            capture_thermostat(lmp, frame, comm, config)
             _root_call(comm, lambda frame=frame: _attach_state(frame, coupling, config))
             step = int(lmp.extract_global("ntimestep"))
             restart_path = output / f"restart-{step:012d}.bin"
@@ -169,13 +181,15 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                 f"write_restart {_quoted(restart_path)}",
             )
 
-            def save_accepted():
+            def save_accepted(restart_path=restart_path, frame=frame, step=step):
                 checkpoint = {
                     "physics_sha256": config["physics_sha256"],
                     "restart_file": restart_path.name,
                     "restart_sha256": file_digest(restart_path),
                     "frame": frame,
                 }
+                if "sampling" in config:
+                    bias.save_history(checkpoint, output)
                 checkpoint_path = output / f"checkpoint-{step:012d}.json"
                 temporary = checkpoint_path.with_suffix(".json.part")
                 temporary.write_text(json.dumps(checkpoint, indent=2) + "\n")
@@ -340,7 +354,7 @@ def main(argv=None):
             print(json.dumps(description, indent=2))
         else:
             run_configured(args.config, args.output, restart=args.restart)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Preserve collective or top-level failure reporting.
         print(f"QM/DPA failed: {exc}", file=sys.stderr)
         return 1
     return 0

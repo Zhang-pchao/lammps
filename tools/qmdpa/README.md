@@ -346,5 +346,6 @@ It does not assign a universal element charge or qualify a new physical model.
 See [GAP_ANCHOR.md](GAP_ANCHOR.md) for the separate standalone ground-ME plus
 embedded-excitation-gap model, its five-term ledger and qualification limits.
 
-The next development version adds an optional [static distance bias](BIAS.md)
-through the unified entry point. Its qualification is separate from the rc2 candidate.
+The unified entry point supports the scoped [static distance bias](BIAS.md).
+See [ground-state CV sampling](SAMPLING.md) for the separately identified
+development interface for PLUMED restraints and native NVT.

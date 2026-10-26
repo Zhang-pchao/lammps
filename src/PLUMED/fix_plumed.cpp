@@ -49,7 +49,7 @@ using namespace FixConst;
 
 FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     Fix(lmp, narg, arg), p(nullptr), nlocal(0), gatindex(nullptr), masses(nullptr),
-    charges(nullptr), id_pe(nullptr), id_press(nullptr)
+    charges(nullptr), last_update(-1), id_pe(nullptr), id_press(nullptr)
 {
 
   if (!atom->tag_enable) error->all(FLERR, "Fix plumed requires atom tags");
@@ -410,7 +410,6 @@ void FixPlumed::post_force(int /* vflag */)
   p->cmd("setForces", &atom->f[0][0]);
   p->cmd("setMasses", &masses[0]);
   p->cmd("setCharges", &charges[0]);
-  p->cmd("getBias", &bias);
 
   // Pass virial to plumed
   // If energy is needed plmd_virial is equal to LAMMPS' virial
@@ -474,7 +473,17 @@ void FixPlumed::post_force(int /* vflag */)
     plmd_virial[1][2] = -virial_lmp[5];
   }
   // do the real calculation:
-  p->cmd("performCalc");
+  // Repeated setup at the same MD step must recalculate forces without
+  // advancing history (for example, depositing another metadynamics hill).
+  // Minimization evaluations retain their original update behavior.
+  if ((update->whichflag == 1) && (last_update == update->ntimestep)) {
+    p->cmd("performCalcNoUpdate");
+  } else {
+    p->cmd("performCalc");
+    last_update = update->ntimestep;
+  }
+  // Read the bias evaluated at these coordinates, not the preceding call.
+  p->cmd("getBias", &bias);
 
   if (plumedStopCondition) timer->force_timeout();
 
