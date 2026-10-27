@@ -24,7 +24,8 @@ from qmdpa.state_records import configured_reference
 
 
 @pytest.fixture
-def configuration(tmp_path):
+def configuration(tmp_path, monkeypatch):
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "fixture")
     original = family()
     settings = replace(original.core.settings, tda_solver="dense")
     fam = StateFamilyReference(replace(original.core, settings=settings),
