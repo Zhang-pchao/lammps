@@ -8,7 +8,7 @@ QM method and partition must be established for the intended application.
 | --- | --- | --- | --- | --- |
 | CPU PySCF | HF/DFT under declared settings; optional ground density fitting | Source-pinned RHF/TDA and explicit PBE0/TDA profiles | Matched RHF or PBE0 | Ground ME and additive EE; separate selected common-core RHF/TDA ME family |
 | GPU4PySCF | Conventional RHF or named-density-fitted PBE/PBE0; ground ME also admits a periodic full DPA system with a finite molecular region | Dense conventional RHF/TDA only | Matched RHF only | Not admitted |
-| ABACUS CPU | Ground ME: finite-supercell approximation or explicit same-cell orthorhombic periodic replacement; CPU PW/PBE/Gamma; qualification remains configuration-specific | Not admitted | Not admitted | Not admitted |
+| ABACUS CPU | Ground ME: finite-supercell approximation or explicit same-cell orthorhombic periodic replacement; CPU PW/PBE with explicit fixed/FD occupations and k mesh; qualification remains configuration-specific | Not admitted | Not admitted | Not admitted |
 
 CPU RHF selected gradients require the inspected PySCF instance-level CPHF
 hook described in EXCITED.md. Stock PySCF with the same version label is not
@@ -32,6 +32,14 @@ same-composition candidates. Own/core and bilateral cross-AO transition-density
 correspondence guard every active state; all switching derivatives are retained.
 See SELECTED_ADAPTIVE.md. This does not combine adaptive regions with Ehrenfest,
 EE, reactive reassignment, periodic boundaries or enhanced sampling.
+
+Development 0.4.0.dev9 is a regression candidate for the reported deployment
+feedback. It adds explicit ABACUS k mesh, Fermi-Dirac width and band count,
+force-consistent free-energy selection, and compatible PBE0 source-profile
+admission. The separately identified PySCF overlay selects EVD for DIIS and
+retains the NAC/RHF corrections. ABACUS.md, EXCITED.md and the candidate's
+qualification record define its bounds; candidate identity alone is not
+release, dynamics, target-host or scientific qualification.
 
 Ground dynamic complete-molecule ME and additive EE retain a fixed core, exactly k
 same-composition candidates and every possible k-subset. They retain all weight

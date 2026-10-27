@@ -317,3 +317,22 @@ fixed-region CPU RHF/TDA/dense/def2-SVP integration. It does not establish
 long-time stability, timestep convergence, photochemistry or the untested
 feature combinations above. Runtime records retain exact source/model hashes,
 original failures, independent audits and full commands.
+
+
+## Fixed-reference coordinate domain
+
+The current RHF/TDA selector compares each candidate against a frozen AO/state
+reference in the declared Cartesian frame. It has no automatic rigid-body
+alignment. A translated or rotated molecule can therefore fail the overlap
+guard even when its internal geometry and physical electronic state are
+unchanged. This is a reference-domain limitation, not evidence of a physical
+state transition or an SCF failure.
+
+Keep this limitation explicit when choosing a fixed-reference trajectory.
+Do not lower the overlap threshold, recenter geometries, refresh the reference
+at every step, or reuse old forces to bypass a rejection. A newly prepared
+reference is a new state/physics identity and is not a compatible restart of an
+old checkpoint. A future alignment route must separately verify transformed
+forces, state ambiguities and restart identity. Finite selected-state adaptive
+families retain their existing per-partition and common-core correspondence
+guards; they do not imply unrestricted rigid-motion tracking.

@@ -53,6 +53,7 @@ _REQUIRED = {
     "supercell_angstrom",
     "coordinate_offset_angstrom",
 }
+_ELECTRONIC_CONTROLS = {"kmesh", "smearing_method", "smearing_sigma", "nbands"}
 _MAX_MESSAGE = 4 * 1024 * 1024
 
 
@@ -91,7 +92,8 @@ def validate_abacus_settings(settings, base_dir):
     """
     if not isinstance(settings, dict):
         raise ValueError("ABACUS settings must be a mapping")
-    unknown = set(settings).difference(_REQUIRED | _DEFAULTS.keys() | {"runtime_files", "boundary", "periodic_field", "ecutrho"})
+    unknown = set(settings).difference(_REQUIRED | _DEFAULTS.keys() | _ELECTRONIC_CONTROLS
+                                       | {"runtime_files", "boundary", "periodic_field", "ecutrho"})
     missing = _REQUIRED.difference(settings)
     if unknown or missing:
         raise ValueError(
@@ -145,6 +147,26 @@ def validate_abacus_settings(settings, base_dir):
             raise ValueError("Periodic ABACUS requires fileio, periodic-wrap and zero offset")
     elif result["coordinate_gauge"] == "periodic-wrap":
         raise ValueError("periodic-wrap requires the explicit periodic-same-cell boundary")
+    # Omitted controls retain the original settings and restart identity.
+    if "kmesh" in result:
+        mesh = result["kmesh"]
+        if (not isinstance(mesh, (list, tuple)) or len(mesh) != 3
+                or any(type(n) is not int or n <= 0 for n in mesh)):
+            raise ValueError("kmesh must contain three positive integers")
+        result["kmesh"] = list(mesh)
+    smearing = result.get("smearing_method", "fixed")
+    if not isinstance(smearing, str) or smearing not in ("fixed", "fd"):
+        raise ValueError("smearing_method must be fixed or fd")
+    if "nbands" in result and (type(result["nbands"]) is not int or result["nbands"] <= 0):
+        raise ValueError("nbands must be a positive integer")
+    if smearing == "fd":
+        if "smearing_sigma" not in result or "nbands" not in result:
+            raise ValueError("Fermi-Dirac occupations require explicit smearing_sigma and nbands")
+        result["smearing_sigma"] = _number(result["smearing_sigma"], "smearing_sigma (Ry)")
+    elif "smearing_sigma" in result:
+        raise ValueError("smearing_sigma requires Fermi-Dirac occupations")
+    if "periodic_field" in settings and _ELECTRONIC_CONTROLS.intersection(settings):
+        raise ValueError("Periodic Gaussian embedding does not admit metal electronic controls")
     if "periodic_field" in settings:
         from .periodic_field import PeriodicGaussianField
 
@@ -270,6 +292,10 @@ class AbacusBackend:
         scf_thr=1e-9,
         scf_nmax=100,
         ks_solver="cg",
+        kmesh=None,
+        smearing_method=None,
+        smearing_sigma=None,
+        nbands=None,
         charge=0,
         multiplicity=1,
         timeout_seconds=120,
@@ -301,6 +327,10 @@ class AbacusBackend:
                 "charge": charge,
                 "multiplicity": multiplicity,
                 "timeout_seconds": timeout_seconds,
+                **({key: value for key, value in (
+                    ("kmesh", kmesh), ("smearing_method", smearing_method),
+                    ("smearing_sigma", smearing_sigma), ("nbands", nbands)
+                ) if value is not None}),
                 **({"ecutrho": ecutrho} if ecutrho is not None else {}),
                 **({"runtime_files": runtime_files} if runtime_files is not None else {}),
                 **({"boundary": boundary} if boundary is not None else {}),

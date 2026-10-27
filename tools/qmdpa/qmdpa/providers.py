@@ -153,7 +153,7 @@ def validate_provider(spec=None, *, electrostatic=False):
     }
 
 
-def provider_contract(spec=None, *, electrostatic=False, region_boundary="isolated"):
+def provider_contract(spec=None, *, electrostatic=False, region_boundary="isolated", qm=None):
     """Describe the actual QM derivative scope, separately from full MD scope."""
     normalized = validate_provider(spec, electrostatic=electrostatic)
     if region_boundary not in ("isolated", "periodic-same-cell"):
@@ -168,6 +168,17 @@ def provider_contract(spec=None, *, electrostatic=False, region_boundary="isolat
               "pbe0-tda": "total-pbe0-plus-tda-excitation"}[state["method"]]
     if excited:
         state = {"method": state["method"], "reference_sha256": state["reference"]["sha256"]}
+    abacus_energy = "pseudopotential-pbe-total"
+    abacus_model = "pw-pbe-gamma-fixed-occupation"
+    electronic_controls = {}
+    if normalized["engine"] == "abacus" and qm is not None:
+        keys = ("kmesh", "smearing_method", "smearing_sigma", "nbands")
+        electronic_controls = {key: qm[key] for key in keys if key in qm}
+        if qm.get("kmesh", [1, 1, 1]) != [1, 1, 1]:
+            abacus_model = "pw-pbe-kmesh-fixed-occupation"
+        if qm.get("smearing_method") == "fd":
+            abacus_energy = "pseudopotential-pbe-electronic-free-energy"
+            abacus_model = "pw-pbe-fermi-dirac"
     return {
         "schema_version": 1,
         "engine": normalized["engine"],
@@ -176,13 +187,14 @@ def provider_contract(spec=None, *, electrostatic=False, region_boundary="isolat
         "qm_boundary": ("periodic-same-cell" if periodic_region else "finite-periodic-supercell"
                         if normalized["engine"] == "abacus" else "isolated-molecule"),
         "environment": "fixed-charge" if electrostatic else "none",
-        "energy": "pseudopotential-pbe-total" if normalized["engine"] == "abacus" else energy,
+        "energy": abacus_energy if normalized["engine"] == "abacus" else energy,
         "force_coordinates": ["qm", "environment"] if electrostatic else ["qm"],
         "stress": "unsupported",
         "history": "none",
         **({"execution": "cold-fileio-serial",
             "coordinate_mapping": "periodic-wrap" if periodic_region else "arithmetic-centroid",
-            "electronic_model": "pw-pbe-gamma-fixed-occupation"}
+            "electronic_model": abacus_model,
+            **({"electronic_controls": electronic_controls} if electronic_controls else {})}
            if normalized["engine"] == "abacus" else {}),
         **({"charge_model": "point"}
            if electrostatic and normalized["engine"] == "gpu4pyscf" else {}),

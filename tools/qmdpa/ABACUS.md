@@ -125,7 +125,7 @@ membership; it does not make arbitrary covalent cuts or charged fragments valid.
 The all-QM cancellation limit additionally requires identical low-level model,
 conditions, types and periodic geometry for both low-level evaluations.
 
-The implementation retains cold serial PW/PBE/Gamma/fixed-occupation settings,
+The implementation retains cold serial PW/PBE settings (Gamma and fixed occupations by default),
 explicit file identities, bounded requests, permanent failures and checked
 cleanup. Boundary/cell/mapping settings enter restart identity. Existing finite
 requests retain their prior schema and use finite low-level subtraction.
@@ -135,3 +135,37 @@ Qualification is tied to frozen real-backend evidence. A tiny periodic molecular
 cell checks E/F, images and native transport; it does not establish bulk/slab
 accuracy, cutoff/k-point convergence, isolated-limit convergence, stress, NPT,
 periodic EE, selected states or ABACUS GPU capability.
+
+
+## Explicit metallic occupations and reciprocal sampling
+
+The optional QM controls are kmesh (three positive integers),
+smearing_method (fixed or fd), smearing_sigma (positive Ry), and
+nbands (positive integer). Fermi-Dirac (fd) requires explicit sigma and
+band count. Fixed occupations reject an unused sigma. Omitted controls retain
+the original normalized configuration and restart identity. For example:
+
+    "kmesh": [2, 2, 2],
+    "smearing_method": "fd",
+    "smearing_sigma": 0.01,
+    "nbands": 56
+
+This declares a numerical model, not converged metallic accuracy. All controls
+enter physics/restart identity and are forwarded to the official calculator.
+The same-cell native route continues to require cold FileIO. The new controls
+are not admitted with periodic Gaussian embedding; that combination needs its
+own derivative and electrostatic qualification.
+
+At fixed Fermi-Dirac width, the QM potential is the electronic free energy
+including the ionic energy, F = E - T_e S. The adapter must provide the
+force-consistent free_energy; a missing or nonfinite value fails the request.
+The ABACUS E_KohnSham/FINAL_ETOT_IS convention includes the occupation
+entropy term. The E_KS(sigma->0) extrapolation is not used as an MD potential.
+The ME assembly is full native DPA + F_QM - fragment DPA, with all three terms
+using their declared boundaries. Varying sigma during a trajectory is not
+implemented. Electronic temperature is distinct from a nuclear thermostat.
+
+A periodic selected fragment uses its actual parent cell, not a smaller
+standalone cell with the same atom count. Cutoff, mesh, band-count, smearing and
+fragment-size convergence remain separate scientific gates. Cold process/SCF
+cost can dominate this route; coupled-workload timings must include it.

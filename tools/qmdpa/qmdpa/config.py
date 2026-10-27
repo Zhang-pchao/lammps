@@ -263,7 +263,7 @@ def _validate_config(config, path):
     config["provider"] = validate_provider(resolve_provider_reference(config.get("provider"), path))
     qm = config["qm"] = validate_qm(config["qm"], provider=config["provider"], base_dir=path.parent)
     boundary = "periodic-same-cell" if qm.get("boundary") == "periodic-same-cell" else "isolated"
-    config["provider_contract"] = provider_contract(config["provider"], region_boundary=boundary)
+    config["provider_contract"] = provider_contract(config["provider"], region_boundary=boundary, qm=qm)
     validate_provider_regions(config["provider"], config["region"], periodic=config["periodic"],
                               region_boundary=boundary)
     if config["provider"]["engine"] == "abacus" and any(

@@ -85,6 +85,24 @@ def _source_hashes_for(settings):
     return hashes
 
 
+# Reviewed PySCF response-hook commit 9b5f7e3b2 changes RHF grad_elec and adds
+# solve_cphf. RKS overrides grad_elec and retains its own CPHF call. Both exact
+# source profiles are admitted; reference/runtime equality remains mandatory.
+_RESPONSE_TDRHF_SHA256 = "67c0ef15985c37a6b74b4dff4ed1eefb4317ecad1fc7e9fd3e1ee1ea82f4a466"
+
+
+def _verify_pbe0_runtime(runtime, settings):
+    if not isinstance(runtime, dict) or set(runtime) != {"pyscf_version", "source_sha256"}:
+        raise ValueError("PBE0 reference runtime requires only PySCF version and source hashes")
+    legacy = _source_hashes_for(settings)
+    response = {**legacy, "grad/tdrhf.py": _RESPONSE_TDRHF_SHA256}
+    for expected in (legacy, response):
+        if runtime.get("source_sha256") == expected:
+            excited._verify_runtime_record(runtime, expected)
+            return
+    raise EvaluationError("PySCF source hashes differ from both inspected PBE0 gradient contracts")
+
+
 class PBE0TDAReference(excited.TDAReference):
     """Method-specific immutable state record; RHF records cannot be substituted."""
     _settings_type = PBE0TDASettings
@@ -92,9 +110,7 @@ class PBE0TDAReference(excited.TDAReference):
     _source_hashes = _SOURCE_SHA256
 
     def _validate_runtime(self, runtime):
-        if not isinstance(runtime, dict) or set(runtime) != {"pyscf_version", "source_sha256"}:
-            raise ValueError("PBE0 reference runtime requires only PySCF version and source hashes")
-        excited._verify_runtime_record(runtime, _source_hashes_for(self.settings))
+        _verify_pbe0_runtime(runtime, self.settings)
 
     def __post_init__(self):
         super().__post_init__()
@@ -110,7 +126,7 @@ def _load_runtime(settings):
     root = Path(pyscf.__file__).resolve().parent
     record = {"pyscf_version": pyscf.__version__, "source_sha256": {
         name: hashlib.sha256((root/name).read_bytes()).hexdigest() for name in _source_hashes_for(settings)}}
-    excited._verify_runtime_record(record, _source_hashes_for(settings))
+    _verify_pbe0_runtime(record, settings)
     if settings.threads is not None:
         lib.num_threads(settings.threads)
     return SimpleNamespace(gto=gto, scf=scf, dft=dft, qmmm=qmmm, tdrhf=tdrhf,

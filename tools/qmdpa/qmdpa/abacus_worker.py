@@ -63,7 +63,7 @@ def _calculator_arguments(request):
         "kpts": {
             "mode": "mp-sampling",
             "gamma-centered": True,
-            "nk": [1, 1, 1],
+            "nk": settings.get("kmesh", [1, 1, 1]),
             "kshift": [0, 0, 0],
         },
         "inp": {
@@ -76,7 +76,8 @@ def _calculator_arguments(request):
             "scf_nmax": settings["scf_nmax"],
             "ks_solver": settings["ks_solver"],
             "nspin": 1,
-            "smearing_method": "fixed",
+            "smearing_method": settings.get("smearing_method", "fixed"),
+            **({key: settings[key] for key in ("smearing_sigma", "nbands") if key in settings}),
             "symmetry": -1,
             "cal_force": 1,
             "cal_stress": 0,
@@ -108,11 +109,15 @@ def _geometry_and_atoms(request, settings):
     return geometry, atoms
 
 
-def _evaluation_response(geometry, calculator):
+def _evaluation_response(geometry, calculator, settings=None):
     from .core import Evaluation
 
     # Official ASE supplies eV and eV/Angstrom in the original atom order.
-    result = Evaluation(calculator.results["energy"], calculator.results["forces"])
+    # At fixed electronic temperature the conservative potential is E - TS.
+    # Do not substitute the sigma->0 estimate or silently fall back when absent.
+    metallic = (settings or {}).get("smearing_method") == "fd"
+    energy_key = "free_energy" if metallic else "energy"
+    result = Evaluation(calculator.results[energy_key], calculator.results["forces"])
     if result.forces.shape != geometry.positions.shape:
         raise ValueError("ABACUS force count differs from the requested geometry")
     return {
@@ -121,6 +126,8 @@ def _evaluation_response(geometry, calculator):
         "symbols": list(geometry.symbols),
         "scf_converged": True,
         "energy_ev": result.energy,
+        **({"energy_definition": "pbe-electronic-free-energy-plus-ions",
+            "smearing_sigma_ry": settings["smearing_sigma"]} if metallic else {}),
         "forces_ev_per_angstrom": result.forces.tolist(),
     }
 
@@ -161,7 +168,7 @@ class _Session:
         )
         if self.calculator.last_scf_converged is not True:
             raise RuntimeError("ABACUS SCF did not report convergence for this frame")
-        return _evaluation_response(geometry, self.calculator)
+        return _evaluation_response(geometry, self.calculator, self.settings)
 
     def close(self):
         try:
@@ -228,7 +235,7 @@ class _FileIOSession:
             or not 0 < iteration <= self.settings["scf_nmax"]
         ):
             raise RuntimeError("ABACUS FileIO SCF evidence exceeds the declared limits")
-        response = _evaluation_response(geometry, self.calculator)
+        response = _evaluation_response(geometry, self.calculator, self.settings)
         if field is not None:
             from .periodic_field import parse_native_field_result
 
