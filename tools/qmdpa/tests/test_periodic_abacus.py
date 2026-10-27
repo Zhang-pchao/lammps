@@ -21,7 +21,9 @@ def inputs(tmp_path):
     exe.chmod(0o755)
     pp = tmp_path / "H.upf"
     pp.write_text("test identity only")
-    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
     field = PeriodicGaussianField((11, 12), [0.3, -0.3], [0.8, 0.8],
                                   [6, 6, 6], 6, "declared fixture")
     settings = {"executable": str(exe), "executable_sha256": digest(exe),

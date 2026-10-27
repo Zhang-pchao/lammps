@@ -85,7 +85,7 @@ qualification does not establish a physically unique DPA electrostatic split. No
 decomposes a black-box DPA into electrostatic, exchange, induction or dispersion.
 
 CP2K and SHARC integration are deferred. ABACUS GPU/selected, GPU selected
-DFT, general reactive partitioning, nonadiabatic dynamics and automatic D3/D4 additions
+DFT, general reactive partitioning, hopping/SOC and automatic D3/D4 additions
 are not advertised as implemented. Future backends must provide the same
 complete energy/force/state contracts through their official interfaces.
 
@@ -103,3 +103,10 @@ reference and ownership conventions are defined in PERIODIC_EE.md; this is
 neither additive EE nor a qualification of all ABACUS electrostatic combinations.
 All development entries require source/runtime-specific evidence and retain
 separate scientific, long-time and performance gates.
+
+Candidate 0.4.0rc1 retains the dev10 runtime algorithms. Its packaging and
+small-system requalification are separate gates; historical numerical evidence
+keeps its actual version. The companion release record and stack lock identify
+the executed candidate, native builds and inherited scope. Cu108 OMP8 strict
+trajectory parity, original target GPU attribution, fixed-AO motion extensions,
+extra dp-compress strict parity and same-cell socket remain unresolved.
