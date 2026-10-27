@@ -93,7 +93,8 @@ def validate_abacus_settings(settings, base_dir):
     if not isinstance(settings, dict):
         raise ValueError("ABACUS settings must be a mapping")
     unknown = set(settings).difference(_REQUIRED | _DEFAULTS.keys() | _ELECTRONIC_CONTROLS
-                                       | {"runtime_files", "boundary", "periodic_field", "ecutrho"})
+                                       | {"runtime_files", "boundary", "periodic_field", "ecutrho",
+                                          "pw_diag_thr_floor"})
     missing = _REQUIRED.difference(settings)
     if unknown or missing:
         raise ValueError(
@@ -130,6 +131,14 @@ def validate_abacus_settings(settings, base_dir):
         result["ecutrho"] = _number(result["ecutrho"], "ecutrho")
         if result["ecutrho"] < 4.0 * result["ecutwfc"]:
             raise ValueError("ecutrho must be at least four times ecutwfc")
+    if "pw_diag_thr_floor" in result:
+        floor = _number(result["pw_diag_thr_floor"], "pw_diag_thr_floor (Ry)", positive=False)
+        # The provider retains the native initial pw_diag_thr=0.01 Ry.
+        if not 0.0 <= floor <= 0.01:
+            raise ValueError("pw_diag_thr_floor must be between zero and 0.01 Ry")
+        if "periodic_field" in settings:
+            raise ValueError("Periodic Gaussian embedding does not admit pw_diag_thr_floor")
+        result["pw_diag_thr_floor"] = floor
     if type(result["scf_nmax"]) is not int or result["scf_nmax"] <= 0:
         raise ValueError("scf_nmax must be a positive integer")
     for key in ("supercell_angstrom", "coordinate_offset_angstrom"):
@@ -290,6 +299,7 @@ class AbacusBackend:
         ecutwfc=60,
         ecutrho=None,
         scf_thr=1e-9,
+        pw_diag_thr_floor=None,
         scf_nmax=100,
         ks_solver="cg",
         kmesh=None,
@@ -332,6 +342,8 @@ class AbacusBackend:
                     ("smearing_sigma", smearing_sigma), ("nbands", nbands)
                 ) if value is not None}),
                 **({"ecutrho": ecutrho} if ecutrho is not None else {}),
+                **({"pw_diag_thr_floor": pw_diag_thr_floor}
+                   if pw_diag_thr_floor is not None else {}),
                 **({"runtime_files": runtime_files} if runtime_files is not None else {}),
                 **({"boundary": boundary} if boundary is not None else {}),
                 **({"periodic_field": periodic_field} if periodic_field is not None else {}),

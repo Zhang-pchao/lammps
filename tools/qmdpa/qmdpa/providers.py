@@ -172,7 +172,7 @@ def provider_contract(spec=None, *, electrostatic=False, region_boundary="isolat
     abacus_model = "pw-pbe-gamma-fixed-occupation"
     electronic_controls = {}
     if normalized["engine"] == "abacus" and qm is not None:
-        keys = ("kmesh", "smearing_method", "smearing_sigma", "nbands")
+        keys = ("kmesh", "smearing_method", "smearing_sigma", "nbands", "pw_diag_thr_floor")
         electronic_controls = {key: qm[key] for key in keys if key in qm}
         if qm.get("kmesh", [1, 1, 1]) != [1, 1, 1]:
             abacus_model = "pw-pbe-kmesh-fixed-occupation"

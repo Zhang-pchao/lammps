@@ -73,6 +73,8 @@ def _calculator_arguments(request):
             "ecutwfc": settings["ecutwfc"],
             **({"ecutrho": settings["ecutrho"]} if "ecutrho" in settings else {}),
             "scf_thr": settings["scf_thr"],
+            **({"pw_diag_thr_floor": settings["pw_diag_thr_floor"]}
+               if "pw_diag_thr_floor" in settings else {}),
             "scf_nmax": settings["scf_nmax"],
             "ks_solver": settings["ks_solver"],
             "nspin": 1,

@@ -169,3 +169,27 @@ A periodic selected fragment uses its actual parent cell, not a smaller
 standalone cell with the same atom count. Cutoff, mesh, band-count, smearing and
 fragment-size convergence remain separate scientific gates. Cold process/SCF
 cost can dominate this route; coupled-workload timings must include it.
+
+
+## Optional SCF diagonalization threshold floor
+
+The optional numerical control `pw_diag_thr_floor` is a finite number in Ry
+between zero and 0.01, inclusive. The upper bound is the native initial
+`pw_diag_thr` retained by this provider. Omission leaves the normalized settings,
+native input and restart contract unchanged; explicit zero disables the native
+floor. An explicit value enters configuration identity, descriptions and worker
+settings in both execution modes. Changing it requires a new configuration and
+matching checkpoints.
+
+This option requires a checksum-pinned native executable implementing the same
+parameter. It bounds the inner adaptive eigensolver tolerance in double-precision
+PW Kohn-Sham SCF. It does not loosen `scf_thr`, force convergence or disable native
+orthogonalization/residual guards. A positive floor can still prevent convergence
+or leave inaccurate forces. Validate the entire E/F and lifecycle profile before
+using it in dynamics; no value is recommended for arbitrary systems.
+
+The initial native control and cold/persistent/fresh Cu witness are bounded
+prerequisites. Complete derivative, installed-API and candidate qualification
+remain separate. The optional floor does not admit periodic Gaussian EE or
+periodic-same-cell socket execution; those combinations retain their existing
+guards. Previously qualified installations and configurations remain independent.
