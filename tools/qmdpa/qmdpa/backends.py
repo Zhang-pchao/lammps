@@ -282,6 +282,17 @@ class PySCFBackend:
             # the requested physical gradient to avoid a zero-update stall.
             method.ah_conv_tol = min(1e-24, (.1*self.conv_tol_grad)**2)
             method.ah_start_tol = min(1e-10, .1*self.conv_tol_grad)
+
+            def current_convergence(env):
+                # Newton's returned microiteration gradient can predict the
+                # residual before the latest orbital rotation. Require the
+                # actual current Fock gradient at the unchanged public gate.
+                gradient = method.get_grad(env["mo_coeff"], env["mo_occ"], env["fock"])
+                residual = float(np.linalg.norm(gradient))
+                return (np.isfinite(residual) and residual < self.conv_tol_grad
+                        and abs(env["e_tot"] - env["last_hf_e"]) < self.conv_tol)
+
+            method.check_convergence = current_convergence
             energy = method.kernel(method.mo_coeff, method.mo_occ)
         if not method.converged:
             raise EvaluationError(f"PySCF SCF did not converge within {self.max_cycle} cycles")

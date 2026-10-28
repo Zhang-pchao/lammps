@@ -44,6 +44,43 @@ def test_final_stage_and_explicit_physical_residual(first_converged, failure):
     assert last.ah_start_tol == 1e-10
 
 
+
+@pytest.mark.parametrize("residual,energy_change,accepted", [
+    (1.03e-9, 1e-14, False),
+    (1e-10, 2e-12, False),
+    (float("nan"), 1e-14, False),
+    (1e-10, 1e-14, True),
+])
+def test_newton_convergence_uses_current_fock_gradient(residual, energy_change, accepted):
+    first, last = FakeSCF(), FakeSCF()
+    first.newton = lambda: last
+    last.mo_coeff, last.mo_occ = np.eye(2), np.array([2., 0.])
+    fock = np.eye(2) * 3.
+
+    def gradient(*args):
+        if len(args) == 3:
+            assert args[0] is last.mo_coeff and args[1] is last.mo_occ
+            assert args[2] is fock
+            return np.array([residual])
+        return np.array([1e-12])
+
+    def kernel(*args):
+        # A converged predicted gradient must not hide a current residual or
+        # energy change that exceeds the original requested criterion.
+        env = dict(mo_coeff=last.mo_coeff, mo_occ=last.mo_occ, fock=fock,
+                   e_tot=energy_change, last_hf_e=0., norm_gorb=1e-14)
+        assert bool(last.check_convergence(env)) is accepted
+        return -1.1
+
+    last.get_grad, last.kernel = gradient, kernel
+    with patch.dict("sys.modules", pyscf_modules(first, {})):
+        backend = PySCFBackend(scf_solver="diis-newton", conv_tol=1e-12,
+                               conv_tol_grad=1e-9, max_cycle=400)
+        backend.evaluate(water())
+    assert backend.conv_tol == 1e-12 and backend.conv_tol_grad == 1e-9
+    assert backend.max_cycle == 400
+
+
 def test_default_never_tries_newton_after_failed_scf():
     method = FakeSCF(False)
     method.newton = lambda: pytest.fail("Undeclared solver fallback")
