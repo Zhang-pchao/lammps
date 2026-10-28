@@ -113,6 +113,9 @@ def _solve(geometry, settings, runtime):
     mc.fix_spin_(ss=0, shift=1)
     mc = mc.state_average([0.5, 0.5])
     mc.conv_tol, mc.conv_tol_grad = settings.mc_tol, settings.mc_grad_tol
+    # CIAH checks its residual against sqrt(ah_conv_tol).  Keep that inner
+    # gate below the requested orbital gradient to avoid a zero-step stall.
+    mc.ah_conv_tol = min(mc.ah_conv_tol, (0.1 * settings.mc_grad_tol)**2)
     mc.fcisolver.conv_tol = settings.ci_tol
     mc.max_cycle_macro = settings.max_cycle
     mc.kernel()
