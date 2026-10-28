@@ -40,6 +40,18 @@ def _timed_call(timings, name, function, *args):
         timings[name] += time.perf_counter() - started
 
 
+def _initialize_velocities(lmp, config):
+    """Preserve the legacy sequence when IDs are consecutive; support sparse IDs."""
+    # read_data/read_restart follows atom_modify map yes. Its global maximum ID
+    # equals natoms exactly for the usual unique positive consecutive IDs.
+    # Geometry-based seeding supports sparse IDs and is independent of MPI rank.
+    loop = "" if lmp.extract_global("map_tag_max") == lmp.get_natoms() else " loop geom"
+    lmp.command(
+        f"velocity all create {config['temperature_K']} {config['velocity_seed']} "
+        "mom yes rot yes dist gaussian" + loop
+    )
+
+
 def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupling):
     """Run additional steps; each successful sample has a matching restart pair."""
     if restart is not None:
@@ -133,10 +145,7 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             ]
         )
         if previous is None and "temperature_K" in config:
-            lmp.command(
-                f"velocity all create {config['temperature_K']} {config['velocity_seed']} "
-                "mom yes rot yes dist gaussian"
-            )
+            _initialize_velocities(lmp, config)
         if config.get("provider", {}).get("engine") == "abacus":
             from .runtime import ProviderResources
 
