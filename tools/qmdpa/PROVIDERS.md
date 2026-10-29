@@ -53,6 +53,7 @@ record. The registry never substitutes a different engine or method.
 | pyscf / cpu | ground | ME, additive EE | Declared molecular method; optional named density fitting |
 | pyscf / cpu | rhf-tda | ME, additive EE, plain gap-anchor | Dense singlet fixed-reference TDA |
 | pyscf / cpu | pbe0-tda | ME, additive EE, plain or explicitly corrected gap-anchor | Pinned PBE0 settings and complete grid response |
+| pyscf / cpu | uks-hirshfeld-cdft | Experimental finite additive NVE only | Explicit charged doublet, PBE0/def2-svpd, frozen Hirshfeld pair; qualification pending |
 | gpu4pyscf / cuda | ground | ME, additive EE | Conventional RHF or named fitted PBE/PBE0 |
 | gpu4pyscf / cuda | rhf-tda | ME, additive EE, plain gap-anchor | Conventional singlet RHF; separate GPU references |
 | abacus / cpu | ground | ME | Cold FileIO, centroid mapping, finite PW/PBE supercell |
@@ -62,6 +63,13 @@ separate APIs; they do not propagate multiple electronic states in native dynami
 explicit fixed charges. Reference-subtractive remains a separate evaluator.
 See [CONFIGURATION.md](CONFIGURATION.md) for Hamiltonian selectors and
 [MULTISTATE.md](MULTISTATE.md) for shared quantum state evaluation.
+
+## Experimental constrained pair
+
+The separately admitted `uks-hirshfeld-cdft` pair uses the solver/derivative
+module in the PySCF fork, actual source/library pins and complete state
+records. It does not broaden neutral ground/TDA validation or enable electronic
+sampling. See [CDFT.md](CDFT.md) for its fixed-fragment and fail-closed contract.
 
 ## Experimental native RHF/TDA route
 

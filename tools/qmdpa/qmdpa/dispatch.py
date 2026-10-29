@@ -101,6 +101,15 @@ def _normalize_selection(raw):
             raise ValueError("Ehrenfest selector conflicts with the explicit Hamiltonian")
         config["hamiltonian"] = EHRENFEST
         return config
+    if surface == "constrained":
+        if choice != {"surface": "constrained", "embedding": "electrostatic", "ee_model": "additive"}:
+            raise ValueError("Native cDFT currently requires fixed additive electrostatic embedding")
+        if config.get("provider", {}).get("state", {}).get("method") != "uks-hirshfeld-cdft":
+            raise ValueError("Constrained coupling requires an explicit cDFT provider")
+        if config.get("hamiltonian", "finite-electrostatic-additive") != "finite-electrostatic-additive":
+            raise ValueError("Constrained coupling conflicts with the Hamiltonian")
+        config["hamiltonian"] = "finite-electrostatic-additive"
+        return config
     if surface not in ("ground", "selected"):
         raise ValueError("coupling.surface must be ground or selected")
     if embedding == "mechanical":
@@ -151,6 +160,8 @@ def _describe_selection(config):
         return {"surface": "selected", "embedding": "mechanical", "me_model": "molecular-common-core"}
     if config["hamiltonian"] == EHRENFEST:
         return {"surface": "two-state", "embedding": "mechanical", "me_model": "ehrenfest"}
+    if config["provider"]["state"]["method"] == "uks-hirshfeld-cdft":
+        return {"surface": "constrained", "embedding": "electrostatic", "ee_model": "additive"}
     mechanical = config["hamiltonian"] in (MECHANICAL, GROUND_FRAGMENT_HAMILTONIAN, MOLECULAR, WATER_BUFFER, REACTIVE_WATER)
     result = {"surface": "ground" if config["provider"]["state"]["method"] == "ground" else "selected",
               "embedding": "mechanical" if mechanical else "electrostatic"}
@@ -305,6 +316,10 @@ def load_run_config(path):
     hamiltonian = raw.get("hamiltonian", MECHANICAL)
     if hamiltonian == EHRENFEST and any((has_bias, has_sampling, has_thermostat, has_execution)):
         raise ValueError("Ehrenfest currently admits plain finite NVE without sampling or execution extensions")
+    if raw.get("provider", {}).get("state", {}).get("method") == "uks-hirshfeld-cdft":
+        if hamiltonian != "finite-electrostatic-additive" or any(
+                (has_gap, has_bias, has_sampling, has_thermostat, has_execution)):
+            raise ValueError("Native cDFT currently requires plain finite additive NVE without bias extensions")
     module, loader, _, _, _ = _route(hamiltonian)
     config = (_function(module, "_validate_config")(raw, path) if has_gap or has_selector or has_bias or has_sampling or has_thermostat or has_execution
               else _function(module, loader)(path))

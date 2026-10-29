@@ -44,6 +44,14 @@ def resolve_provider_reference(spec, config_path):
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError("State reference file SHA256 mismatch")
+    if state["method"] == "uks-hirshfeld-cdft":
+        from .cdft import validate_reference
+
+        record = _read_json(raw)
+        reference = validate_reference(record, electrostatic=record.get("charges") is not None)
+        result = deepcopy(spec)
+        result["state"] = {"method": state["method"], "reference": reference}
+        return result
     from .providers import load_tda_reference
 
     reference = load_tda_reference(state["method"], _read_json(raw),

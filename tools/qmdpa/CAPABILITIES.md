@@ -10,6 +10,12 @@ QM method and partition must be established for the intended application.
 | GPU4PySCF | Conventional RHF or named-density-fitted PBE/PBE0; ground ME also admits a periodic full DPA system with a finite molecular region | Dense conventional RHF/TDA only | Matched RHF only | Not admitted |
 | ABACUS CPU | Ground ME: finite-supercell approximation or explicit same-cell orthorhombic periodic replacement; CPU PW/PBE with explicit fixed/FD occupations and k mesh; qualification remains configuration-specific | Not admitted | Not admitted | Not admitted |
 
+A separate experimental finite CPU Hirshfeld cDFT pair is described in
+[CDFT.md](CDFT.md). It explicitly admits charge +1/doublet PBE0/def2-svpd and
+plain additive NVE, with full same-frame state records. Its numerical/native
+qualification is pending; it is outside the ground/TDA table and does not
+admit electronic bias, periodicity, dynamic fragments or target chemistry.
+
 CPU RHF selected gradients require the inspected PySCF instance-level CPHF
 hook described in EXCITED.md. Stock PySCF with the same version label is not
 equivalent. PBE0 and GPU methods carry different source pins. Prepared state

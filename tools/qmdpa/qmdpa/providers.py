@@ -114,6 +114,15 @@ def validate_provider(spec=None, *, electrostatic=False):
             or not isinstance(spec["matrix_assembly"], str)
             or spec["matrix_assembly"] not in ("operator", "official-get-ab-896")):
         raise ValueError("provider.matrix_assembly requires PBE0/TDA and operator or official-get-ab-896")
+    if state["method"] == "uks-hirshfeld-cdft":
+        from .cdft import validate_reference
+
+        if (set(spec) != required or set(state) != {"method", "reference"}
+                or (spec["engine"], spec["device"]) != ("pyscf", "cpu")):
+            raise ValueError("cDFT requires explicit CPU PySCF and a fixed reference, without reuse controls")
+        return {"engine": "pyscf", "device": "cpu",
+                "state": {"method": state["method"], "reference": validate_reference(
+                    state["reference"], electrostatic=electrostatic)}}
     combination = (spec["engine"], spec["device"], state["method"])
     supported = (("pyscf", "cpu", "ground"), ("pyscf", "cpu", "rhf-tda"),
                  ("pyscf", "cpu", "pbe0-tda"), ("abacus", "cpu", "ground"),
@@ -165,7 +174,8 @@ def provider_contract(spec=None, *, electrostatic=False, region_boundary="isolat
     excited = state["method"] != "ground"
     energy = {"ground": "total-electronic-and-nuclear",
               "rhf-tda": "total-rhf-plus-tda-excitation",
-              "pbe0-tda": "total-pbe0-plus-tda-excitation"}[state["method"]]
+              "pbe0-tda": "total-pbe0-plus-tda-excitation",
+              "uks-hirshfeld-cdft": "physical-uks-constrained-density"}[state["method"]]
     if excited:
         state = {"method": state["method"], "reference_sha256": state["reference"]["sha256"]}
     abacus_energy = "pseudopotential-pbe-total"
@@ -263,6 +273,23 @@ def validate_provider_regions(spec, qm_region, *, periodic, environment_region=N
                 raise ValueError("GPU4PySCF embedding currently supports point charges only")
     if normalized["state"]["method"] == "ground":
         return
+    if normalized["state"]["method"] == "uks-hirshfeld-cdft":
+        reference = normalized["state"]["reference"]
+        if periodic is not False or region_boundary != "isolated":
+            raise ValueError("cDFT requires finite fixed molecular boundaries")
+        for region, key in ((qm_region, "qm_geometry"), (environment_region, "environment_geometry")):
+            expected = reference[key]
+            if expected is None:
+                if region is not None:
+                    raise ValueError("cDFT environment presence changed")
+            elif region is None or any(region[name] != expected[name] for name in ("atom_ids", "symbols")):
+                raise ValueError("cDFT region IDs, symbols and order must match the reference")
+        if charges is not None:
+            actual = {"atom_ids": list(charges.atom_ids), "charges_e": charges.charges_e.tolist(),
+                      "source": charges.source}
+            if actual != reference["charges"] or charges.radii_angstrom is not None:
+                raise ValueError("cDFT point charge identity changed")
+        return
     reference = load_tda_reference(
         normalized["state"]["method"], normalized["state"]["reference"], engine=normalized["engine"])
     if periodic is not False:
@@ -313,6 +340,10 @@ def make_qm_provider(qm, *, provider=None, charges=None, directory=None):
         if not isinstance(charges, FixedEmbeddingCharges):
             raise TypeError("charges must be an explicit FixedEmbeddingCharges object")
         return GPU4PySCFElectrostaticBackend(charges, **qm)
+    if normalized["state"]["method"] == "uks-hirshfeld-cdft":
+        from .cdft import CDFTProvider
+
+        return CDFTProvider(qm, normalized["state"]["reference"], charges)
     if normalized["state"]["method"] != "ground":
         from .state_records import RecordingTDAProvider
 

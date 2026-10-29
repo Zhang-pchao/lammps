@@ -102,6 +102,13 @@ def validate_qm(qm, *, electrostatic=False, provider=None, base_dir=None):
         from .abacus import validate_mechanical_abacus_settings
 
         return validate_mechanical_abacus_settings(qm, Path.cwd() if base_dir is None else base_dir)
+    if normalized["state"]["method"] == "uks-hirshfeld-cdft":
+        from .cdft import settings
+
+        value = settings(qm)
+        if value != normalized["state"]["reference"]["settings"]:
+            raise ValueError("cDFT qm settings differ from the reference")
+        return value
     if normalized["state"]["method"] != "ground":
         from dataclasses import asdict
 
@@ -261,6 +268,8 @@ def _validate_config(config, path):
         ):
             raise ValueError(f"{key} requires integer charge and positive multiplicity")
     config["provider"] = validate_provider(resolve_provider_reference(config.get("provider"), path))
+    if config["provider"]["state"]["method"] == "uks-hirshfeld-cdft":
+        raise ValueError("Native cDFT requires the finite additive NVE driver")
     qm = config["qm"] = validate_qm(config["qm"], provider=config["provider"], base_dir=path.parent)
     boundary = "periodic-same-cell" if qm.get("boundary") == "periodic-same-cell" else "isolated"
     config["provider_contract"] = provider_contract(config["provider"], region_boundary=boundary, qm=qm)

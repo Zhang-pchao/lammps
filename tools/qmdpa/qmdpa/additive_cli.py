@@ -26,6 +26,10 @@ def _additive_coupling(lmp, comm, config):
     from .runtime import _root_call
     from .state_records import RecordingTDAProvider
 
+    if config["provider"]["state"]["method"] == "uks-hirshfeld-cdft":
+        from .cdft_runtime import make_coupling
+
+        return make_coupling(lmp, comm, config)
     calculator = state_observer = None
 
     def make_calculator():

@@ -63,7 +63,8 @@ def load_additive_config(path):
     config = json.loads(raw)
     provider = config.get("provider") if isinstance(config, dict) else None
     state = provider.get("state") if isinstance(provider, dict) else None
-    tda = isinstance(state, dict) and state.get("method") in ("rhf-tda", "pbe0-tda")
+    tda = isinstance(state, dict) and state.get("method") in (
+        "rhf-tda", "pbe0-tda", "uks-hirshfeld-cdft")
     if isinstance(config, dict) and (config.get("schema_version") == 2 or tda):
         # Preserve legacy ground parsing; new charge/state inputs must be unambiguous.
         config = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
