@@ -12,6 +12,7 @@ import math
 def require_ground_sampling(config):
     if (config["hamiltonian"] not in ("fixed-region-mechanical",
                                     "finite-reactive-water-mechanical",
+                                    "finite-reactive-water-additive",
                                     "finite-electrostatic-additive") or config["periodic"]
             or config["provider"]["engine"] != "pyscf"
             or config["provider"]["device"] != "cpu"
@@ -21,7 +22,7 @@ def require_ground_sampling(config):
 
 def require_ground_me(config):
     require_ground_sampling(config)
-    if config["hamiltonian"] == "finite-electrostatic-additive":
+    if config["hamiltonian"] in ("finite-electrostatic-additive", "finite-reactive-water-additive"):
         raise ValueError("This execution profile requires ground ME")
 
 

@@ -1,6 +1,6 @@
 # Practical float32 DPA4C execution
 
-This optional profile uses finite, fixed-region, neutral-singlet CPU PySCF
+This optional profile includes finite, fixed-region, neutral-singlet CPU PySCF
 ground ME with an explicitly selected native DPA pair. Its admission and
 numerical qualification are independent of the existing strict profiles.
 
@@ -73,3 +73,37 @@ The driver keeps Kokkos alive across sequential LAMMPS instances and registers
 the public Kokkos-only finalizer once for process exit, before CUDA unloading.
 It does not finalize an application-owned MPI or Python runtime. Each run
 still closes its LAMMPS instance in success and failure paths.
+
+
+## Reactive additive environment domains
+
+The separate finite reactive additive route admits a checksummed DPA4C archive
+with `inference_profile: dpa4c-native-practical-v1` and:
+
+```json
+"execution": {
+  "pair_style": "deepmd/kk",
+  "numerical_profile": "float32-practical-v1",
+  "domain": "environment"
+}
+```
+
+Its outer native pair remains `zero`. An owned one-rank LAMMPS instance
+evaluates only each partition's neutral DPA environment, using `MPI.COMM_SELF`.
+Global atom IDs are mapped to dense local IDs and mapped back after every
+evaluation. Changing domain size or proton ownership rebuilds atoms and
+neighbors while retaining the loaded model. Ordinary `deepmd` is an explicit
+alternative with a separately prepared reference and restart identity.
+
+Prepare a fresh isolated-water reference with the same compressed profile
+and `low_backend: deepmd/kk` (or `deepmd`). Schema 2 binds that backend,
+model, QM settings and source; raw schema 1 references cannot be substituted.
+The complete additive mixer retains embedding feedback, cross interactions
+and weight derivatives. NVT and fixed-pool OPES/Voronoi are admitted through
+their existing contracts. No full-system mechanical pair is added.
+
+Resources are registered before mixer construction and closed on success or
+failure. Statistics report actual environment pair, communicator, evaluated
+domains and cleanup. The outer driver does not initialize Kokkos; process-exit
+cleanup belongs to the inner provider. Short controlled switching tests are
+engineering evidence, not spontaneous ionization or an efficiency benchmark.

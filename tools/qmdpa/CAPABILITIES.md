@@ -110,3 +110,12 @@ keeps its actual version. The companion release record and stack lock identify
 the executed candidate, native builds and inherited scope. Cu108 OMP8 strict
 trajectory parity, original target GPU attribution, fixed-AO motion extensions,
 extra dp-compress strict parity and same-cell socket remain unresolved.
+
+
+Finite reactive additive EE also has an explicit compressed DPA4C environment
+domain route with ordinary or Kokkos native evaluation, a zero outer pair and
+a backend-bound isolated-water reference. Its finite CPU-ground,
+fixed-charge, declared-proton-channel NVT/OPES scope is described in
+[REACTIVE_WATER.md](REACTIVE_WATER.md) and [EXECUTION.md](EXECUTION.md).
+Source admission alone does not qualify a deployment or establish chemical
+accuracy, spontaneous ionization, long trajectories or speedup.

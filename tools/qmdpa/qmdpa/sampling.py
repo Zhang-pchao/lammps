@@ -38,7 +38,7 @@ def bind_sampling(config, raw, base_dir):
         raise ValueError("sampling requires engine, kernel, cv and bias")
     if raw["engine"] != "plumed":
         raise ValueError("sampling.engine must be plumed")
-    if config["hamiltonian"] == "finite-reactive-water-mechanical" and (
+    if config["hamiltonian"] in ("finite-reactive-water-mechanical", "finite-reactive-water-additive") and (
             not isinstance(raw["cv"], dict) or raw["cv"].get("form") != water_cv.FORM
             or not isinstance(raw["bias"], dict) or raw["bias"].get("form") != opes.FORM):
         raise ValueError("Reactive-water sampling requires OPES with the complete declared water-pool CV")
@@ -357,6 +357,8 @@ def compare_sampling_restart(frame, reference, config):
                     raise ValueError(f"Restart sampling {key} differs")
         elif abs(frame["sampling"]["cv_angstrom"] - reference["sampling"]["cv_angstrom"]) > 1e-10:
             raise ValueError("Restart sampling cv_angstrom differs")
-        for key, atol in (("bias_energy_eV", 1e-9), ("unbiased_potential_eV", 1e-6)):
+        from .execution import restart_limits
+
+        for key, atol in (("bias_energy_eV", 1e-9), ("unbiased_potential_eV", restart_limits(config)[0])):
             if abs(frame["sampling"][key] - reference["sampling"][key]) > atol:
                 raise ValueError(f"Restart sampling {key} differs")

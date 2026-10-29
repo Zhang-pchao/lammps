@@ -14,7 +14,7 @@ import numpy as np
 from .adaptive import _real, _text
 from .config import file_digest, software_identity, validate_qm
 from .core import Geometry, _evaluate
-from .inference import RAW_PROFILE
+from .inference import COMPRESSED_PROFILE, RAW_PROFILE
 from .providers import validate_provider
 from .selection_config import read_json
 
@@ -44,14 +44,20 @@ def reference_identity(record):
                                      allow_nan=False).encode()).hexdigest()
 
 
-def validate_reference(record, *, model_sha256, qm, provider):
+def validate_reference(record, *, model_sha256, qm, provider, inference_profile=RAW_PROFILE):
     """Require the same settings, source and dependencies without running QM."""
-    if not isinstance(record, dict) or set(record) != FIELDS:
+    compressed = inference_profile == COMPRESSED_PROFILE
+    if inference_profile not in (RAW_PROFILE, COMPRESSED_PROFILE):
+        raise ValueError("Unsupported water reference inference profile")
+    fields = FIELDS | ({"low_backend"} if compressed else set())
+    if not isinstance(record, dict) or set(record) != fields:
         raise ValueError("Water reference has missing or unsupported fields")
-    if type(record["schema_version"]) is not int or record["schema_version"] != 1:
-        raise ValueError("Water reference schema_version must be integer 1")
-    if record["kind"] != KIND or record["inference_profile"] != RAW_PROFILE:
+    if type(record["schema_version"]) is not int or record["schema_version"] != (2 if compressed else 1):
+        raise ValueError("Water reference schema_version differs from its inference profile")
+    if record["kind"] != KIND or record["inference_profile"] != inference_profile:
         raise ValueError("Water reference kind or inference profile differs")
+    if compressed and record["low_backend"] not in ("deepmd", "deepmd/kk"):
+        raise ValueError("Compressed water reference requires an explicit native low backend")
     if record["model_sha256"] != model_sha256:
         raise ValueError("Water reference model checksum differs")
     if record["qm"] != qm or record["provider"] != provider:
@@ -74,10 +80,14 @@ def prepare_reference(request_path, output):
     raw = read_json(request_path.read_text())
     fields = {"model", "model_sha256", "qm", "provider", "geometry_angstrom",
               "inference_profile", "source"}
+    compressed = isinstance(raw, dict) and raw.get("inference_profile") == COMPRESSED_PROFILE
+    fields |= {"low_backend"} if compressed else set()
     if not isinstance(raw, dict) or set(raw) != fields:
         raise ValueError("Water-reference request has missing or unsupported fields")
-    if raw["inference_profile"] != RAW_PROFILE:
-        raise ValueError("Water-reference preparation requires the deterministic raw profile")
+    if raw["inference_profile"] not in (RAW_PROFILE, COMPRESSED_PROFILE):
+        raise ValueError("Water-reference preparation requires an explicit supported inference profile")
+    if compressed and raw["low_backend"] not in ("deepmd", "deepmd/kk"):
+        raise ValueError("Compressed water reference requires an explicit native low backend")
     provider = validate_provider(raw["provider"])
     if provider != {"engine": "pyscf", "device": "cpu", "state": {"method": "ground"}}:
         raise ValueError("Water-reference preparation requires CPU PySCF ground state")
@@ -104,20 +114,37 @@ def prepare_reference(request_path, output):
         from .inference import prepare_raw_inference, strict_runtime_state
         from .providers import make_qm_provider
 
-        torch = prepare_raw_inference(model)
-        low = _evaluate(DeepMDBackend(model, charge_spin=[0, 1], no_jit=True), geometry)
+        if compressed:
+            from .execution import validate_dpa4c_archive
+            from .native_deepmd import NativeDeepMDDomainBackend
+
+            validate_dpa4c_archive(model)
+            backend = NativeDeepMDDomainBackend(
+                model, model_sha256=raw["model_sha256"], type_symbols=("O", "H"),
+                pair_style=raw["low_backend"])
+            try:
+                low = _evaluate(backend, geometry)
+            finally:
+                backend.close_checked()
+            runtime = {"profile": COMPRESSED_PROFILE, "native": backend.statistics}
+        else:
+            torch = prepare_raw_inference(model)
+            low = _evaluate(DeepMDBackend(model, charge_spin=[0, 1], no_jit=True), geometry)
+            runtime = strict_runtime_state(torch)
         high = _evaluate(make_qm_provider(qm, provider=provider), geometry)
-        runtime = strict_runtime_state(torch)
         if file_digest(model) != raw["model_sha256"] or file_digest(request_path) != manifest["request_sha256"]:
             raise ValueError("Water reference input changed during calculation")
         record = {
-            "schema_version": 1, "kind": KIND, "model_sha256": raw["model_sha256"],
-            "qm": qm, "provider": provider, "inference_profile": RAW_PROFILE,
+            "schema_version": 2 if compressed else 1, "kind": KIND, "model_sha256": raw["model_sha256"],
+            "qm": qm, "provider": provider, "inference_profile": raw["inference_profile"],
             "geometry_angstrom": geometry.positions.tolist(), "high_energy_ev": high.energy,
             "low_energy_ev": low.energy, "source": source, "software": manifest["software"],
         }
+        if compressed:
+            record["low_backend"] = raw["low_backend"]
         record, delta, identity = validate_reference(
-            record, model_sha256=raw["model_sha256"], qm=qm, provider=provider)
+            record, model_sha256=raw["model_sha256"], qm=qm, provider=provider,
+            inference_profile=raw["inference_profile"])
         (output/"runtime.json").write_text(json.dumps(runtime, indent=2)+"\n")
         temporary = output/"reference.json.part"
         temporary.write_text(json.dumps(record, indent=2)+"\n")

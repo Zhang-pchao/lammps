@@ -16,19 +16,38 @@ _CLEANUP_HANDLES = set()
 
 
 def bind_execution(config, raw):
-    require_ground_me(config)
-    if any(key in config for key in ("sampling", "thermostat", "bias")):
-        raise ValueError("The practical float32 profile currently admits NVE without sampling")
-    if not isinstance(raw, dict) or set(raw) != {"pair_style", "numerical_profile"}:
-        raise ValueError("execution requires pair_style and numerical_profile")
+    domain = config["hamiltonian"] == "finite-reactive-water-additive"
+    required = {"pair_style", "numerical_profile"} | ({"domain"} if domain else set())
+    if not isinstance(raw, dict) or set(raw) != required:
+        raise ValueError("execution requires pair_style, numerical_profile and an explicit environment domain for reactive EE")
+    if domain:
+        from .inference import COMPRESSED_PROFILE
+
+        if config["inference_profile"] != COMPRESSED_PROFILE or raw["domain"] != "environment":
+            raise ValueError("Reactive native execution requires the compressed environment-domain profile")
+        if config["buffer_reference"]["low_backend"] != raw["pair_style"]:
+            raise ValueError("The water reference low backend differs from native execution")
+        if config["environment_charge_spin"] != [0, 1]:
+            raise ValueError("The practical profile requires a neutral-singlet environment")
+    else:
+        require_ground_me(config)
+        if any(key in config for key in ("sampling", "thermostat", "bias")):
+            raise ValueError("The practical float32 profile currently admits NVE without sampling")
+        if (config.get("full_charge_spin") != [0, 1]
+                or config.get("region_charge_spin") != [0, 1]):
+            raise ValueError("The practical profile requires neutral singlet full and QM systems")
     if raw["pair_style"] not in ("deepmd", "deepmd/kk"):
         raise ValueError("execution.pair_style must be deepmd or deepmd/kk")
     if raw["numerical_profile"] != PRACTICAL:
         raise ValueError("The declared execution profile must be float32-practical-v1")
-    if (config.get("full_charge_spin") != [0, 1]
-            or config.get("region_charge_spin") != [0, 1]):
-        raise ValueError("The practical profile requires neutral singlet full and QM systems")
-    path = Path(config["model"])
+    validate_dpa4c_archive(config["model"])
+    extend_identity(config, "execution", dict(raw))
+    return config
+
+
+def validate_dpa4c_archive(path):
+    """Inspect the official archive without importing an inference engine."""
+    path = Path(path)
     if path.suffix != ".pt2":
         raise ValueError("The practical profile requires an identified DPA4C .pt2 archive")
     try:
@@ -50,13 +69,16 @@ def bind_execution(config, raw):
         raise ValueError("The practical profile requires float32 DPA4C without AMP")
     if metadata.get("lower_input_kind") not in ("graph", "dpa4c_canonical"):
         raise ValueError("The practical profile requires an official graph/canonical archive")
-    extend_identity(config, "execution", dict(raw))
-    return config
+
+
+def uses_native_domains(config):
+    return (config.get("hamiltonian") == "finite-reactive-water-additive"
+            and config.get("execution", {}).get("domain") == "environment")
 
 
 def native_arguments(config):
     arguments = ["-log", "none", "-screen", "none", "-nocite"]
-    if config.get("execution", {}).get("pair_style") == "deepmd/kk":
+    if config.get("execution", {}).get("pair_style") == "deepmd/kk" and not uses_native_domains(config):
         arguments += ["-k", "on", "g", "1", "-sf", "kk", "-pk", "kokkos",
                       "newton", "off", "neigh", "full", "gpu/aware", "off"]
     return arguments
@@ -67,7 +89,8 @@ def pair_style(config):
 
 
 def verify_native(lmp, config):
-    if "execution" in config and lmp.extract_global("pair_style") != pair_style(config):
+    expected = "zero" if uses_native_domains(config) else pair_style(config)
+    if "execution" in config and lmp.extract_global("pair_style") != expected:
         raise ValueError("The actual native pair differs from the declared execution profile")
 
 
@@ -84,7 +107,7 @@ def register_native_cleanup(lmp, config):
     Its finalize() also terminates MPI/Python and is inappropriate here. The
     public Kokkos-only C API is registered once per library for process exit.
     """
-    if pair_style(config) != "deepmd/kk":
+    if pair_style(config) != "deepmd/kk" or uses_native_domains(config):
         return
     handle = lmp.lib._handle
     if handle not in _CLEANUP_HANDLES:

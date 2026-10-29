@@ -9,12 +9,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .config import _validate_config as validate_base
-from .config import validate_region
+from .config import validate_qm, validate_region
 from .core import Geometry, SubtractiveCalculator
 from .dynamics import extend_identity
-from .inference import RAW_PROFILE
+from .inference import COMPRESSED_PROFILE, RAW_PROFILE
 from .reactive_mechanical import ReactiveWaterGuard, ReactiveWaterMechanicalMixer
-from .reactive_water import HAMILTONIAN, ProtonChannel, ReactiveWaterFamily
+from .reactive_water import (
+    ADDITIVE_HAMILTONIAN, HAMILTONIAN, REACTIVE_HAMILTONIANS, ProtonChannel, ReactiveWaterFamily,
+)
 from .selection_config import FixedGroup, read_json
 from .water_reference import reference_identity, validate_reference
 
@@ -30,7 +32,22 @@ def build_family(config):
 def build_mixer(config, low, high):
     reference, delta, identity = validate_reference(
         config["buffer_reference"], model_sha256=config["model_sha256"],
-        qm=config["qm"], provider=config["provider"])
+        qm=config["qm"], provider=config["provider"], inference_profile=config["inference_profile"])
+    if config["hamiltonian"] == ADDITIVE_HAMILTONIAN:
+        if (config["inference_profile"] == COMPRESSED_PROFILE
+                and getattr(low, "pair_style", None) != reference["low_backend"]):
+            raise ValueError("The environment provider differs from the calibrated native backend")
+        from .additive import CrossLennardJones
+        from .additive_config import cross_parameters
+        from .embedding import FixedEmbeddingCharges
+        from .reactive_additive import ReactiveWaterAdditiveMixer
+
+        return ReactiveWaterAdditiveMixer(
+            low, high, CrossLennardJones(cross_parameters(config["cross"]), source=config["cross"]["source"]),
+            family=build_family(config), guard=ReactiveWaterGuard(**config["water_guard"]),
+            charges=FixedEmbeddingCharges(**config["embedding"]), reference_delta_ev=delta,
+            reference_source=identity, method_identity="neutral-ground:"+reference_identity(reference),
+            energy_reference="isolated-water-difference")
     return ReactiveWaterMechanicalMixer(
         low, SubtractiveCalculator(low, high), family=build_family(config),
         guard=ReactiveWaterGuard(**config["water_guard"]), reference_delta_ev=delta,
@@ -44,15 +61,26 @@ def load_reactive_config(path):
 
 
 def _validate_config(raw, path):
-    if not isinstance(raw, dict) or raw.get("hamiltonian") != HAMILTONIAN:
+    if not isinstance(raw, dict) or raw.get("hamiltonian") not in REACTIVE_HAMILTONIANS:
         raise ValueError("Reactive water requires its explicitly selected Hamiltonian")
     config = deepcopy(raw)
+    hamiltonian = config["hamiltonian"]
+    additive = hamiltonian == ADDITIVE_HAMILTONIAN
+    ee = {}
+    if additive:
+        fields = {"environment_charge_spin", "embedding", "cross"}
+        if not fields <= set(config) or {"full_charge_spin", "region_charge_spin"} & set(config):
+            raise ValueError("Reactive EE requires environment_charge_spin, embedding and cross")
+        ee = {key: config.pop(key) for key in fields}
+        config["full_charge_spin"] = config["region_charge_spin"] = ee["environment_charge_spin"]
     extras = {"full_region", "groups", "reactive_region", "water_guard", "buffer_reference", "inference_profile"}
     if not extras <= set(config) or "region" in config:
         raise ValueError("Reactive water requires full_region, groups, reactive_region, water_guard, buffer_reference and inference_profile")
     values = {key: config.pop(key) for key in extras}
-    if values["inference_profile"] != RAW_PROFILE or Path(config["model"]).suffix != ".pt":
-        raise ValueError("Reactive water requires the strict raw .pt inference profile")
+    compressed = additive and values["inference_profile"] == COMPRESSED_PROFILE
+    if not (compressed and Path(config["model"]).suffix == ".pt2"
+            or values["inference_profile"] == RAW_PROFILE and Path(config["model"]).suffix == ".pt"):
+        raise ValueError("Reactive water requires raw .pt or the declared additive native .pt2 profile")
     if config.get("periodic") is not False:
         raise ValueError("Reactive water currently requires finite boundaries")
     for key in ("full_charge_spin", "region_charge_spin"):
@@ -92,7 +120,7 @@ def _validate_config(raw, path):
     values["water_guard"] = asdict(ReactiveWaterGuard(**guard))
     values["buffer_reference"], _, _ = validate_reference(
         values["buffer_reference"], model_sha256=config["model_sha256"],
-        qm=config["qm"], provider=config["provider"])
+        qm=config["qm"], provider=config["provider"], inference_profile=values["inference_profile"])
     candidate = {**config, **values}
     family = build_family(candidate)
     full = config.pop("region")
@@ -109,7 +137,41 @@ def _validate_config(raw, path):
         **{key: getattr(family, key) for key in
            ("inner_radius_angstrom", "outer_radius_angstrom", "transfer_inner_angstrom",
             "transfer_outer_angstrom", "max_partitions")}}
-    values["hamiltonian"] = HAMILTONIAN
+    values["hamiltonian"] = hamiltonian
+    if additive:
+        from types import SimpleNamespace
+        from .additive_config import cross_parameters
+        from .embedding import FixedEmbeddingCharges
+        from .molecular_additive import subset_charges
+        from .providers import provider_contract, validate_provider
+
+        table = ee["embedding"]
+        if (not isinstance(table, dict) or not {"atom_ids", "charges_e", "source"} <= set(table)
+                or set(table)-{"atom_ids", "charges_e", "source", "radii_angstrom"}):
+            raise ValueError("Reactive EE requires an explicit full-system fixed charge table")
+        charges = FixedEmbeddingCharges(**table)
+        if set(charges.atom_ids) != set(family.atom_ids):
+            raise ValueError("Embedding table must cover every full_region atom exactly")
+        charges = subset_charges(charges, family.atom_ids)
+        ee["embedding"] = {"atom_ids": list(charges.atom_ids), "charges_e": charges.charges_e.tolist(),
+                           "source": charges.source}
+        if charges.radii_angstrom is not None:
+            ee["embedding"]["radii_angstrom"] = charges.radii_angstrom.tolist()
+        pairs = cross_parameters(ee["cross"])
+        if set(pairs) != {("O", "O"), ("O", "H"), ("H", "O"), ("H", "H")}:
+            raise ValueError("Every water cross element pair needs exactly one explicit parameter")
+        validate_provider(config["provider"], electrostatic=True)
+        # Check the embedded solver restrictions without adding EE-only defaults
+        # to the isolated-water calibration settings.
+        validate_qm(config["qm"], electrostatic=True, provider=config["provider"])
+        config["provider_contract"] = provider_contract(config["provider"], electrostatic=True)
+        config.pop("full_charge_spin")
+        config.pop("region_charge_spin")
+        values.update(ee)
+        # The same constructor checks every topology using metadata only.
+        build_mixer({**config, **values}, SimpleNamespace(charge_spin=ee["environment_charge_spin"],
+                                             pair_style=values["buffer_reference"].get("low_backend")),
+                    lambda field: SimpleNamespace(charge=0, multiplicity=1, charges=field))
     # Reuse common file/method/dependency validation, then bind the complete new
     # model to a distinct identity. The validation cover is not an all-QM run.
     extend_identity(config, "reactive_model_identity", values)
@@ -130,7 +192,7 @@ def frame_record(frame, config):
     ReactiveWaterGuard(**config["water_guard"]).validate(geometry, family)
     weights = family.evaluate(geometry)
     return {
-        "hamiltonian": HAMILTONIAN,
+        "hamiltonian": config["hamiltonian"],
         "reference_sha256": reference_identity(config["buffer_reference"]),
         "ownership_probabilities": weights.ownership_probabilities.tolist(),
         "channel_gaps_angstrom": weights.channel_gaps_angstrom.tolist(),
@@ -145,7 +207,7 @@ def frame_record(frame, config):
 
 def validate_reactive_frame(frame, config):
     record = frame.get("reactive_water")
-    if config.get("hamiltonian") != HAMILTONIAN:
+    if config.get("hamiltonian") not in REACTIVE_HAMILTONIANS:
         if record is not None:
             raise ValueError("Unexpected reactive water record")
         return

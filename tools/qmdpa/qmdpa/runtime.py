@@ -311,9 +311,9 @@ def _attach_state(frame, coupling, config):
             raise ValueError("Water-buffer frame requires the successful current callback")
         frame["water_buffer"] = frame_record(frame, config)
     from .reactive_config import frame_record as reactive_frame_record
-    from .reactive_water import HAMILTONIAN as REACTIVE_WATER
+    from .reactive_water import REACTIVE_HAMILTONIANS
 
-    if config.get("hamiltonian") == REACTIVE_WATER:
+    if config.get("hamiltonian") in REACTIVE_HAMILTONIANS:
         if coupling.failure is not None or coupling.last_step != frame["step"]:
             raise ValueError("Reactive-water frame requires the successful current callback")
         frame["reactive_water"] = reactive_frame_record(frame, config)

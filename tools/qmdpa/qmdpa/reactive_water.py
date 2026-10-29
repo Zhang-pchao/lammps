@@ -20,6 +20,8 @@ from .molecular_adaptive import _radial_preferences
 from .selection_config import FixedGroup, FixedGroupSelector, _group_id
 
 HAMILTONIAN = "finite-reactive-water-mechanical"
+ADDITIVE_HAMILTONIAN = "finite-reactive-water-additive"
+REACTIVE_HAMILTONIANS = (HAMILTONIAN, ADDITIVE_HAMILTONIAN)
 
 
 def _quintic(value):

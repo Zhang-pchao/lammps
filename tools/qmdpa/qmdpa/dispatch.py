@@ -26,6 +26,7 @@ MOLECULAR = "finite-molecular-mechanical"
 MOLECULAR_EE = "finite-molecular-additive"
 WATER_BUFFER = "finite-water-buffer-mechanical"
 REACTIVE_WATER = "finite-reactive-water-mechanical"
+REACTIVE_EE = "finite-reactive-water-additive"
 REFERENCE = "finite-electrostatic-reference-subtractive"
 PERIODIC_EE = "periodic-electrostatic-reference-subtractive"
 EHRENFEST = "finite-two-state-ehrenfest-mechanical"
@@ -52,6 +53,7 @@ _ROUTES = {
         "_zero_pair", "_gap_anchor_coupling"
     ),
 }
+_ROUTES[REACTIVE_EE] = _ROUTES[REACTIVE_WATER]
 _ROUTES[MOLECULAR_EE] = _ROUTES[MOLECULAR]
 _ROUTES[WATER_BUFFER] = _ROUTES[MOLECULAR]
 _ROUTES[CORRECTED_GAP_HAMILTONIAN] = _ROUTES["finite-electrostatic-gap-anchor"]
@@ -118,15 +120,16 @@ def _normalize_selection(raw):
         model = choice.get("ee_model")
         if model in ("reference-subtractive", "periodic-reference-subtractive") and surface != "ground":
             raise ValueError("Reference-subtractive dynamics currently requires ground state")
-        if model not in ("reference-subtractive", "periodic-reference-subtractive", "additive", "molecular-additive", "gap-anchor", "gap-anchor-cross-delta", "gap-anchor-fragment-response"):
+        if model not in ("reference-subtractive", "periodic-reference-subtractive", "additive", "molecular-additive", "reactive-water-additive", "gap-anchor", "gap-anchor-cross-delta", "gap-anchor-fragment-response"):
             raise ValueError("Electrostatic coupling requires explicit ee_model additive, gap-anchor, gap-anchor-cross-delta or gap-anchor-fragment-response")
         if model == "gap-anchor" and surface == "ground":
             raise ValueError("Ground gap-anchor reduces to GS-ME; select mechanical explicitly")
         if model in ("gap-anchor-cross-delta", "gap-anchor-fragment-response") and surface == "ground":
             raise ValueError("The corrected native driver currently requires a selected PBE0 state")
-        if model == "molecular-additive" and surface != "ground":
+        if model in ("molecular-additive", "reactive-water-additive") and surface != "ground":
             raise ValueError("Molecular additive coupling requires the ground surface")
-        hamiltonian = (PERIODIC_EE if model == "periodic-reference-subtractive" else
+        hamiltonian = (REACTIVE_EE if model == "reactive-water-additive" else
+                       PERIODIC_EE if model == "periodic-reference-subtractive" else
                        MOLECULAR_EE if model == "molecular-additive" else "finite-electrostatic-" + model)
     else:
         raise ValueError("coupling.embedding must be mechanical or electrostatic")
@@ -160,7 +163,8 @@ def _describe_selection(config):
     if config["hamiltonian"] == REACTIVE_WATER:
         result["me_model"] = "reactive-water"
     if not mechanical:
-        result["ee_model"] = ("periodic-reference-subtractive" if config["hamiltonian"] == PERIODIC_EE else
+        result["ee_model"] = ("reactive-water-additive" if config["hamiltonian"] == REACTIVE_EE else
+                              "periodic-reference-subtractive" if config["hamiltonian"] == PERIODIC_EE else
                               "molecular-additive" if config["hamiltonian"] == MOLECULAR_EE
                               else config["hamiltonian"].removeprefix("finite-electrostatic-"))
     return result
@@ -194,6 +198,17 @@ def _energy_contract(config):
             "force_definition": "weighted-complete-forces-minus-energy-times-weight-gradients",
             "partition_policy": config["switch"],
             "scope": "Fixed-charge complete fixed-occupancy family; no excited-state map or mutual polarization",
+        }
+    if hamiltonian == REACTIVE_EE:
+        return {
+            "total_terms": [{"name": "weighted_reactive_additive_totals",
+                             "coefficient": 1, "force_coordinates": "all"}],
+            "partition_terms": ["low_environment", "embedded_ground", "cross_lj", "water_offset"],
+            "native_baseline": "zero", "external_energy": "complete-total",
+            "force_definition": "weighted-complete-forces-minus-energy-times-weight-gradients",
+            "partition_policy": config["reactive_region"],
+            "reference": "isolated-water-difference-per-additional-QM-oxygen",
+            "scope": "Finite declared proton channels; fixed charges; nonempty neutral environment",
         }
     if hamiltonian == REACTIVE_WATER:
         return {
@@ -307,6 +322,10 @@ def load_run_config(path):
         from .sampling import bind_sampling
 
         bind_sampling(config, sampling, path.parent)
+    from .inference import COMPRESSED_PROFILE
+
+    if config.get("inference_profile") == COMPRESSED_PROFILE and not has_execution:
+        raise ValueError("Compressed reactive dynamics requires explicit environment-domain execution")
     if has_execution:
         from .execution import bind_execution
 
@@ -322,8 +341,11 @@ def _setup_pair(lmp, config):
 def _make_coupling(lmp, comm, config, *, provider_resources=None):
     _, _, module, _, factory = _route(config["hamiltonian"])
     if provider_resources is not None:
-        if config["hamiltonian"] not in (MECHANICAL, PERIODIC_EE) or config["provider"]["engine"] != "abacus":
-            raise ValueError("External provider resources require an admitted ABACUS coupling")
+        from .execution import uses_native_domains
+
+        abacus = config["hamiltonian"] in (MECHANICAL, PERIODIC_EE) and config["provider"]["engine"] == "abacus"
+        if not (abacus or uses_native_domains(config)):
+            raise ValueError("External provider resources require an admitted owned backend")
         return _function(module, factory)(lmp, comm, config, provider_resources=provider_resources)
     return _function(module, factory)(lmp, comm, config)
 
@@ -348,7 +370,7 @@ def describe_run(config):
         if hamiltonian == EHRENFEST else
         {"full": config["full_region"], "groups": config["groups"],
          "reactive_region": config["reactive_region"], "partitions": config["partitions"]}
-        if hamiltonian == REACTIVE_WATER else
+        if hamiltonian in (REACTIVE_WATER, REACTIVE_EE) else
         {"full": config["full_region"], "groups": config["groups"],
          "core_group_ids": config["core_group_ids"], "partitions": config["partitions"]}
         if hamiltonian in (MOLECULAR, MOLECULAR_EE, WATER_BUFFER, SELECTED_FAMILY) else
@@ -416,10 +438,10 @@ def describe_run(config):
     if hamiltonian == REFERENCE:
         description["embedding"] = config["embedding"]
         description["reference"] = config["reference"]
-    if hamiltonian in (WATER_BUFFER, REACTIVE_WATER):
+    if hamiltonian in (WATER_BUFFER, REACTIVE_WATER, REACTIVE_EE):
         description["buffer_reference"] = config["buffer_reference"]
         description["water_guard"] = config["water_guard"]
-    if hamiltonian == MOLECULAR_EE:
+    if hamiltonian in (MOLECULAR_EE, REACTIVE_EE):
         description["embedding"] = config["embedding"]
         description["cross"] = config["cross"]
     if "interaction_delta" in config:
@@ -450,5 +472,10 @@ def describe_run(config):
         description["dynamics"]["thermostat"] = config["thermostat"]
     if "execution" in config:
         description["execution"] = config["execution"]
-        description["assembly"]["native_pair"] = config["execution"]["pair_style"]
+        from .execution import uses_native_domains
+
+        if uses_native_domains(config):
+            description["assembly"]["environment_pair"] = config["execution"]["pair_style"]
+        else:
+            description["assembly"]["native_pair"] = config["execution"]["pair_style"]
     return description

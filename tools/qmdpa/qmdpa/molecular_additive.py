@@ -107,6 +107,20 @@ class MolecularAdditiveTerms:
     total: Evaluation
 
 
+def validate_partition_charges(partition, charges, qm_ids, env_ids):
+    """Validate an exact fixed partition before calling any physical provider."""
+    partition.validate_provider_state()
+    calculator = partition.calculator
+    if calculator.qm_atom_ids != qm_ids or calculator.environment_atom_ids != env_ids:
+        raise ValueError("Each additive partition must use its exact ordered complete regions")
+    expected = subset_charges(charges, env_ids)
+    actual = calculator.embedded_backend.charges
+    if (actual.source != expected.source
+            or not np.array_equal(actual.charges_e, expected.charges_e)
+            or not np.array_equal(actual.radii_angstrom, expected.radii_angstrom)):
+        raise ValueError("Every partition must use the same fixed atom-ID charge table")
+
+
 class MolecularAdditiveMixer:
     """Blend full additive energies; no full-DPA baseline or extra Coulomb term.
 
@@ -131,16 +145,7 @@ class MolecularAdditiveMixer:
     def _validate_partitions(self):
         for partition, qm_ids, env_ids in zip(self.partitions, self.qm_atom_ids,
                                                self.environment_atom_ids, strict=True):
-            partition.validate_provider_state()
-            calculator = partition.calculator
-            if calculator.qm_atom_ids != qm_ids or calculator.environment_atom_ids != env_ids:
-                raise ValueError("Each additive partition must use its exact ordered complete regions")
-            expected = subset_charges(self.charges, env_ids)
-            actual = calculator.embedded_backend.charges
-            if (actual.source != expected.source
-                    or not np.array_equal(actual.charges_e, expected.charges_e)
-                    or not np.array_equal(actual.radii_angstrom, expected.radii_angstrom)):
-                raise ValueError("Every partition must use the same fixed atom-ID charge table")
+            validate_partition_charges(partition, self.charges, qm_ids, env_ids)
 
     def evaluate_terms(self, geometry):
         self._coverage.select(geometry)

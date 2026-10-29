@@ -69,7 +69,7 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             )
     from lammps import lammps
 
-    from .execution import native_arguments, register_native_cleanup, verify_native
+    from .execution import native_arguments, register_native_cleanup, uses_native_domains, verify_native
 
     try:
         from mpi4py import MPI
@@ -98,8 +98,8 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             "clock": "time.perf_counter",
             **timings,
             "coupling": None if coupling is None else coupling.statistics(),
-            **({"qm_provider": provider_resources.statistics()}
-               if provider_resources is not None else {}),
+            **({("environment_provider" if uses_native_domains(prepared_config) else "qm_provider"):
+                provider_resources.statistics()} if provider_resources is not None else {}),
         }
 
     lmp = lammps(cmdargs=native_arguments(prepared_config))
@@ -146,10 +146,11 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
         )
         if previous is None and "temperature_K" in config:
             _initialize_velocities(lmp, config)
-        if config.get("provider", {}).get("engine") == "abacus":
+        if config.get("provider", {}).get("engine") == "abacus" or uses_native_domains(config):
             from .runtime import ProviderResources
 
-            provider_resources = ProviderResources(output / "qm-backend")
+            provider_resources = ProviderResources(
+                output / ("dpa-backend" if uses_native_domains(config) else "qm-backend"))
             coupling = make_coupling(lmp, comm, config, provider_resources=provider_resources)
         else:
             coupling = make_coupling(lmp, comm, config)

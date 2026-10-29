@@ -1,6 +1,6 @@
 # Finite reactive-water ownership and QM adaptation
 
-This separate ground mechanical model declares a small proton-transfer network
+The ground mechanical and additive electrostatic models declare a small proton-transfer network
 before a run. It supports two to four pool waters and one or two distinct
 transferable hydrogens with explicit initial donor and acceptor groups. Other
 hydrogens keep their original oxygen assignment. The complete family is fixed;
@@ -47,6 +47,35 @@ reuses the existing subtraction and conservative molecular mixer. At all-QM
 occupancy, force equals full QM and energy equals full QM minus the declared
 (n_O(full)-1)*delta_water constant. The reference is part of the model, not a
 thermodynamic chemical potential or evidence of buffer convergence.
+
+## Reactive additive electrostatic embedding
+
+Select `hamiltonian: finite-reactive-water-additive` or
+`coupling: {surface: ground, embedding: electrostatic, ee_model: reactive-water-additive}`.
+The same complete proton topology, weights and domain guards are used:
+
+```text
+E_p = E_DPA(M_p) + E_QM_emb(Q_p; q_Mp) + E_cross(Q_p,M_p)
+      - (n_O(Q_p)-1)*delta_water
+U = sum(W_p*E_p)
+F = sum(W_p*F_p) - sum(E_p*grad(W_p))
+```
+
+The native pair remains zero. The callback returns the complete potential;
+there is no full-system DPA term. Use `environment_charge_spin: [0,1]` instead
+of the mechanical full/region conditions. Supply one full-system `embedding`
+atom-ID charge table and explicit `cross` parameters in the fixed additive
+format. Every environment subset uses the same ordered charge table, and
+every reassigned DPA-only water must have zero summed fixed charge. At least
+one permanent environment water is required, so this profile has no all-QM
+endpoint. All ionic defects and partially transferring endpoints remain QM.
+
+The isolated-water calibration uses the same raw model and common QM settings.
+Only the supported embedded ground solver is admitted; the isolated-only
+`diis-newton` option is rejected before backend construction. Environment
+reaction forces, cross forces and complete weight derivatives are all included.
+This route is distinct from reference-subtractive EE and does not inherit its
+qualification. A supported combination still requires its recorded tests.
 
 ## Explicit input and accepted records
 
@@ -120,8 +149,12 @@ matched real-backend, migration, MPI, restart and force evidence.
 
 ## Current limits
 
-The first route is finite neutral CPU ground ME with strict raw inference.
-Periodic reactive switching, adaptive EE, charged total systems, unlisted
+Both routes retain finite neutral CPU ground QM. ME uses strict raw inference.
+Additive EE also admits the explicit native environment-domain profile in
+[execution settings](EXECUTION.md), with a separately calibrated compressed
+reference. The outer pair stays zero, including under OPES.
+Periodic reactive switching, reference-subtractive
+reactive EE, charged total systems, unlisted
 protons or water networks, general covalent cuts, selected-state mapping and
 NPT are outside this model. Each biased sampling combination requires its
 own recorded numerical and lifecycle qualification.

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 RAW_PROFILE = "torch-raw-deterministic-v1"
+COMPRESSED_PROFILE = "dpa4c-native-practical-v1"
 RAW_ENV = {
     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     **{

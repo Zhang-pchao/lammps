@@ -31,7 +31,7 @@ def validate_cv(raw, config):
             raise ValueError("Water CV selections require distinct positive integer atom IDs")
     if len(oxygen) < 2 or len(hydrogen) != 2 * len(oxygen) or set(oxygen) & set(hydrogen):
         raise ValueError("Water CV requires disjoint neutral O/H selections with at least two oxygens")
-    if config["hamiltonian"] == "finite-reactive-water-mechanical":
+    if config["hamiltonian"] in ("finite-reactive-water-mechanical", "finite-reactive-water-additive"):
         pool = set(config["reactive_region"]["pool_group_ids"])
         symbols = {a: s for group in config["groups"] if group["group_id"] in pool
                    for a, s in zip(group["atom_ids"], group["symbols"], strict=True)}
