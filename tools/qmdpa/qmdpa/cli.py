@@ -154,6 +154,9 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             coupling = make_coupling(lmp, comm, config, provider_resources=provider_resources)
         else:
             coupling = make_coupling(lmp, comm, config)
+        from .electronic_gap_runtime import initialize as initialize_gap
+
+        _root_call(comm, lambda: initialize_gap(coupling, config, output, previous))
         from .ehrenfest_runtime import restore_frame as restore_ehrenfest_frame
 
         _root_call(comm, lambda: restore_ehrenfest_frame(previous, coupling, config))
@@ -183,6 +186,9 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             bias.capture(initial, comm)
         capture_thermostat(lmp, initial, comm, config)
         _root_call(comm, lambda: _attach_state(initial, coupling, config))
+        from .electronic_gap_runtime import capture as capture_gap
+
+        _root_call(comm, lambda: capture_gap(initial, coupling, config, previous))
         if previous is not None:
             _root_call(comm, lambda: _compare_restart(initial, previous, config))
         _root_call(comm, lambda: (output / "frames.jsonl").write_text(json.dumps(initial) + "\n"))
@@ -200,6 +206,7 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
                 bias.capture(frame, comm)
             capture_thermostat(lmp, frame, comm, config)
             _root_call(comm, lambda frame=frame: _attach_state(frame, coupling, config))
+            _root_call(comm, lambda frame=frame: capture_gap(frame, coupling, config))
             step = int(lmp.extract_global("ntimestep"))
             restart_path = output / f"restart-{step:012d}.bin"
             _timed_call(
@@ -282,7 +289,12 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             if provider_resources is not None:
                 provider_resources.close()
         finally:
-            lmp.close()
+            try:
+                from .electronic_gap_runtime import close as close_gap
+
+                close_gap(coupling)
+            finally:
+                lmp.close()
 
 
 def _mechanical_pair(lmp, config):

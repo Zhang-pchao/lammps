@@ -289,6 +289,8 @@ def load_run_config(path):
     raw = json.loads(original, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
     if not isinstance(raw, dict):
         raise ValueError("Run configuration must be a JSON object")  # noqa: TRY004 - Configuration API.
+    has_gap = "electronic_gap" in raw
+    gap = raw.pop("electronic_gap", None)
     has_selector = "coupling" in raw
     has_bias = "bias" in raw
     bias = raw.pop("bias", None)
@@ -304,7 +306,7 @@ def load_run_config(path):
     if hamiltonian == EHRENFEST and any((has_bias, has_sampling, has_thermostat, has_execution)):
         raise ValueError("Ehrenfest currently admits plain finite NVE without sampling or execution extensions")
     module, loader, _, _, _ = _route(hamiltonian)
-    config = (_function(module, "_validate_config")(raw, path) if has_selector or has_bias or has_sampling or has_thermostat or has_execution
+    config = (_function(module, "_validate_config")(raw, path) if has_gap or has_selector or has_bias or has_sampling or has_thermostat or has_execution
               else _function(module, loader)(path))
     if path.read_bytes() != original:
         raise ValueError("Configuration changed while selecting and validating its Hamiltonian")
@@ -330,15 +332,29 @@ def load_run_config(path):
         from .execution import bind_execution
 
         bind_execution(config, execution)
+    if has_gap:
+        from .electronic_gap import bind
+
+        bind(config, gap, path.parent)
     return config
 
 
 def _setup_pair(lmp, config):
+    if "electronic_gap" in config:
+        from .additive_cli import _zero_pair
+
+        return _zero_pair(lmp, config)
     _, _, module, setup, _ = _route(config["hamiltonian"])
     return _function(module, setup)(lmp, config)
 
 
 def _make_coupling(lmp, comm, config, *, provider_resources=None):
+    if "electronic_gap" in config:
+        from .electronic_gap import make_coupling
+
+        if provider_resources is not None:
+            raise ValueError("Electronic gap owns its existing CPU providers")
+        return make_coupling(lmp, comm, config)
     _, _, module, _, factory = _route(config["hamiltonian"])
     if provider_resources is not None:
         from .execution import uses_native_domains
@@ -401,6 +417,11 @@ def describe_run(config):
         "dynamics": {key: config[key] for key in ("timestep_fs", "steps", "sample_interval")},
         "qualification": "Configuration only; numerical, scientific and performance evidence is separate",
     }
+    if "electronic_gap" in config:
+        description["electronic_gap"] = config["electronic_gap"]
+        description["assembly"] = {"native_pair": "zero", "external_quantity": "sampled-surface-plus-static-gap-restraint"}
+        description["energy_contract"]["native_baseline"] = "zero"
+        description["energy_contract"]["external_energy"] = "complete-sampled-total-plus-gap-restraint"
     if mechanical and config["qm"].get("boundary") == "periodic-same-cell":
         description["boundaries"] = {
             "full_low": "periodic-3d", "region_low": "periodic-same-cell",
