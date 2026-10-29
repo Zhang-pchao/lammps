@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import file_digest
+from .config import file_digest, software_identity
 from .named_cv import digest
 
 
@@ -104,7 +104,7 @@ class ExternalCVBias:
                 raise ValueError("PLUMED library checksum differs")
             paths[name] = path
         self.schema, self.parameters = schema, params
-        self.identity = {"schema": schema.record(), "parameters": params,
+        self.identity = {"schema": schema.record(), "parameters": params, "software": software_identity(),
                          "kernel_sha256": kernel["sha256"], "wrapper_sha256": wrapper["sha256"],
                          "timestep_fs": timestep_fs, "history_kind": "static-restraint-v1"}
         self.identity_sha256 = digest(self.identity)

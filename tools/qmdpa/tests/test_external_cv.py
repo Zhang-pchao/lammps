@@ -106,3 +106,16 @@ def test_dependency_change_rejected_on_restart(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         setup(tmp_path, monkeypatch, restart=record, name="changed")
     bias.close()
+
+
+def test_source_change_rejected_on_restart(tmp_path, monkeypatch):
+    from qmdpa.config import software_identity
+    bias, frame = setup(tmp_path, monkeypatch)
+    bias.accept(frame, 0)
+    record = bias.checkpoint()
+    different = software_identity()
+    different["coupling_sha256"] = "f"*64
+    monkeypatch.setattr("qmdpa.external_cv.software_identity", lambda: different)
+    with pytest.raises(ValueError):
+        setup(tmp_path, monkeypatch, restart=record, name="source-changed")
+    bias.close()

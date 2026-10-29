@@ -39,7 +39,7 @@ def model(positions, ids=(17, 4, 91), unit="eV"):
     return schema, geo, results
 
 
-@pytest.mark.parametrize("shift", [-2., 0., 2.])
+@pytest.mark.parametrize("shift", [-1., 0., 2.])
 @pytest.mark.parametrize("unit", ["eV", "hartree"])
 def test_full_force_chain_rule_and_units(shift, unit):
     xyz = np.array([[0.2, 0.1, -0.3], [1.+shift, -0.1, 0.4], [2., 0.8, -0.2]])

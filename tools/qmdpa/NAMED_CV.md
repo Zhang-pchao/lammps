@@ -30,7 +30,8 @@ named derivatives, full Cartesian forces and the exact CV frame identity.
 Pure `evaluate` calls use `performCalcNoUpdate`; finite differences and repeated
 queries do not accept a step. `accept` advances consecutive steps once;
 identical duplicate acceptance is idempotent and changed same-step data fails.
-Checkpoints bind schema/order/units/dependencies, bias parameters, kernel and
+Checkpoints bind coupling source and dependency versions, schema/order/units,
+state dependencies, bias parameters, kernel and
 wrapper hashes, timestep, accepted frame and count. Static bias has no evolving
 OPES state. Electronic OPES, selected-state CV production, cDFT and adaptive
 state tracking are not admitted by this module.
