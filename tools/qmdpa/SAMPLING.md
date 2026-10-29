@@ -1,7 +1,7 @@
 # Ground-state CV sampling
 
-This development interface uses finite CPU PySCF ground ME. Fixed-region
-sampling supports the profiles below. The separately defined reactive-water
+This development interface uses finite CPU PySCF ground ME or fixed additive EE.
+Fixed-region sampling supports the profiles below. The separately defined reactive-water
 model admits NHC NVT and complete-pool OPES/Voronoi only; see
 [its contract](REACTIVE_WATER.md). Numerical admission belongs to an identified
 runtime and test record. Existing NVE and static-distance inputs retain their meanings.
@@ -54,8 +54,11 @@ reaction core or a covalent boundary.
 
 The driver generates a restricted PLUMED input using Angstrom/eV/ps units,
 DISTANCE with NOPBC, COMBINE for the signed difference, and a declared bias. PLUMED
-alone evaluates the production bias energy and force. The ME correction stays
-unchanged; the bias is added after its native external fix. The legacy `bias`
+alone evaluates the production bias energy and force. The declared ME correction
+or additive EE total potential stays unchanged; the bias is added after its
+native external fix. Additive EE uses its existing environment charges, explicit
+cross interactions and raw DPA environment model. CV atoms belong to qm_region,
+not the environment. This does not enable compressed/Kokkos additive EE. The legacy `bias`
 and new `sampling` objects are mutually exclusive.
 
 Each run writes `sampling/plumed.dat`, `plumed.log` and `COLVAR` below its output

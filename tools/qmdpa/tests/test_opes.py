@@ -144,3 +144,54 @@ def test_opes_refreshes_force_independently_of_sampling_interval(tmp_path):
             calls.append(count)
     bias.advance(Coupling(), 4)
     assert calls == [1, 0]*4
+
+
+@pytest.mark.parametrize("form", ["harmonic", "well-tempered-metadynamics", "opes-metad"])
+def test_fixed_additive_sampling_uses_qm_selection_and_existing_assembly(tmp_path, form):
+    from test_dispatch import additive, save
+    from qmdpa.dispatch import describe_run, load_run_config
+
+    raw = additive(tmp_path)
+    raw.update(type_symbols=["O", "H"], steps=8, sample_interval=2,
+               qm={"xc": "hf", "basis": "sto-3g"},
+               environment_charge_spin=[0, 1])
+    raw["qm_region"] = {"atom_ids": list(range(1, 7)),
+                        "symbols": ["O", "H", "H"] * 2,
+                        "molecules": [[1, 2, 3], [4, 5, 6]]}
+    raw["environment_region"] = {"atom_ids": [7, 8, 9], "symbols": ["O", "H", "H"],
+                                 "molecules": [[7, 8, 9]]}
+    raw["embedding"].update(atom_ids=[7, 8, 9], charges_e=[-0.8, 0.4, 0.4])
+    raw["cross"]["pairs"] = [{"qm_symbol": a, "environment_symbol": b,
+                                "epsilon_ev": 0.0, "sigma_angstrom": 1.0}
+                               for a in ["O", "H"] for b in ["O", "H"]]
+    base = load_run_config(save(tmp_path, raw))
+    raw["thermostat"] = thermostat()
+    raw["sampling"] = request(tmp_path)
+    if form == "opes-metad":
+        raw["sampling"]["cv"] = raw_cv()
+        raw["sampling"]["bias"] = {
+            "form": form, "sigma": [0.15, 0.04], "sigma_min": [0.06, 0.01],
+            "barrier_ev": 0.1, "bias_factor": 5., "pace_steps": 2}
+    elif form == "well-tempered-metadynamics":
+        raw["sampling"]["bias"] = {"form": form, "sigma_angstrom": 0.1,
+                                     "height_ev": 0.001, "pace_steps": 2,
+                                     "bias_factor": 5.}
+    cfg = load_run_config(save(tmp_path, raw))
+    assert cfg["physics_sha256"] != base["physics_sha256"]
+    assert "region" not in cfg
+    assert cfg["qm_region"] == base["qm_region"]
+    assert cfg["embedding"] == base["embedding"]
+    assert cfg["cross"] == base["cross"]
+    description = describe_run(cfg)
+    assert description["assembly"]["native_pair"] == "zero"
+    assert description["assembly"]["additional_native_bias"] == "plumed"
+    assert set(cfg["sampling"]["cv"]["atom_ids"]) <= set(cfg["qm_region"]["atom_ids"])
+    old_identity = cfg["physics_sha256"]
+    raw["thermostat"]["temperature_K"] = 310.
+    assert load_run_config(save(tmp_path, raw))["physics_sha256"] != old_identity
+    if form == "opes-metad":
+        raw["sampling"]["cv"].update(oxygen_ids=[1, 7], hydrogen_ids=[2, 3, 8, 9])
+    else:
+        raw["sampling"]["cv"]["atom_ids"] = [1, 2, 7]
+    with pytest.raises(ValueError, match="sampling region|fixed QM region"):
+        load_run_config(save(tmp_path, raw))

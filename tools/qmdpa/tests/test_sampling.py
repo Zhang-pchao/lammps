@@ -102,7 +102,7 @@ def test_changed_thermostat_enters_physics_identity(tmp_path, key):
 
 @pytest.mark.parametrize("change", [
     {"periodic": True},
-    {"hamiltonian": "finite-electrostatic-additive"},
+    {"hamiltonian": "finite-electrostatic-reference-subtractive"},
     {"provider": {"engine": "gpu4pyscf", "device": "gpu", "state": {"method": "ground"}}},
     {"provider": {"engine": "pyscf", "device": "cpu", "state": {"method": "rhf-tda"}}},
 ])

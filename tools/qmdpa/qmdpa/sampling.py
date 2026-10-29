@@ -18,7 +18,7 @@ import numpy as np
 from . import metadynamics, opes, water_cv
 from .bias import MIN_DISTANCE_ANGSTROM, NativeBiasAtoms, _coordinates, _scalar
 from .config import file_digest
-from .dynamics import extend_identity, positive_scalar, require_ground_me
+from .dynamics import extend_identity, fixed_sampling_region, positive_scalar, require_ground_sampling
 
 FIX_ID = "qmdpa_sampling"
 
@@ -31,7 +31,7 @@ def _path_token(path):
 
 
 def bind_sampling(config, raw, base_dir):
-    require_ground_me(config)
+    require_ground_sampling(config)
     if "bias" in config:
         raise ValueError("Choose one bias interface: sampling or legacy bias")
     if not isinstance(raw, dict) or set(raw) != {"engine", "kernel", "cv", "bias"}:
@@ -101,7 +101,7 @@ def _distance_cv(cv, config):
             or any(type(i) is not int or i <= 0 for i in ids)
             or len(set(ids)) != len(ids)):
         raise ValueError("sampling.cv requires distinct positive integer atom IDs")
-    if not set(ids) <= set(config["region"]["atom_ids"]):
+    if not set(ids) <= set(fixed_sampling_region(config)["atom_ids"]):
         raise ValueError("All sampling CV atoms must remain in the fixed QM region")
     return {"form": cv["form"], "atom_ids": sorted(ids) if cv["form"] == "distance" else ids}
 

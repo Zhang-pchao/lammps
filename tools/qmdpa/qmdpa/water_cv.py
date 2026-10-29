@@ -13,7 +13,7 @@ import math
 import numpy as np
 
 from .bias import MIN_DISTANCE_ANGSTROM
-from .dynamics import positive_scalar
+from .dynamics import fixed_sampling_region, positive_scalar
 
 FORM = "water-self-ionization-voronoi"
 LABELS = ("qmdpa_logdistance", "qmdpa_ionization")
@@ -40,7 +40,8 @@ def validate_cv(raw, config):
         if set(oxygen + hydrogen) != set(symbols):
             raise ValueError("Water CV must cover the complete declared reactive pool")
     else:
-        symbols = dict(zip(config["region"]["atom_ids"], config["region"]["symbols"], strict=True))
+        region = fixed_sampling_region(config)
+        symbols = dict(zip(region["atom_ids"], region["symbols"], strict=True))
     if any(symbols.get(i) != "O" for i in oxygen) or any(symbols.get(i) != "H" for i in hydrogen):
         raise ValueError("Water CV selections must match O/H atoms in the admitted sampling region")
     return {

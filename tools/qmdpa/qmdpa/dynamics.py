@@ -2,20 +2,33 @@
 # LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
 # Copyright (2026) Pengchao Zhang <pczhang1997@gmail.com>
 # SPDX-License-Identifier: GPL-2.0-only
-"""Native constant-temperature integration for admitted finite ground ME models."""
+"""Native constant-temperature integration for admitted finite ground models."""
 
 import hashlib
 import json
 import math
 
 
-def require_ground_me(config):
+def require_ground_sampling(config):
     if (config["hamiltonian"] not in ("fixed-region-mechanical",
-                                    "finite-reactive-water-mechanical") or config["periodic"]
+                                    "finite-reactive-water-mechanical",
+                                    "finite-electrostatic-additive") or config["periodic"]
             or config["provider"]["engine"] != "pyscf"
             or config["provider"]["device"] != "cpu"
             or config["provider"]["state"]["method"] != "ground"):
-        raise ValueError("Sampling requires finite fixed-region or reactive-water CPU PySCF ground ME")
+        raise ValueError("Sampling requires finite CPU PySCF ground ME or fixed additive EE")
+
+
+def require_ground_me(config):
+    require_ground_sampling(config)
+    if config["hamiltonian"] == "finite-electrostatic-additive":
+        raise ValueError("This execution profile requires ground ME")
+
+
+def fixed_sampling_region(config):
+    """Return the fixed QM selection without changing the Hamiltonian schema."""
+    key = "qm_region" if config["hamiltonian"] == "finite-electrostatic-additive" else "region"
+    return config[key]
 
 
 def positive_scalar(value, name):
@@ -34,7 +47,7 @@ def extend_identity(config, name, value):
 
 
 def bind_thermostat(config, raw):
-    require_ground_me(config)
+    require_ground_sampling(config)
     if not isinstance(raw, dict) or set(raw) != {
             "form", "temperature_K", "damping_fs", "chain_length"}:
         raise ValueError("thermostat requires form, temperature_K, damping_fs and chain_length")
