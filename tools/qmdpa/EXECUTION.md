@@ -107,3 +107,10 @@ failure. Statistics report actual environment pair, communicator, evaluated
 domains and cleanup. The outer driver does not initialize Kokkos; process-exit
 cleanup belongs to the inner provider. Short controlled switching tests are
 engineering evidence, not spontaneous ionization or an efficiency benchmark.
+
+## Named CV increment
+
+See [NAMED_CV.md](NAMED_CV.md) for the scalar/Jacobian and official external
+PLUMED restraint API. This API does not admit a new electronic provider or
+sampled state. Existing native water OPES remains the history owner for its
+configuration; named width maps normalize to its historical positional order.

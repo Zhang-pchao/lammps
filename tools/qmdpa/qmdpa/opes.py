@@ -15,6 +15,8 @@ from pathlib import Path
 from .dynamics import positive_scalar
 from .water_cv import LABELS
 
+WIDTH_NAMES = ("logdistance", "ionization")
+
 FORM = "opes-metad"
 HISTORY_FILE = "STATE"
 
@@ -35,9 +37,14 @@ def validate_bias(raw, config):
         raise ValueError("OPES samples and final step must align with its STATE/deposition cadence")
     widths = {}
     for name in ("sigma", "sigma_min"):
-        if not isinstance(raw[name], list) or len(raw[name]) != len(LABELS):
+        supplied = raw[name]
+        if isinstance(supplied, dict):
+            if set(supplied) != set(WIDTH_NAMES):
+                raise ValueError("Named water OPES widths require logdistance and ionization")
+            supplied = [supplied[key] for key in WIDTH_NAMES]
+        if not isinstance(supplied, list) or len(supplied) != len(LABELS):
             raise ValueError("OPES widths require log-distance and ionization values, in that order")
-        widths[name] = [positive_scalar(v, "sampling.bias." + name) for v in raw[name]]
+        widths[name] = [positive_scalar(v, "sampling.bias." + name) for v in supplied]
     if any(a > b for a, b in zip(widths["sigma_min"], widths["sigma"], strict=True)):
         raise ValueError("OPES sigma_min cannot exceed its initial sigma")
     factor = positive_scalar(raw["bias_factor"], "sampling.bias.bias_factor")

@@ -161,3 +161,10 @@ own recorded numerical and lifecycle qualification.
 Software E/F, native lifecycle and short controlled crossings do not establish
 spontaneous reaction kinetics, free-energy convergence, long-term stability,
 chemical accuracy or a performance advantage.
+
+## Portable inputs
+
+The companion `benchmarks/water/reactive-additive` separates system, shared
+method, explicit runtime and acceptance. It invokes the standard core CLI and
+fresh isolated-water reference preparation. Group/CV/transfer IDs come from
+each system declaration; the finite neutral-water guards remain unchanged.

@@ -110,6 +110,13 @@ energy mentioned above.  The scalar value calculated by this fix is
 Note that other quantities of interest can be output by commands that
 are native to PLUMED.
 
+.. versionchanged:: TBD
+
+Nonconsecutive atom IDs are supported.  Atom numbers in the PLUMED input
+refer to LAMMPS atom IDs.  PLUMED reserves space through the largest ID, so
+compact IDs reduce memory use.  The largest ID must not exceed 2.1 billion;
+atom IDs must remain fixed during a run.
+
 Restrictions
 """"""""""""
 

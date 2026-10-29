@@ -54,8 +54,6 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
 
   if (!atom->tag_enable) error->all(FLERR, "Fix plumed requires atom tags");
 
-  if (atom->tag_consecutive() == 0) error->all(FLERR, "Fix plumed requires consecutive atom IDs");
-
   if (igroup != 0 && comm->me == 0)
     error->warning(FLERR, "Fix group for fix plumed is not 'all'. Group will be ignored.");
 
@@ -194,7 +192,15 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
     error->all(FLERR, "Fix plumed can only handle up to 2.1 billion atoms");
 
   natoms = int(atom->natoms);
-  p->cmd("setNatoms", &natoms);
+  // PLUMED uses atom ID minus one as its global index.  Reserve through the
+  // largest ID so sparse IDs retain their meaning in the PLUMED input.
+  tagint max_tag = 0;
+  for (int i = 0; i < atom->nlocal; i++) max_tag = MAX(max_tag, atom->tag[i]);
+  MPI_Allreduce(MPI_IN_PLACE, &max_tag, 1, MPI_LMP_TAGINT, MPI_MAX, world);
+  if (max_tag > MAXSMALLINT)
+    error->all(FLERR, "Fix plumed requires atom IDs no larger than 2.1 billion");
+  int plumed_natoms = static_cast<int>(max_tag);
+  p->cmd("setNatoms", &plumed_natoms);
 
   double dt = update->dt;
   p->cmd("setTimestep", &dt);
