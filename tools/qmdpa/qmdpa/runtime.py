@@ -185,6 +185,9 @@ def _validate_restart(checkpoint_path, config):
     from .cdft_runtime import validate_frame as validate_cdft_frame
 
     validate_cdft_frame(checkpoint["frame"], config)
+    from .cdft_umbrella_runtime import validate_frame as validate_umbrella_frame
+
+    validate_umbrella_frame(checkpoint["frame"], config)
     from .bias import validate_bias_frame
 
     validate_bias_frame(checkpoint["frame"], config)
@@ -277,6 +280,9 @@ def _compare_restart(frame, checkpoint, config=None):
     from .cdft_runtime import compare_restart as compare_cdft_restart
 
     compare_cdft_restart(frame, reference, {} if config is None else config)
+    from .cdft_umbrella_runtime import compare_restart as compare_umbrella_restart
+
+    compare_umbrella_restart(frame, reference, {} if config is None else config)
     _validate_frame(frame)
     _validate_frame(reference)
     from .state_records import validate_frame_state

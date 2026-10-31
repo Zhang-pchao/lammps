@@ -311,6 +311,8 @@ def load_run_config(path):
     thermostat = raw.pop("thermostat", None)
     has_execution = "execution" in raw
     execution = raw.pop("execution", None)
+    has_umbrella = "cdft_umbrella" in raw
+    umbrella = raw.pop("cdft_umbrella", None)
     raw = _normalize_selection(raw)
     # Legacy schema-1 mechanical configurations predate an explicit model ID.
     hamiltonian = raw.get("hamiltonian", MECHANICAL)
@@ -319,9 +321,11 @@ def load_run_config(path):
     if raw.get("provider", {}).get("state", {}).get("method") == "uks-hirshfeld-cdft":
         if hamiltonian != "finite-electrostatic-additive" or any(
                 (has_gap, has_bias, has_sampling, has_thermostat, has_execution)):
-            raise ValueError("Native cDFT currently requires plain finite additive NVE without bias extensions")
+            raise ValueError("Native cDFT requires plain finite additive NVE without bias extensions")
+        if has_umbrella and has_bias:
+            raise ValueError("The cDFT umbrella cannot be combined with another bias owner")
     module, loader, _, _, _ = _route(hamiltonian)
-    config = (_function(module, "_validate_config")(raw, path) if has_gap or has_selector or has_bias or has_sampling or has_thermostat or has_execution
+    config = (_function(module, "_validate_config")(raw, path) if has_gap or has_selector or has_bias or has_sampling or has_thermostat or has_execution or has_umbrella
               else _function(module, loader)(path))
     if path.read_bytes() != original:
         raise ValueError("Configuration changed while selecting and validating its Hamiltonian")
@@ -351,6 +355,10 @@ def load_run_config(path):
         from .electronic_gap import bind
 
         bind(config, gap, path.parent)
+    if has_umbrella:
+        from .cdft_umbrella import bind
+
+        bind(config, umbrella, path.parent)
     return config
 
 
@@ -437,6 +445,12 @@ def describe_run(config):
         description["assembly"] = {"native_pair": "zero", "external_quantity": "sampled-surface-plus-static-gap-restraint"}
         description["energy_contract"]["native_baseline"] = "zero"
         description["energy_contract"]["external_energy"] = "complete-sampled-total-plus-gap-restraint"
+    if "cdft_umbrella" in config:
+        description["cdft_umbrella"] = config["cdft_umbrella"]
+        description["assembly"] = {"native_pair": "zero",
+                                  "external_quantity": "sampled-surface-plus-static-constrained-gap-umbrella"}
+        description["energy_contract"]["native_baseline"] = "zero"
+        description["energy_contract"]["external_energy"] = "complete-sampled-total-plus-umbrella-restraint"
     if mechanical and config["qm"].get("boundary") == "periodic-same-cell":
         description["boundaries"] = {
             "full_low": "periodic-3d", "region_low": "periodic-same-cell",

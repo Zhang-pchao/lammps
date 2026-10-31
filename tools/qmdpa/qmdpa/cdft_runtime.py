@@ -39,13 +39,17 @@ class CDFTPairCalculator:
     def __init__(self, config, provider, environment, cross, torch=None):
         self.config = deepcopy(config)
         self.provider, self.environment, self.cross, self.torch = provider, environment, cross, torch
+        # The umbrella owns one static restraint over the constrained gap. It is
+        # installed by the runtime initializer and adds its energy and force
+        # exactly once to the sampled surface total.
+        self.bias = None
         self.clear()
 
     def clear(self):
         self.last = None
         self.provider.clear()
 
-    def evaluate(self, geometry):
+    def evaluate(self, geometry, step=0):
         from .additive import AdditiveCalculator
         from .inference import strict_runtime_state
         from .multistate_coupling import _CallCache, _SurfaceBackend
@@ -71,7 +75,15 @@ class CDFTPairCalculator:
             if self.torch is not None:
                 strict_runtime_state(self.torch)
             self.last = (geometry, terms, quantum, cv)
-            return states[cfg["provider"]["state"]["reference"]["sampled_state"]]
+            sampled = states[cfg["provider"]["state"]["reference"]["sampled_state"]]
+            if self.bias is None:
+                return sampled
+            # The umbrella is a static restraint on the observed gap. Its energy
+            # and force are added to the sampled surface exactly once.
+            bias = self.bias.evaluate(cv, step)
+            total = Evaluation(sampled.energy+bias["bias_energy_eV"],
+                               sampled.forces+np.asarray(bias["forces_eV_per_angstrom"]))
+            return total
         except BaseException:
             self.clear()
             raise
@@ -111,7 +123,16 @@ def make_coupling(lmp, comm, config):
 
     _root_call(comm, build)
     full = full_region(config)
-    return AdditiveExternalCoupling(
+
+    class CDFTExternalCoupling(AdditiveExternalCoupling):
+        """Pass the accepted step so the umbrella can advance its own history."""
+
+        _calculator_kind = "constrained-pair"
+
+        def _evaluate_geometry(self, geometry):
+            return self.calculator.evaluate(geometry, int(self.lmp.extract_global("ntimestep")))
+
+    return CDFTExternalCoupling(
         lmp, FixedRegion(tuple(full["atom_ids"]), tuple(full["symbols"])), calculator,
         type_symbols=config["type_symbols"], comm=comm, state_observer=calculator,
         fix_id="qmdpa_cdft_pair")
@@ -227,6 +248,18 @@ def validate_frame(frame, config):
     if record["cv"] != cv.record():
         raise ValueError("cDFT same-frame gap or Jacobian differs from complete states")
     total = totals[ref["sampled_state"]]
+    # The cDFT provider owns the sampled surface only. When a bias owner is
+    # active, the native total is the sampled surface plus that bias, and the
+    # bias owner is responsible for asserting that assembly. Checking the
+    # bare sampled surface against the native total here would contradict the
+    # bias owner and would reject every biased run.
+    from .cdft_umbrella import enabled as umbrella_enabled
+
+    if umbrella_enabled(config):
+        # The umbrella owner validates the native total against the sampled
+        # surface plus its own restraint. Nothing is asserted here, so that
+        # the two owners do not both claim the native total.
+        return
     _close(frame["potential_eV"], total.energy, 1e-7, "native sampled energy")
     atoms = {a["id"]: a for a in frame["atoms"]}
     _close([atoms[i]["f"] for i in geometry.atom_ids], total.forces, 1e-5, "native sampled force")
