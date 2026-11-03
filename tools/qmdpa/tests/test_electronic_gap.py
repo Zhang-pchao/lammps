@@ -20,6 +20,13 @@ from qmdpa.named_cv import NamedCVSchema
 __all__ = ["case"]
 
 
+@pytest.fixture(autouse=True)
+def synthetic_package_identity(monkeypatch):
+    """These configuration-only fixtures never load a real engine."""
+    monkeypatch.setattr("qmdpa.config.importlib.metadata.version",
+                        lambda name: "test-version")
+
+
 def extension(tmp_path, configuration):
     q = configuration.get("region", configuration.get("qm_region"))
     e = configuration.get(

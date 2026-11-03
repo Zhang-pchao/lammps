@@ -147,11 +147,14 @@ def test_opes_refreshes_force_independently_of_sampling_interval(tmp_path):
 
 
 @pytest.mark.parametrize("form", ["harmonic", "well-tempered-metadynamics", "opes-metad"])
-def test_fixed_additive_sampling_uses_qm_selection_and_existing_assembly(tmp_path, form):
+def test_fixed_additive_sampling_uses_qm_selection_and_existing_assembly(tmp_path, form, monkeypatch):
     from test_dispatch import additive, save
 
     from qmdpa.dispatch import describe_run, load_run_config
 
+    # The model is a placeholder; the test checks configuration/assembly only.
+    monkeypatch.setattr("qmdpa.config.importlib.metadata.version",
+                        lambda name: "test-version")
     raw = additive(tmp_path)
     raw.update(type_symbols=["O", "H"], steps=8, sample_interval=2,
                qm={"xc": "hf", "basis": "sto-3g"},
