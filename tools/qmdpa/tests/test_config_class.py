@@ -7,8 +7,14 @@ import math
 
 import pytest
 
-from qmdpa.config_class import (FORM, KB_EV_PER_K, decompose, effective_samples,
-                                partition_counts, wilson_interval)
+from qmdpa.config_class import (
+    FORM,
+    KB_EV_PER_K,
+    decompose,
+    effective_samples,
+    partition_counts,
+    wilson_interval,
+)
 
 
 def samples():

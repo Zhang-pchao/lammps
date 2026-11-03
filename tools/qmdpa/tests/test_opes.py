@@ -149,6 +149,7 @@ def test_opes_refreshes_force_independently_of_sampling_interval(tmp_path):
 @pytest.mark.parametrize("form", ["harmonic", "well-tempered-metadynamics", "opes-metad"])
 def test_fixed_additive_sampling_uses_qm_selection_and_existing_assembly(tmp_path, form):
     from test_dispatch import additive, save
+
     from qmdpa.dispatch import describe_run, load_run_config
 
     raw = additive(tmp_path)

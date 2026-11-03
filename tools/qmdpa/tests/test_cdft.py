@@ -10,9 +10,17 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from qmdpa.cdft import (FORM, METHOD, HARTREE_EV, RUNTIME_SOURCES, settings,
-                        validate_reference, atomic_reference_digest, CDFTProvider)
-from qmdpa.cdft_runtime import CDFTPairCalculator, attach_frame, validate_frame, compare_restart
+from qmdpa.cdft import (
+    FORM,
+    HARTREE_EV,
+    METHOD,
+    RUNTIME_SOURCES,
+    CDFTProvider,
+    atomic_reference_digest,
+    settings,
+    validate_reference,
+)
+from qmdpa.cdft_runtime import CDFTPairCalculator, attach_frame, compare_restart, validate_frame
 from qmdpa.core import Evaluation, Geometry
 from qmdpa.embedding import EmbeddedEvaluation, FixedEmbeddingCharges
 from qmdpa.named_cv import digest
@@ -248,6 +256,7 @@ def test_provider_rejects_actual_runtime_mismatch_before_solver(monkeypatch):
 
 def test_legacy_mechanical_entry_rejects_cdft(tmp_path):
     import json
+
     from qmdpa.config import file_digest, load_config
 
     _, cfg, _ = fixture()

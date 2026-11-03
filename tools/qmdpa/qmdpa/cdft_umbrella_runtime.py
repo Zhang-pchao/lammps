@@ -34,9 +34,8 @@ def identity(config):
 def initialize(coupling, config, output, previous):
     if not enabled(config):
         return
-    from .external_cv import ExternalCVBias
-
     from .cdft_umbrella import restraint
+    from .external_cv import ExternalCVBias
 
     calculator = coupling.calculator
     umb = config["cdft_umbrella"]
@@ -172,7 +171,6 @@ def _validate_native_total(frame, config, record):
     energy, and the native total force is the sampled state force plus the
     restraint pullback.
     """
-    from .cdft_runtime import ROLES
 
     state = frame.get("cdft_states")
     if not isinstance(state, dict) or "states" not in state:

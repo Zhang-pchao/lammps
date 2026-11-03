@@ -8,7 +8,7 @@ from copy import deepcopy
 
 import numpy as np
 
-from .cdft import METHOD, ROLES, HARTREE_EV, numeric, validate_diagnostics
+from .cdft import HARTREE_EV, METHOD, ROLES, numeric, validate_diagnostics
 from .core import Evaluation
 from .electronic_gap import gap_frame, native_geometry
 from .named_cv import NamedCVSchema, digest

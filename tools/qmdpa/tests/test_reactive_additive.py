@@ -11,7 +11,11 @@ import numpy as np
 import pytest
 from test_molecular_additive import AnalyticEmbedded
 from test_reactive_config import (
-    document as mechanical_document, frame, load,
+    document as mechanical_document,
+)
+from test_reactive_config import (
+    frame,
+    load,
     numerical_versions,  # noqa: F401 - Reuse package metadata without backend imports.
 )
 from test_reactive_sampling import sampling

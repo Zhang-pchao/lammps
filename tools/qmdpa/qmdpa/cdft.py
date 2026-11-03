@@ -8,11 +8,11 @@ PySCF owns the solver and all analytic derivatives. This adapter owns units,
 atom/state/runtime identity, same-frame records and fail-closed conversion.
 """
 
+import hashlib
+import importlib
+import re
 from copy import deepcopy
 from pathlib import Path
-import importlib
-import hashlib
-import re
 
 import numpy as np
 
@@ -230,11 +230,12 @@ def validate_diagnostics(data, reference, role):
 
 def runtime_identity():
     """Hash actual imported solver sources and their installed native libraries."""
-    from .config import file_digest
-    from pyscf import lib
     import numpy
-    import scipy
     import pyscf
+    import scipy
+    from pyscf import lib
+
+    from .config import file_digest
 
     sources = {name: file_digest(importlib.import_module(name).__file__) for name in RUNTIME_SOURCES}
     libraries = {p.name: file_digest(p) for p in sorted(Path(lib.__file__).parent.glob("lib*.so"))}
@@ -245,7 +246,7 @@ def runtime_identity():
 
 
 def _method(geometry, options, environment=None, charges=None):
-    from pyscf import gto, dft, qmmm
+    from pyscf import dft, gto, qmmm
 
     if geometry.periodic or (environment is not None and environment.periodic):
         raise ValueError("cDFT admits finite molecular geometries only")

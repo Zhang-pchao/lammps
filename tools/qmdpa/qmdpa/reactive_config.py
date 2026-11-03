@@ -15,7 +15,10 @@ from .dynamics import extend_identity
 from .inference import COMPRESSED_PROFILE, RAW_PROFILE
 from .reactive_mechanical import ReactiveWaterGuard, ReactiveWaterMechanicalMixer
 from .reactive_water import (
-    ADDITIVE_HAMILTONIAN, HAMILTONIAN, REACTIVE_HAMILTONIANS, ProtonChannel, ReactiveWaterFamily,
+    ADDITIVE_HAMILTONIAN,
+    REACTIVE_HAMILTONIANS,
+    ProtonChannel,
+    ReactiveWaterFamily,
 )
 from .selection_config import FixedGroup, read_json
 from .water_reference import reference_identity, validate_reference
@@ -140,6 +143,7 @@ def _validate_config(raw, path):
     values["hamiltonian"] = hamiltonian
     if additive:
         from types import SimpleNamespace
+
         from .additive_config import cross_parameters
         from .embedding import FixedEmbeddingCharges
         from .molecular_additive import subset_charges

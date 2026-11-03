@@ -10,7 +10,10 @@ from .additive_cli import _zero_pair  # noqa: F401 - Unified route reuses this e
 def _reactive_coupling(lmp, comm, config, *, provider_resources=None):
     from .backends import DeepMDBackend
     from .inference import (
-        COMPRESSED_PROFILE, StrictRawCalculator, prepare_raw_inference, strict_runtime_state,
+        COMPRESSED_PROFILE,
+        StrictRawCalculator,
+        prepare_raw_inference,
+        strict_runtime_state,
     )
     from .lammps import AdditiveExternalCoupling
     from .providers import make_qm_provider

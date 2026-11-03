@@ -15,6 +15,7 @@ jobs:
   contracts:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.10', '3.12']
     steps:
@@ -25,7 +26,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install './tools/qmdpa[test]'
-      - name: Lint and pure interface tests
-        run: |
-          python -m ruff check --select E4,E7,E9,F,I tools/qmdpa
-          python -m pytest tools/qmdpa/tests -q
+      - name: Lint coupling sources
+        run: python -m ruff check --select E4,E7,E9,F,I tools/qmdpa
+      - name: Run pure interface tests
+        if: success() || failure()
+        run: python -m pytest tools/qmdpa/tests -q

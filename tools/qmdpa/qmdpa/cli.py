@@ -69,7 +69,12 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             )
     from lammps import lammps
 
-    from .execution import native_arguments, register_native_cleanup, uses_native_domains, verify_native
+    from .execution import (
+        native_arguments,
+        register_native_cleanup,
+        uses_native_domains,
+        verify_native,
+    )
 
     try:
         from mpi4py import MPI
@@ -213,7 +218,6 @@ def _run(config_path, output, *, restart, config_loader, setup_pair, make_coupli
             capture_thermostat(lmp, frame, comm, config)
             _root_call(comm, lambda frame=frame: _attach_state(frame, coupling, config))
             _root_call(comm, lambda frame=frame: capture_gap(frame, coupling, config))
-            from .cdft_umbrella_runtime import capture as capture_umbrella
 
             _root_call(comm, lambda frame=frame: capture_umbrella(frame, coupling, config))
             step = int(lmp.extract_global("ntimestep"))

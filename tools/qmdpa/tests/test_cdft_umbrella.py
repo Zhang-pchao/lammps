@@ -9,10 +9,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from qmdpa.cdft_umbrella import FORM, GAP_NAME, bias_energy, bind, enabled, restraint
 from qmdpa.cdft import HARTREE_EV
-from qmdpa.cdft_umbrella_runtime import (capture, close, compare_restart, identity,
-                                         validate_frame)
+from qmdpa.cdft_umbrella import FORM, GAP_NAME, bias_energy, bind, enabled, restraint
+from qmdpa.cdft_umbrella_runtime import capture, compare_restart, identity, validate_frame
 from qmdpa.core import Evaluation
 from qmdpa.named_cv import digest
 
@@ -41,7 +40,6 @@ def fixture(tmp_path):
 
 def config_with(raw, tmp_path):
     """Build the smallest configuration the umbrella binder accepts."""
-    from qmdpa.cdft import FORM as CDFT_FORM, RUNTIME_SOURCES
 
     config = {"hamiltonian": "finite-electrostatic-additive", "periodic": False,
               "provider": {"engine": "pyscf", "device": "cpu",
@@ -111,8 +109,8 @@ class FakeCalculator:
 
     def _frame(self):
         from qmdpa.cdft_runtime import schema
-        from qmdpa.electronic_gap import gap_frame
         from qmdpa.core import Geometry
+        from qmdpa.electronic_gap import gap_frame
 
         geometry = Geometry(self.geometry["atom_ids"], self.geometry["symbols"],
                             np.asarray(self.geometry["positions"]))
@@ -127,7 +125,6 @@ def umbrella_config(tmp_path):
     raw, directory = fixture(tmp_path)
     config = config_with(raw, tmp_path)
     # The binder needs the real cDFT schema, which needs the reference digest.
-    from qmdpa.cdft_runtime import schema
 
     config["provider"]["state"]["reference"] = reference()
     config["qm_region"] = {"atom_ids": [1, 2], "symbols": ["O", "H"],

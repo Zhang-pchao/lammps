@@ -19,7 +19,6 @@ not qualify any chemistry, does not open electronic OPES, and does not admit
 dynamic electronic partition switching.
 """
 
-from copy import deepcopy
 from pathlib import Path
 
 import numpy as np

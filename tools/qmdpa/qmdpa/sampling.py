@@ -18,7 +18,12 @@ import numpy as np
 from . import metadynamics, opes, water_cv
 from .bias import MIN_DISTANCE_ANGSTROM, NativeBiasAtoms, _coordinates, _scalar
 from .config import file_digest
-from .dynamics import extend_identity, fixed_sampling_region, positive_scalar, require_ground_sampling
+from .dynamics import (
+    extend_identity,
+    fixed_sampling_region,
+    positive_scalar,
+    require_ground_sampling,
+)
 
 FIX_ID = "qmdpa_sampling"
 
