@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 ENTRY = Path(__file__).resolve().parents[2]
@@ -69,6 +70,18 @@ def create_python_environment(base_python, destination, env):
     if any("\n" in path or "\r" in path for path in base_sites):
         raise ValueError("Base package paths must fit on one .pth line")
     (site / "plm-pimd-base.pth").write_text("\n".join(base_sites) + "\n")
+
+
+def copy_plumed_source(source, destination):
+    """Preserve source symlinks and publish the copied directory atomically."""
+    with tempfile.TemporaryDirectory(
+        prefix="plumed-copy-", dir=destination.parent
+    ) as temporary:
+        staging = Path(temporary) / "source"
+        shutil.copytree(
+            source, staging, symlinks=True, ignore=shutil.ignore_patterns(".git")
+        )
+        staging.rename(destination)
 
 
 def main():
@@ -344,9 +357,7 @@ def main():
         def build_plumed():
             build = builds / "plumed"
             if not build.exists():
-                shutil.copytree(
-                    sources / "plumed", build, ignore=shutil.ignore_patterns(".git")
-                )
+                copy_plumed_source(sources / "plumed", build)
             configure_env = dict(
                 env, CXX=shutil.which("mpicxx"), CC=shutil.which("mpicc")
             )

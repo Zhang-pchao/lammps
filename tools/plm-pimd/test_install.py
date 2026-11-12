@@ -62,5 +62,24 @@ class PythonEnvironmentTest(unittest.TestCase):
             )
 
 
+class PlumedSourceTest(unittest.TestCase):
+    def test_recursive_source_symlink_is_preserved(self):
+        with tempfile.TemporaryDirectory(prefix="plm-pimd-source-") as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            (source / "src/include").mkdir(parents=True)
+            (source / ".git").mkdir()
+            (source / "src/include/plumed").symlink_to("..", target_is_directory=True)
+            (source / "src/header.h").write_text("// Source marker\n")
+            destination = root / "build"
+            INSTALL.copy_plumed_source(source, destination)
+            link = destination / "src/include/plumed"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(os.readlink(link), "..")
+            self.assertEqual((link / "header.h").read_text(), "// Source marker\n")
+            self.assertFalse((destination / ".git").exists())
+            self.assertEqual({p.name for p in root.iterdir()}, {"source", "build"})
+
+
 if __name__ == "__main__":
     unittest.main()
