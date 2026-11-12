@@ -1,5 +1,8 @@
 This is the LAMMPS software package.
 
+The PLM-PIMD fork integration entry is tools/plm-pimd/README.md.
+It provides a locked multi-component installation and functional checks.
+
 LAMMPS stands for Large-scale Atomic/Molecular Massively Parallel
 Simulator.
 

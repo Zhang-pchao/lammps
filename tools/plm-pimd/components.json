@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "milestone": "plm-pimd-api31-v1",
+  "components": {
+    "lammps": {
+      "repository": "https://github.com/Zhang-pchao/lammps.git",
+      "commit": "self",
+      "branch": "feature/pimd-adaptive",
+      "role": "native integration entry"
+    },
+    "deepmd": {
+      "repository": "https://github.com/Zhang-pchao/deepmd-kit.git",
+      "commit": "7485b6d3de641663f41f6df06523d60748f6d78a",
+      "branch": "compat/lammps-mixed",
+      "role": "API31 model provider and KOKKOS plugin"
+    },
+    "plumed": {
+      "repository": "https://github.com/Zhang-pchao/plumed2.git",
+      "commit": "08430e0ac88d0f72090e078e29e6f307b3115463",
+      "branch": "feature/region-defect-monitor",
+      "role": "reactive regional CV and shared bias"
+    },
+    "molsimflow": {
+      "repository": "https://github.com/Zhang-pchao/molsimflow.git",
+      "commit": "937a93e497585291c6f6933252cd4958c83fb206",
+      "branch": "feature/pimd-region-diagnostics",
+      "role": "optional PIMD analysis"
+    },
+    "ipi": {
+      "repository": "https://github.com/Zhang-pchao/i-pi.git",
+      "commit": "f9b4c1ca63633b4f4bd055a89ed5d9d47ed37206",
+      "branch": "feature/plm-pimd-reference",
+      "role": "optional reference implementation"
+    }
+  },
+  "upstream": {
+    "deepmd": "5485b3abccb221a304af5630545e02fd90d272f0",
+    "lammps": "d291d572cf3c73a8a720774b78482a7c931304ca"
+  },
+  "deepmd_python_version": "3.2.1.dev71+g7485b6d3",
+  "requirements": {
+    "torch": "2.11.0",
+    "python_qualified": "3.12",
+    "deepmd_c_api": 31,
+    "cuda_toolkits_qualified": [
+      "12.6",
+      "12.9"
+    ],
+    "gpu_architectures_qualified": [
+      "70",
+      "86"
+    ]
+  },
+  "model_scope": {
+    "default_evaluator": "full",
+    "family": "short-range canonical DPA4C",
+    "conditional_air_selected_energy": false
+  },
+  "qualification": {
+    "scope": "short functional PIMD and shared-CV bias execution, model numerical compatibility, MPI and restart",
+    "bias_contraction": 0.5,
+    "beads": 4,
+    "scientific_fes": false,
+    "performance_speedup": false
+  }
+}

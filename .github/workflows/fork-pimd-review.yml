@@ -1,7 +1,7 @@
 name: Fork PIMD review
 on:
   push:
-    branches: [codex/lammps-pimd-review]
+    branches: [codex/lammps-pimd-review, feature/pimd-adaptive]
 permissions:
   contents: read
 concurrency:
@@ -27,7 +27,7 @@ jobs:
       - name: Configure
         run: >-
           cmake -S cmake -B build -D CMAKE_BUILD_TYPE=Release
-          -D BUILD_MPI=on -D BUILD_OMP=off -D ENABLE_TESTING=on
+          -D BUILD_MPI=on -D BUILD_OMP=off -D BUILD_SHARED_LIBS=on -D ENABLE_TESTING=on
           -D MPIEXEC_MAX_NUMPROCS=4
           -D DOWNLOAD_POTENTIALS=off -D PKG_REPLICA=on -D PKG_MISC=on
           -D PKG_GRANULAR=on -D PKG_DPD-BASIC=on -D PKG_EFF=on
@@ -52,7 +52,7 @@ jobs:
       OMP_NUM_THREADS: 1
       OPENBLAS_NUM_THREADS: 1
       OMPI_MCA_rmaps_base_oversubscribe: 1
-      PLUMED_REVISION: 19b3d1ac5c2a3d109d3b7ce0c1590f228407a031
+      PLUMED_REVISION: 08430e0ac88d0f72090e078e29e6f307b3115463
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -77,8 +77,8 @@ jobs:
         run: |
           export PKG_CONFIG_PATH="$RUNNER_TEMP/plumed-install/lib/pkgconfig"
           cmake -S cmake -B build-coupling -D CMAKE_BUILD_TYPE=Release \
-            -D BUILD_MPI=on -D BUILD_OMP=off -D ENABLE_TESTING=on \
-            -D MPIEXEC_MAX_NUMPROCS=6 -D DOWNLOAD_POTENTIALS=off \
+            -D BUILD_MPI=on -D BUILD_OMP=off -D BUILD_SHARED_LIBS=on -D ENABLE_TESTING=on \
+            -D MPIEXEC_MAX_NUMPROCS=8 -D DOWNLOAD_POTENTIALS=off \
             -D PKG_REPLICA=on -D PKG_PLUMED=on -D PKG_MISC=on \
             -D DOWNLOAD_PLUMED=off -D PLUMED_MODE=shared
       - name: Build coupling tests
@@ -86,11 +86,13 @@ jobs:
           cmake --build build-coupling -j 2 --target
           test_plumed_pimd_mpi test_plumed_pimd_normalization_mpi
           test_plumed_path_contraction_mpi
+          test_pimd_adaptive_map test_pimd_adaptive_mpi
+          test_plumed_pimd_adaptive_mpi
       - name: Run PLUMED coupling, virial and contraction tests
         run: |
           export LD_LIBRARY_PATH="$RUNNER_TEMP/plumed-install/lib:${LD_LIBRARY_PATH:-}"
           export PLUMED_KERNEL="$RUNNER_TEMP/plumed-install/lib/libplumedKernel.so"
-          for group in PlumedPIMDMPI PlumedPIMDNormalizationMPI PlumedPathContractionMPI PlumedPathContractionOddMPI; do
+          for group in PlumedPIMDMPI PlumedPIMDNormalizationMPI PlumedPathContractionMPI PlumedPathContractionOddMPI PIMDAdaptiveMap PIMDAdaptiveMPI PlumedPIMDAdaptiveMPI; do
             ctest --test-dir build-coupling -V --output-on-failure --no-tests=error -R "^${group}$"
           done
       - uses: actions/upload-artifact@v4
@@ -116,7 +118,7 @@ jobs:
       - name: Configure KOKKOS Serial
         run: >-
           cmake -S cmake -B build-kokkos -D CMAKE_BUILD_TYPE=Release
-          -D BUILD_MPI=on -D BUILD_OMP=off -D ENABLE_TESTING=on
+          -D BUILD_MPI=on -D BUILD_OMP=off -D BUILD_SHARED_LIBS=on -D ENABLE_TESTING=on
           -D DOWNLOAD_POTENTIALS=off -D PKG_KOKKOS=on
           -D Kokkos_ENABLE_SERIAL=on -D Kokkos_ENABLE_OPENMP=off
       - name: Build native dump tests
