@@ -36,9 +36,25 @@ class PythonEnvironmentTest(unittest.TestCase):
             (base_site / "plm_dependency_marker.py").write_text(
                 "value = 'selected-base'\n"
             )
+            ninja_directory = base / "ninja tools"
+            ninja_directory.mkdir()
+            ninja = ninja_directory / "ninja"
+            ninja.write_text("#!/bin/sh\nprintf '%s\\n' selected-base-ninja\n")
+            ninja.chmod(0o755)
+            (base_site / "ninja.py").write_text(
+                "BIN_DIR = " + repr(str(ninja_directory)) + "\n"
+            )
             project = root / "project environment"
             INSTALL.create_python_environment(base_python, project, env)
             python = project / "bin/python"
+            INSTALL.link_ninja(python, env)
+            project_env = dict(
+                env, PATH=str(project / "bin") + os.pathsep + env["PATH"]
+            )
+            self.assertEqual(
+                subprocess.check_output(["ninja"], text=True, env=project_env).strip(),
+                "selected-base-ninja",
+            )
             command = [
                 str(python),
                 "-c",

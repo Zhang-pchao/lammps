@@ -72,6 +72,18 @@ def create_python_environment(base_python, destination, env):
     (site / "plm-pimd-base.pth").write_text("\n".join(base_sites) + "\n")
 
 
+def link_ninja(python, env):
+    """Expose the selected Ninja package's executable in the project environment."""
+    directory = subprocess.check_output(
+        [str(python), "-c", "import ninja; print(ninja.BIN_DIR)"], text=True, env=env
+    ).strip()
+    source = (Path(directory) / "ninja").resolve(strict=True)
+    destination = python.parent / "ninja"
+    if destination.resolve() != source:
+        destination.unlink(missing_ok=True)
+        destination.symlink_to(source)
+
+
 def copy_plumed_source(source, destination):
     """Preserve source symlinks and publish the copied directory atomically."""
     with tempfile.TemporaryDirectory(
@@ -296,6 +308,7 @@ def main():
             )
 
         stage("python-environment", python_environment)
+        link_ninja(python, env)
 
         def deepmd_python():
             build_env = dict(
