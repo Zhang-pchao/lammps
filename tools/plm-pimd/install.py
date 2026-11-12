@@ -203,7 +203,9 @@ def main():
             + "."
             + str(int(args.cuda_arch) % 10),
         )
-        env["PATH"] = str(args.cuda_root / "bin") + os.pathsep + env["PATH"]
+        env["PATH"] = os.pathsep.join(
+            [str(args.prefix / "env/bin"), str(args.cuda_root / "bin"), env["PATH"]]
+        )
         sources = args.workspace / "sources"
         builds = args.workspace / "builds"
         sources.mkdir(exist_ok=True)
@@ -288,6 +290,7 @@ def main():
                     "setuptools>=68",
                     "wheel",
                     "tomli",
+                    "ninja",
                 ],
                 env=env,
             )
