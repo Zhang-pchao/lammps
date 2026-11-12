@@ -10,7 +10,7 @@ concurrency:
 jobs:
   native:
     if: github.repository == 'Zhang-pchao/lammps'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +29,7 @@ jobs:
           cmake -S cmake -B build -D CMAKE_BUILD_TYPE=Release
           -D BUILD_MPI=on -D BUILD_OMP=off -D BUILD_SHARED_LIBS=on -D ENABLE_TESTING=on
           -D MPIEXEC_MAX_NUMPROCS=4
+          -D MPIEXEC_PREFLAGS="--oversubscribe;--bind-to;none"
           -D DOWNLOAD_POTENTIALS=off -D PKG_REPLICA=on -D PKG_MISC=on
           -D PKG_GRANULAR=on -D PKG_DPD-BASIC=on -D PKG_EFF=on
           -D LAMMPS_SIZES=${{ matrix.sizes }}
