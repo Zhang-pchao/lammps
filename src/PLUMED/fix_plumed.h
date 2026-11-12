@@ -58,6 +58,7 @@ class FixPlumed : public Fix {
   };
 
   int path_contraction_flag;
+  int physical_path_required = 0;
   double path_contraction;
   std::vector<double> contracted_positions, contracted_forces, contraction_mean;
 

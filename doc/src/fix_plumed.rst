@@ -12,7 +12,7 @@ Syntax
 
 * ID, group-ID are documented in :doc:`fix <fix>` command
 * plumed = style name of this fix command
-* keyword = *plumedfile* or *outfile* or *path_integral* or *pimd_fix* or *path_contraction*
+* keyword = *plumedfile* or *outfile* or *path_integral* or *pimd_fix* or *path_contraction* or *path_coordinates*
 
   .. parsed-literal::
 
@@ -21,6 +21,7 @@ Syntax
        *path_integral* arg = *off*, *coordinate_mean*, *cv_mean*, or *bias_mean* (default: off)
        *pimd_fix* arg = ID of the coupled fix pimd/langevin
        *path_contraction* arg = fixed coordinate contraction in [0,1] for cv_mean (optional)
+       *path_coordinates* arg = *auto* or *physical* (default: auto)
 
 Examples
 """"""""
@@ -85,7 +86,9 @@ be specified by the user in the PLUMED input file.
 .. versionadded:: TBD
 
 The *coordinate_mean*, *cv_mean*, and *bias_mean* modes support normal-mode
-PIMD with NVT, NPH, or NPT and multiple MPI ranks per bead.
+PIMD with NVT, NPH, or NPT and multiple MPI ranks per bead. They also
+support fixed-cell :doc:`fix pimd/mixed <fix_pimd_mixed>`; its mixed nuclear
+Hamiltonian and force normalization are described on that command page.
 
 For these path-integral modes, :doc:`fix pimd/langevin <fix_pimd>` uses
 the ring-polymer inverse temperature :math:`\beta/P` with unscaled physical
@@ -251,6 +254,18 @@ requires an explicit regularization; this example does not enable automatic
 switching between bias modes.
 
 .. versionadded:: TBD
+
+.. versionadded:: TBD
+
+Use *path_coordinates physical* when an input, such as a confinement wall,
+requires the original physical bead coordinates. This requires *cv_mean* or
+*bias_mean* without nonunit coordinate contraction. A centroid view or
+*path_contraction* smaller than one is rejected. The default *auto* preserves
+the coordinate convention selected by the coupling and contraction options.
+This check does not add a second coordinate view or bias history, and it does
+not decide whether the supplied CV or restraint is physically appropriate.
+To combine a contracted reaction bias with a physical-bead wall, a separate
+qualified two-view coupling is needed; that combination is not supplied here.
 
 The optional *path_contraction* keyword changes only the coordinates supplied
 to PLUMED in *path_integral cv_mean* mode.  For a fixed parameter
@@ -473,7 +488,8 @@ The *coordinate_mean*, *cv_mean*, and *bias_mean* modes require
 nvt*, or *method nmpimd* and *ensemble nvt*, *nph*, or *npt*.  Normal-mode
 pressure ensembles use the BZP barostat supported by fix pimd/langevin;
 normal-mode NVE and Cartesian-PIMD pressure coupling are not supported.  All
-three modes require a fixed atom count, consecutive atom IDs, and an atom map,
+three modes also support :doc:`fix pimd/mixed <fix_pimd_mixed>` at fixed cell,
+without path contraction or pressure coupling. All require a fixed atom count, consecutive atom IDs, and an atom map,
 and can distribute each bead over multiple MPI ranks.  The *cv_mean* and
 *bias_mean* modes additionally require multiple LAMMPS partitions.  A
 *cv_mean* input must explicitly form a complete-path bias with

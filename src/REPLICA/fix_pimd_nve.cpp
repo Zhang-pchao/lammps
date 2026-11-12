@@ -1580,15 +1580,17 @@ void FixPIMDNVE::unregister_bias(PIMDBiasRegistration &registration)
 
 void FixPIMDNVE::validate_bias_order(Fix *adapter) const
 {
+  const auto &fixes = modify->get_fix_list();
   int core_index = -1, adapter_index = -1;
-  for (int i = 0; i < modify->nfix; ++i) {
-    if (modify->fix[i] == this) core_index = i;
-    if (modify->fix[i] == adapter) adapter_index = i;
+  const int nfix = static_cast<int>(fixes.size());
+  for (int i = 0; i < nfix; ++i) {
+    if (fixes[i] == this) core_index = i;
+    if (fixes[i] == adapter) adapter_index = i;
   }
   int invalid = (core_index < 0) || (adapter_index <= core_index) ? 1 : 0;
   if (!invalid)
-    for (int i = adapter_index + 1; i < modify->nfix; ++i)
-      if ((modify->fmask[i] & POST_FORCE) && (strcmp(modify->fix[i]->style, "GROUP") != 0))
+    for (int i = adapter_index + 1; i < nfix; ++i)
+      if ((modify->get_fix_mask(fixes[i]) & POST_FORCE) && (strcmp(fixes[i]->style, "GROUP") != 0))
         invalid = 2;
   MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
   if (invalid == 1)

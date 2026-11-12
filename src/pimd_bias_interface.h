@@ -65,8 +65,10 @@ struct PIMDBiasCoordinates {
 // Physical kinetic estimators are captured by the core before subsequent
 // post-force fixes. This submission updates biased pressure without redefining
 // those estimators to include arbitrary external force modifiers.
-// The core applies the dynamical factor P exactly once and completes force
-// processing before returning. No caller may transform atom->f itself.
+// A uniform-bead core applies the dynamical factor P exactly once. A mixed
+// core sums copy gradients into each independent bead and multiplies by its
+// bead count, consistent with its fictitious mass. Force processing completes
+// before returning. No caller may transform atom->f itself.
 struct PIMDBiasSubmission {
   std::uint64_t generation;
   int nlocal;

@@ -140,6 +140,13 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
       if (!std::isfinite(path_contraction) || path_contraction < 0.0 || path_contraction > 1.0)
         error->all(FLERR, "Fix plumed path_contraction must be finite and in [0,1]");
       path_contraction_flag = 1;
+    } else if (strcmp(arg[i], "path_coordinates") == 0) {
+      if (strcmp(arg[i + 1], "physical") == 0)
+        physical_path_required = 1;
+      else if (strcmp(arg[i + 1], "auto") == 0)
+        physical_path_required = 0;
+      else
+        error->all(FLERR, "Fix plumed path_coordinates must be auto or physical");
     } else if (strcmp(arg[i], "pimd_fix") == 0) {
       delete[] id_pimd;
       id_pimd = utils::strdup(arg[i + 1]);
@@ -157,6 +164,13 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
 
   if (path_contraction_flag && path_integral_mode != PATH_INTEGRAL_CV_MEAN)
     error->all(FLERR, "Fix plumed path_contraction requires path_integral cv_mean");
+
+  if (physical_path_required &&
+      ((path_integral_mode == PATH_INTEGRAL_OFF) ||
+       (path_integral_mode == PATH_INTEGRAL_COORDINATE_MEAN) ||
+       (path_contraction_flag && (path_contraction != 1.0))))
+    error->all(FLERR,
+               "Fix plumed path_coordinates physical requires uncontracted cv_mean or bias_mean");
 
   plumed_active = (path_integral_mode != PATH_INTEGRAL_COORDINATE_MEAN) || (universe->iworld == 0);
 
@@ -411,12 +425,15 @@ void FixPlumed::init()
 
   if (path_integral_mode != PATH_INTEGRAL_OFF) {
     // All partitions enter the same coordinate and force collectives.
-    double settings[2] = {double(path_contraction_flag), path_contraction};
-    double settings_min[2], settings_max[2];
-    MPI_Allreduce(settings, settings_min, 2, MPI_DOUBLE, MPI_MIN, universe->uworld);
-    MPI_Allreduce(settings, settings_max, 2, MPI_DOUBLE, MPI_MAX, universe->uworld);
-    if (settings_min[0] != settings_max[0] || settings_min[1] != settings_max[1])
-      error->all(FLERR, "Fix plumed path_contraction must match in all partitions");
+    double settings[3] = {double(path_contraction_flag), path_contraction,
+                          double(physical_path_required)};
+    double settings_min[3], settings_max[3];
+    MPI_Allreduce(settings, settings_min, 3, MPI_DOUBLE, MPI_MIN, universe->uworld);
+    MPI_Allreduce(settings, settings_max, 3, MPI_DOUBLE, MPI_MAX, universe->uworld);
+    if (settings_min[0] != settings_max[0] || settings_min[1] != settings_max[1] ||
+        settings_min[2] != settings_max[2])
+      error->all(FLERR,
+                 "Fix plumed path_contraction and path_coordinates must match in all partitions");
     if (utils::strmatch(update->integrate_style, "^respa"))
       error->all(FLERR, "Fix plumed path_integral modes do not support r-RESPA");
 

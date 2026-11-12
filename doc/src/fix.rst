@@ -358,6 +358,8 @@ accelerated styles exist.
 * :doc:`pafi <fix_pafi>` - constrained force averages on hyper-planes to compute free energies (PAFI)
 * :doc:`pair <fix_pair>` - access per-atom info from pair styles
 * :doc:`phonon <fix_phonon>` - calculate dynamical matrix from MD simulations
+* :doc:`pimd/adaptive <fix_pimd_adaptive>` - smooth spatial path-integral resolution
+* :doc:`pimd/mixed <fix_pimd_mixed>` - fixed mixed-bead path-integral Hamiltonian dynamics
 * :doc:`pimd/nve <fix_pimd_nve>` - Feynman path-integral molecular dynamics without a thermostat
 * :doc:`pimd/langevin <fix_pimd>` - Feynman path-integral molecular dynamics with stochastic thermostat
 * :doc:`pimd/nvt <fix_pimd>` - Feynman path-integral molecular dynamics with Nose-Hoover thermostat
@@ -443,6 +445,7 @@ accelerated styles exist.
 * :doc:`store/state <fix_store_state>` - store attributes for each atom
 * :doc:`surface/global <fix_surface_global>` - global granular surface model, each proc has copy
 * :doc:`surface/local <fix_surface_local>` - local granular surface model, distributed across procs
+* :doc:`symmetry <fix_symmetry>` - constrain MD to obey a chosen crystallographic space-group symmetry
 * :doc:`tdpd/source <fix_dpd_source>` - add external concentration source
 * :doc:`temp/berendsen <fix_temp_berendsen>` - temperature control by Berendsen thermostat
 * :doc:`temp/csld <fix_temp_csvr>` - canonical sampling thermostat with Langevin dynamics
@@ -468,6 +471,7 @@ accelerated styles exist.
 * :doc:`viscous/sphere <fix_viscous_sphere>` - viscous damping on angular velocity for granular simulations
 * :doc:`wall/body/polygon <fix_wall_body_polygon>` - time integration for body particles of style :doc:`rounded/polygon <Howto_body>`
 * :doc:`wall/body/polyhedron <fix_wall_body_polyhedron>` - time integration for body particles of style :doc:`rounded/polyhedron <Howto_body>`
+* :doc:`wall/body/polyhedron/granular <fix_wall_body_polyhedron_granular>` - walls with the contact models of pair style granular for body particles of style :doc:`rounded/polyhedron <Howto_body>`
 * :doc:`wall/colloid <fix_wall>` - Lennard-Jones wall interacting with finite-size particles
 * :doc:`wall/ees <fix_wall_ees>` - wall for ellipsoidal particles
 * :doc:`wall/flow <fix_wall_flow>` - flow boundary conditions

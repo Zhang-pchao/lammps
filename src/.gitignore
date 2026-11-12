@@ -198,6 +198,11 @@
 /fix_*manifold*.cpp
 /fix_*manifold*.h
 
+/fix_symmetry.cpp
+/fix_symmetry.h
+/symmetry_group.cpp
+/symmetry_group.h
+
 /meam*.h
 /meam*.cpp
 /pair_meam.cpp
@@ -1142,12 +1147,8 @@
 /fix_qeq_fire.h
 /fix_qeq_reaxff.cpp
 /fix_qeq_reaxff.h
-/fix_qeq_rel_reaxff.cpp
-/fix_qeq_rel_reaxff.h
 /fix_qmmm.cpp
 /fix_qmmm.h
-/fix_qtpie_reaxff.cpp
-/fix_qtpie_reaxff.h
 /fix_reaxff.cpp
 /fix_reaxff.h
 /fix_reaxff_bonds.cpp
@@ -1229,6 +1230,8 @@
 /fix_wall_body_polygon.h
 /fix_wall_body_polyhedron.cpp
 /fix_wall_body_polyhedron.h
+/fix_wall_body_polyhedron_granular.cpp
+/fix_wall_body_polyhedron_granular.h
 /fix_wall_colloid.cpp
 /fix_wall_colloid.h
 /fix_wall_ees.cpp
@@ -1327,6 +1330,9 @@
 /pair_body_rounded_polygon.h
 /pair_body_rounded_polyhedron.cpp
 /pair_body_rounded_polyhedron.h
+/pair_body_rounded_polyhedron_granular.cpp
+/pair_body_rounded_polyhedron_granular.h
+/pair_body_rounded_polyhedron_omp_impl.h
 /pair_bop.cpp
 /pair_bop.h
 /pair_born_coul_long.cpp
@@ -1501,12 +1507,16 @@
 /pair_lj_class2_coul_cut.h
 /pair_lj_class2_coul_cut_soft.cpp
 /pair_lj_class2_coul_cut_soft.h
+/pair_lj_class2_coul_cut_soft_gapsys.cpp
+/pair_lj_class2_coul_cut_soft_gapsys.h
 /pair_lj_class2_coul_long.cpp
 /pair_lj_class2_coul_long.h
 /pair_lj_class2_coul_long_soft.cpp
 /pair_lj_class2_coul_long_soft.h
 /pair_lj_class2_soft.cpp
 /pair_lj_class2_soft.h
+/pair_lj_class2_soft_gapsys.cpp
+/pair_lj_class2_soft_gapsys.h
 /pair_lj_coul.cpp
 /pair_lj_coul.h
 /pair_coul_cut_soft.cpp
@@ -1517,6 +1527,8 @@
 /pair_coul_long_soft.h
 /pair_lj_cut_coul_cut_soft.cpp
 /pair_lj_cut_coul_cut_soft.h
+/pair_lj_cut_coul_cut_soft_gapsys.cpp
+/pair_lj_cut_coul_cut_soft_gapsys.h
 /pair_lj_cut_tip4p_cut.cpp
 /pair_lj_cut_tip4p_cut.h
 /pair_lj_cut_coul_esp.cpp
@@ -1869,6 +1881,9 @@
 /fix_alchemy.h
 /fix_pimd_nve.cpp
 /fix_pimd_nve.h
+/pimd_mixed_map.h
+/fix_pimd_mixed.cpp
+/fix_pimd_mixed.h
 /fix_pimd_nvt.cpp
 /fix_pimd_nvt.h
 /fix_pimd_nvt_bosonic.cpp
@@ -2013,3 +2028,11 @@
 /pair_bondval.h
 /pair_bondval_vec.cpp
 /pair_bondval_vec.h
+
+/fix_pimd_adaptive.cpp
+
+/fix_pimd_adaptive.h
+
+/pimd_adaptive_map.h
+
+/pimd_pes_view.h
