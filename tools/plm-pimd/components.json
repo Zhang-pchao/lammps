@@ -29,7 +29,7 @@
     "ipi": {
       "repository": "https://github.com/Zhang-pchao/i-pi.git",
       "commit": "f9b4c1ca63633b4f4bd055a89ed5d9d47ed37206",
-      "branch": "feature/plm-pimd-reference",
+      "branch": "pimdbias/legacy-reference",
       "role": "optional reference implementation"
     }
   },
