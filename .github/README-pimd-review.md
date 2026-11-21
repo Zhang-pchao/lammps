@@ -22,4 +22,4 @@ The box-lifetime regression is part of `PlumedPIMDMPI`. The host-output regressi
 is `DumpCustomTest.rerun_forces`; it reads the actual dump rather than using an
 atom-extraction call that could synchronize data and hide the defect.
 
-The feature/pimd-adaptive integration branch also runs this workflow. Its coupling job includes adaptive mapping, eight-rank ownership and shared-bias restart groups, with the regional PLUMED component pinned to the milestone source commit.
+The feature/pimd-adaptive and mixpimd/main integration branches run this workflow. Its coupling job includes adaptive mapping, eight-rank ownership and shared-bias restart groups, with the regional PLUMED component pinned to the milestone source commit.

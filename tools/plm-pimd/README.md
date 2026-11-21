@@ -1,4 +1,4 @@
-# PLM-PIMD API31 milestone
+# Regional mixPIMD installation
 
 This entry installs one locked combination of the LAMMPS, DeePMD-kit and
 PLUMED forks. Optional installation groups provide molsimflow PIMD analysis
@@ -21,15 +21,15 @@ Run the build inside the resources allocated by your scheduler. Compilation
 uses the requested job count. Native MPI verification launches eight ranks.
 Keep the compiler, MPI and CUDA modules consistent when activating the result.
 
-## Select the milestone
+## Select the integration branch
 
 Set an external build workspace and a fresh versioned installation prefix.
 
 ~~~bash
 PLM_WORKSPACE="$PWD/plm-pimd-work"
-PLM_PREFIX="$PWD/plm-pimd-api31-v1"
+PLM_PREFIX="$PWD/mixpimd-consolidation-v1"
 mkdir -p "$PLM_WORKSPACE/sources"
-git clone --depth 1 --branch plm-pimd-api31-v1 \
+git clone --depth 1 --branch mixpimd/main \
   https://github.com/Zhang-pchao/lammps.git \
   "$PLM_WORKSPACE/sources/lammps"
 PLM_ENTRY="$PLM_WORKSPACE/sources/lammps"
@@ -113,9 +113,18 @@ and physical sampling convergence require their own qualification inputs.
 The paired DeePMD provider and LAMMPS plugin use C API31 and the project
 selected-energy backend factory. Build them from the locked component set.
 
-Complete-PES evaluation is the default model path. Conditional charge/spin Air
-models use that path. The selected-energy guard admits the audited one-hop,
-short-range model family. Capability metadata controls its admission.
+Complete-PES evaluation is the default model path. Explicit selected-energy
+evaluation admits eligible one-hop short-range exports, including audited
+compressed variants with folded neutral-singlet conditioning. The model
+capability checks and complete neighborhood derivatives apply to both
+selected and complement evaluations.
+
+The adaptive integrator provides opt-in force, velocity and bias-moment
+reductions on qualified one-MPI-rank-per-bead layouts. Export
+LAMMPS_PIMD_FORCE_SUMMARY_EXPERIMENT=1,
+LAMMPS_PIMD_VELOCITY_SUMMARY_EXPERIMENT=1 and
+LAMMPS_PIMD_BIAS_MOMENT_EXPERIMENT=1 to request these paths. Leave them unset
+to use the established gather path. Set the same options for every bead.
 
 Bias path contraction and spatial quantum amplitudes have separate meanings.
 Keep cv_mean, coordinate_mean and bias_mean definitions explicit in sampling
@@ -131,5 +140,5 @@ energies and throughput improvements have separate acceptance criteria.
 
 Keep installation.json, the source component commits, the model/checkpoint
 checksums and the activation script with each deployment. A previous versioned
-prefix can be selected from a fresh shell through its own env.sh. The source
+prefix, including the plm-pimd-api31-v1 installation, can be selected from a fresh shell through its own env.sh. The source
 checkouts and build workspace are distinct from the installed prefix.

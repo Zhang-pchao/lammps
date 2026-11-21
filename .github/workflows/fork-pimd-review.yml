@@ -1,7 +1,7 @@
 name: Fork PIMD review
 on:
   push:
-    branches: [codex/lammps-pimd-review, feature/pimd-adaptive]
+    branches: [codex/lammps-pimd-review, feature/pimd-adaptive, mixpimd/main]
 permissions:
   contents: read
 concurrency:
