@@ -65,8 +65,11 @@ FixPIMDAdaptive::FixPIMDAdaptive(LAMMPS *lmp, int narg, char **arg) :
   pes_snapshot_enabled = snapshot && (std::strcmp(snapshot, "1") == 0);
   const char *summary = std::getenv("LAMMPS_PIMD_FORCE_SUMMARY_EXPERIMENT");
   force_summary_enabled = summary && (std::strcmp(summary, "1") == 0);
+  const char *velocity = std::getenv("LAMMPS_PIMD_VELOCITY_SUMMARY_EXPERIMENT");
+  velocity_summary_enabled = velocity && (std::strcmp(velocity, "1") == 0);
   std::string options = pes_snapshot_enabled ? "snapshot=1;" : "snapshot=0;";
   options += force_summary_enabled ? "force_summary=1;" : "force_summary=0;";
+  options += velocity_summary_enabled ? "velocity_summary=1;" : "velocity_summary=0;";
   for (int i = 3; i < narg; ++i) options += std::to_string(std::strlen(arg[i])) + ":" + arg[i];
   int length = static_cast<int>(options.size());
   MPI_Bcast(&length, 1, MPI_INT, 0, universe->uworld);
@@ -462,12 +465,34 @@ void FixPIMDAdaptive::map_velocities(bool positions_just_mapped)
         for (int b = 0; b < np; ++b) c += inverse_np * bufbeads[b][3 * i + d];
       offsets[3 * i + d] = array_atom[i][d] - c;
     }
-  collect(3);
   mean_velocity.assign(std::max(1, 3 * atom->nlocal), 0.0);
   auto &mean = mean_velocity;
-  for (int i = 0; i < atom->nlocal; ++i)
-    for (int d = 0; d < 3; ++d)
-      for (int b = 0; b < np; ++b) mean[3 * i + d] += inverse_np * bufbeads[b][3 * i + d];
+  // Velocity mapping consumes only the mean of the auxiliary velocities.
+  // Use canonical atom IDs so bead-local sorting cannot mix different atoms.
+  const bool reduced = velocity_summary_enabled && (nprocs_universe == nreplica) &&
+      (ntotal <= std::numeric_limits<int>::max() / 3);
+  if (reduced) {
+    const std::size_t count = 3 * static_cast<std::size_t>(ntotal);
+    velocity_summary.resize(std::max<std::size_t>(1, count));
+    for (int i = 0; i < atom->nlocal; ++i) {
+      const std::size_t slot = 3 * static_cast<std::size_t>(atom->tag[i] - 1);
+      for (int d = 0; d < 3; ++d)
+        velocity_summary[slot + d] = inverse_np * array_atom[i][3 + d];
+    }
+    MPI_Allreduce(MPI_IN_PLACE, velocity_summary.data(), static_cast<int>(count),
+                  MPI_DOUBLE, MPI_SUM, rootworld);
+    for (int i = 0; i < atom->nlocal; ++i) {
+      const std::size_t slot = 3 * static_cast<std::size_t>(atom->tag[i] - 1);
+      for (int d = 0; d < 3; ++d) mean[3 * i + d] = velocity_summary[slot + d];
+    }
+    ++velocity_summary_counts[0];
+  } else {
+    collect(3);
+    for (int i = 0; i < atom->nlocal; ++i)
+      for (int d = 0; d < 3; ++d)
+        for (int b = 0; b < np; ++b) mean[3 * i + d] += inverse_np * bufbeads[b][3 * i + d];
+    ++velocity_summary_counts[1];
+  }
   update_anchor(mean, true);
   for (int i = 0; i < atom->nlocal; ++i) {
     double rate = 0.0;
@@ -709,6 +734,10 @@ void *FixPIMDAdaptive::extract(const char *name, int &dim)
     dim = 1;
     return force_summary_counts.data();
   }
+  if (strcmp(name, "pimd_velocity_summary_counts") == 0) {
+    dim = 1;
+    return velocity_summary_counts.data();
+  }
   if (strcmp(name, "pimd_adaptive_profile") == 0) {
     dim = 1;
     return phase_profile.data();
@@ -905,7 +934,7 @@ double FixPIMDAdaptive::memory_usage()
       (offsets.capacity() + centroids.capacity() + mean_velocity.capacity() +
        bias_centers.capacity() + bias_forces.capacity() + normal_mode_forward.capacity() +
        normal_mode_inverse.capacity() + collective_send.capacity() + collective_values.capacity() +
-       force_summary.capacity()) *
+       force_summary.capacity() + velocity_summary.capacity()) *
       sizeof(double) +
       (rows.capacity() + bias_force_rows.capacity()) * sizeof(double *) +
       (pes_snapshot_auxiliary.capacity() + pes_snapshot_centroid.capacity()) * sizeof(double) +

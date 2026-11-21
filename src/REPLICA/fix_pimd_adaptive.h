@@ -94,6 +94,9 @@ class FixPIMDAdaptive : public FixPIMDNVE {
   bool force_summary_enabled = false;
   std::vector<double> force_summary;
   std::array<double, 2> force_summary_counts{};
+  bool velocity_summary_enabled = false;
+  std::vector<double> velocity_summary;
+  std::array<double, 2> velocity_summary_counts{};
   // Scratch is refilled on every use; it never caches coordinates across migration.
   std::vector<double> centroids, mean_velocity, bias_centers, bias_forces;
   std::vector<double *> bias_force_rows;
