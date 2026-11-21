@@ -60,7 +60,9 @@ FixPIMDAdaptive::FixPIMDAdaptive(LAMMPS *lmp, int narg, char **arg) :
 {
   const char *profile = std::getenv("LAMMPS_PIMD_ADAPTIVE_PROFILE");
   profile_enabled = profile && (std::strcmp(profile, "1") == 0);
-  std::string options;
+  const char *snapshot = std::getenv("LAMMPS_PIMD_PES_SNAPSHOT_EXPERIMENT");
+  pes_snapshot_enabled = snapshot && (std::strcmp(snapshot, "1") == 0);
+  std::string options = pes_snapshot_enabled ? "snapshot=1;" : "snapshot=0;";
   for (int i = 3; i < narg; ++i) options += std::to_string(std::strlen(arg[i])) + ":" + arg[i];
   int length = static_cast<int>(options.size());
   MPI_Bcast(&length, 1, MPI_INT, 0, universe->uworld);
@@ -175,6 +177,14 @@ FixPIMDAdaptive::FixPIMDAdaptive(LAMMPS *lmp, int narg, char **arg) :
   kt = force->boltz * temp;
   create_energy_computes();
   initialize_partition_communication(false);
+  // Partition initialization sets the replica index used by these fixed rows.
+  normal_mode_forward.resize(np);
+  normal_mode_inverse.resize(np);
+  for (int b = 0; b < np; ++b) {
+    normal_mode_forward[b] = modes->coefficient(ireplica, b);
+    normal_mode_inverse[b] = modes->coefficient(b, ireplica);
+  }
+  normal_mode_eigenvalue = modes->eigenvalue(ireplica);
 }
 
 FixPIMDAdaptive::~FixPIMDAdaptive()
@@ -186,6 +196,7 @@ FixPIMDAdaptive::~FixPIMDAdaptive()
 
 void FixPIMDAdaptive::init()
 {
+  pes_snapshot_valid = false;
   int invalid = (domain->dimension != 3) || domain->triclinic || !atom->mass || atom->rmass_flag ||
       (atom->natoms == 0) || (atom->natoms != ntotal) || (atom->map_style == Atom::MAP_NONE) ||
       !atom->tag_consecutive() || !utils::strmatch(update->integrate_style, "^verlet");
@@ -295,7 +306,29 @@ void FixPIMDAdaptive::validate_companions()
 void FixPIMDAdaptive::inter_replica_comm(double **ptr)
 {
   AdaptivePhaseTimer phase_timer(profile_enabled, phase_profile.data());
-  FixPIMDNVE::inter_replica_comm(ptr);
+  if (nprocs_universe != nreplica) {
+    FixPIMDNVE::inter_replica_comm(ptr);
+    return;
+  }
+
+  // One rank owns every atom of each bead. Tags remain canonical even when
+  // local atom order differs between beads after sorting.
+  if (!bufsend || (atom->nmax > maxlocal)) reallocate();
+  const std::size_t count = 3 * static_cast<std::size_t>(ntotal);
+  collective_send.resize(std::max<std::size_t>(1, count));
+  collective_values.resize(std::max<std::size_t>(1, count * nreplica));
+  for (int i = 0; i < atom->nlocal; ++i) {
+    const std::size_t slot = 3 * static_cast<std::size_t>(atom->tag[i] - 1);
+    for (int d = 0; d < 3; ++d) collective_send[slot + d] = ptr[i][d];
+  }
+  // rootworld is ordered by replica index, including reordered universes.
+  MPI_Allgather(collective_send.data(), static_cast<int>(count), MPI_DOUBLE,
+                collective_values.data(), static_cast<int>(count), MPI_DOUBLE, rootworld);
+  for (int b = 0; b < nreplica; ++b)
+    for (int i = 0; i < atom->nlocal; ++i) {
+      const std::size_t slot = count * b + 3 * static_cast<std::size_t>(atom->tag[i] - 1);
+      for (int d = 0; d < 3; ++d) bufbeads[b][3 * i + d] = collective_values[slot + d];
+    }
 }
 
 void FixPIMDAdaptive::collect(int offset)
@@ -408,6 +441,7 @@ void FixPIMDAdaptive::map_positions()
     for (int d = 0; d < 3; ++d) atom->x[i][d] = xc[i][d] + a * (array_atom[i][d] - xc[i][d]);
     domain->unmap_inv(atom->x[i], atom->image[i]);
   }
+  capture_pes_snapshot();
 }
 
 void FixPIMDAdaptive::map_velocities(bool positions_just_mapped)
@@ -445,12 +479,12 @@ void FixPIMDAdaptive::transform(int offset, bool forward)
 {
   collect(offset);
   AdaptivePhaseTimer phase_timer(profile_enabled, phase_profile.data() + 2);
+  const auto &coefficients = forward ? normal_mode_forward : normal_mode_inverse;
   for (int i = 0; i < atom->nlocal; ++i)
     for (int d = 0; d < 3; ++d) {
       double value = 0.0;
       for (int b = 0; b < np; ++b)
-        value += (forward ? modes->coefficient(ireplica, b) : modes->coefficient(b, ireplica)) *
-            bufbeads[b][3 * i + d];
+        value += coefficients[b] * bufbeads[b][3 * i + d];
       array_atom[i][offset + d] = value;
     }
 }
@@ -466,7 +500,7 @@ void FixPIMDAdaptive::kick()
 void FixPIMDAdaptive::propagate(double dt)
 {
   AdaptivePhaseTimer phase_timer(profile_enabled, phase_profile.data() + 20);
-  const double omega = np * kt / hbar * std::sqrt(modes->eigenvalue(ireplica));
+  const double omega = np * kt / hbar * std::sqrt(normal_mode_eigenvalue);
   const double c = std::cos(omega * dt), s = std::sin(omega * dt);
   for (int i = 0; i < atom->nlocal; ++i)
     for (int d = 0; d < 3; ++d) {
@@ -484,7 +518,7 @@ void FixPIMDAdaptive::o_step()
 {
   AdaptivePhaseTimer phase_timer(profile_enabled, phase_profile.data() + 22);
   if (!random) return;
-  const double omega = np * kt / hbar * std::sqrt(modes->eigenvalue(ireplica));
+  const double omega = np * kt / hbar * std::sqrt(normal_mode_eigenvalue);
   const double gamma = ireplica == 0 ? 1.0 / thermostat_tau : 2.0 * omega;
   const double damping = std::exp(-gamma * update->dt);
   for (int i = 0; i < atom->nlocal; ++i) {
@@ -633,6 +667,10 @@ void *FixPIMDAdaptive::extract(const char *name, int &dim)
     refresh_pes_view();
     return &pes_view;
   }
+  if (strcmp(name, "pimd_pes_snapshot_counts") == 0) {
+    dim = 1;
+    return pes_snapshot_counts.data();
+  }
   if (strcmp(name, "pimd_adaptive_profile") == 0) {
     dim = 1;
     return phase_profile.data();
@@ -641,13 +679,54 @@ void *FixPIMDAdaptive::extract(const char *name, int &dim)
   return FixPIMDNVE::extract(name, dim);
 }
 
+void FixPIMDAdaptive::capture_pes_snapshot()
+{
+  pes_snapshot_valid = false;
+  if (!pes_snapshot_enabled || (comm->nprocs != 1) || (atom->nlocal != ntotal)) return;
+  pes_snapshot_auxiliary.resize(3 * static_cast<std::size_t>(ntotal));
+  pes_snapshot_centroid.resize(pes_snapshot_auxiliary.size());
+  pes_snapshot_seen.assign(ntotal, 0);
+  for (int i = 0; i < atom->nlocal; ++i) {
+    const tagint tag = atom->tag[i];
+    if ((tag < 1) || (tag > ntotal) || pes_snapshot_seen[tag - 1]) return;
+    pes_snapshot_seen[tag - 1] = 1;
+    const std::size_t slot = 3 * static_cast<std::size_t>(tag - 1);
+    for (int d = 0; d < 3; ++d) {
+      pes_snapshot_auxiliary[slot + d] = array_atom[i][d];
+      pes_snapshot_centroid[slot + d] = centroids[3 * i + d];
+    }
+  }
+  pes_snapshot_valid = true;
+}
+
+bool FixPIMDAdaptive::pes_snapshot_matches()
+{
+  if (!pes_snapshot_valid || (comm->nprocs != 1) || (atom->nlocal != ntotal) ||
+      (atom->natoms != ntotal)) return false;
+  std::fill(pes_snapshot_seen.begin(), pes_snapshot_seen.end(), 0);
+  for (int i = 0; i < atom->nlocal; ++i) {
+    const tagint tag = atom->tag[i];
+    if ((tag < 1) || (tag > ntotal) || pes_snapshot_seen[tag - 1]) return false;
+    pes_snapshot_seen[tag - 1] = 1;
+    const std::size_t slot = 3 * static_cast<std::size_t>(tag - 1);
+    for (int d = 0; d < 3; ++d)
+      if (array_atom[i][d] != pes_snapshot_auxiliary[slot + d]) return false;
+  }
+  return true;
+}
+
 void FixPIMDAdaptive::refresh_pes_view()
 {
   AdaptivePhaseTimer phase_timer(profile_enabled, phase_profile.data() + 16);
-  int invalid = !initialized;
-  MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
-  if (invalid) error->all(FLERR, "PIMD potential input requires initialized auxiliary paths");
-  collect(0);
+  // Combine freshness with the existing collective initialization guard. A
+  // mutation on any bead forces every rank onto the original gather path.
+  int status[2] = {!initialized, !(pes_snapshot_enabled && pes_snapshot_matches())};
+  MPI_Allreduce(MPI_IN_PLACE, status, 2, MPI_INT, MPI_MAX, universe->uworld);
+  if (status[0]) error->all(FLERR, "PIMD potential input requires initialized auxiliary paths");
+  const bool reuse = status[1] == 0;
+  if (!reuse) collect(0);
+  ++pes_snapshot_counts[reuse ? 0 : 1];
+  int invalid = 0;
   pes_view.beads = np;
   pes_view.bead = ireplica;
   pes_view.nlocal = atom->nlocal;
@@ -662,8 +741,12 @@ void FixPIMDAdaptive::refresh_pes_view()
     invalid |= !std::isfinite(pes_view.amplitude[i]) || (pes_view.amplitude[i] < 0.0) ||
         (pes_view.amplitude[i] > 1.0);
     for (int d = 0; d < 3; ++d) {
-      for (int b = 0; b < np; ++b)
-        pes_view.centroid[3 * i + d] += inverse_np * bufbeads[b][3 * i + d];
+      if (reuse)
+        pes_view.centroid[3 * i + d] =
+            pes_snapshot_centroid[3 * static_cast<std::size_t>(atom->tag[i] - 1) + d];
+      else
+        for (int b = 0; b < np; ++b)
+          pes_view.centroid[3 * i + d] += inverse_np * bufbeads[b][3 * i + d];
       invalid |= !std::isfinite(pes_view.centroid[3 * i + d]);
     }
   }
@@ -756,6 +839,7 @@ int FixPIMDAdaptive::pack_exchange(int i, double *buf)
 }
 int FixPIMDAdaptive::unpack_exchange(int i, double *buf)
 {
+  pes_snapshot_valid = false;
   std::copy(buf, buf + NCOLS, array_atom[i]);
   return NCOLS;
 }
@@ -781,9 +865,12 @@ double FixPIMDAdaptive::memory_usage()
 {
   return static_cast<double>(capacity) * NCOLS * sizeof(double) +
       (offsets.capacity() + centroids.capacity() + mean_velocity.capacity() +
-       bias_centers.capacity() + bias_forces.capacity()) *
+       bias_centers.capacity() + bias_forces.capacity() + normal_mode_forward.capacity() +
+       normal_mode_inverse.capacity() + collective_send.capacity() + collective_values.capacity()) *
       sizeof(double) +
-      (rows.capacity() + bias_force_rows.capacity()) * sizeof(double *);
+      (rows.capacity() + bias_force_rows.capacity()) * sizeof(double *) +
+      (pes_snapshot_auxiliary.capacity() + pes_snapshot_centroid.capacity()) * sizeof(double) +
+      pes_snapshot_seen.capacity() * sizeof(unsigned char);
 }
 
 void FixPIMDAdaptive::write_restart(FILE *fp)
@@ -838,6 +925,7 @@ void FixPIMDAdaptive::restart(char * /*buf*/)
 
 void FixPIMDAdaptive::restart(char *buf, int nbytes)
 {
+  pes_snapshot_valid = false;
   int header_size = 24;
   if ((nbytes < header_size * static_cast<int>(sizeof(double))) || (nbytes % sizeof(double) != 0))
     error->all(FLERR, "Invalid fix pimd/adaptive restart size");

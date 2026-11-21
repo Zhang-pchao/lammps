@@ -64,6 +64,13 @@ class FixPIMDAdaptive : public FixPIMDNVE {
   static constexpr int NCOLS = 13;
   PIMDPESView pes_view;
   void refresh_pes_view();
+  void capture_pes_snapshot();
+  bool pes_snapshot_matches();
+  bool pes_snapshot_enabled = false, pes_snapshot_valid = false;
+  // Canonical tag order, independent of local sorting and shared bead scratch.
+  std::vector<double> pes_snapshot_auxiliary, pes_snapshot_centroid;
+  std::vector<unsigned char> pes_snapshot_seen;
+  std::array<double, 2> pes_snapshot_counts{};
   bool initialized = false, restored = false;
   int capacity = 0;
   std::array<double, 3> center{}, fixed_center{}, reference_velocity{};
@@ -78,9 +85,12 @@ class FixPIMDAdaptive : public FixPIMDNVE {
   std::array<double, 9> fixed_cell{};
   std::array<double, 5> values{};
   std::unique_ptr<PIMDMixedMap> modes;
+  std::vector<double> normal_mode_forward, normal_mode_inverse;
+  double normal_mode_eigenvalue = 0.0;
   std::unique_ptr<RanMars> random;
   std::vector<double *> rows;
   std::vector<double> offsets;
+  std::vector<double> collective_send, collective_values;
   // Scratch is refilled on every use; it never caches coordinates across migration.
   std::vector<double> centroids, mean_velocity, bias_centers, bias_forces;
   std::vector<double *> bias_force_rows;

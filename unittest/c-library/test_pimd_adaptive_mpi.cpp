@@ -25,6 +25,7 @@
 #include "universe.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <iomanip>
 #include <sstream>
@@ -87,7 +88,7 @@ bool prepare(LAMMPS *lmp, const std::string &region = "transition", bool pile = 
     const int p = lmp->universe->nworlds, b = lmp->universe->iworld;
     const double shift = 0.04 * (b - 0.5 * (p - 1));
     std::string input  = "units lj\natom_style atomic\natom_modify map array sort 0 0\n";
-    if (lmp->comm->nprocs == 2) input += "processors 2 1 1\n";
+    if (lmp->comm->nprocs == 2) input += "processors * 1 1\n";
     input += "region box block 0 12 0 12 0 12\ncreate_box 1 box\n";
     for (int i = 0; i < 2; ++i) {
         double x[3] = {5.0 + 1.2 * i + shift * (1.0 - 0.5 * i), 5.0 + shift * 0.3,
@@ -158,7 +159,7 @@ void restart_case(bool pile, const std::string &region = "transition")
         commands(first, "write_restart " + file);
     lammps_close(first);
     auto *second      = open_system(4);
-    std::string input = "atom_modify map array sort 0 0\nprocessors 2 1 1\nread_restart " + file +
+    std::string input = "atom_modify map array sort 0 0\nprocessors * 1 1\nread_restart " + file +
                         "\nneighbor 0.3 bin\nneigh_modify every 1 delay 0 check no\n" +
                         options(region, pile) + "run 19";
     if (commands(second, input)) candidate = state(second);
@@ -264,7 +265,7 @@ TEST(PIMDAdaptive, free_path_crosses_regions_domains_and_periodic_boundary)
     const double shape[4] = {1, 0, -1, 0};
     std::string input =
         "units lj\natom_style atomic\natom_modify map array sort 1 0.4\n"
-        "processors 2 1 1\nregion box block 0 12 0 12 0 12\ncreate_box 1 box\n"
+        "processors * 1 1\nregion box block 0 12 0 12 0 12\ncreate_box 1 box\n"
         "create_atoms 1 single " +
         number(3.0 + 0.1 * shape[b]) +
         " 5 5\n"
@@ -392,7 +393,7 @@ TEST(PIMDAdaptive, compact_reference_crosses_periodic_boundary_with_unequal_mass
     const double shift = 0.02 * (lmp->universe->iworld - 1.5);
     std::string input =
         "units lj\natom_style atomic\natom_modify map array sort 0 0\n"
-        "processors 2 1 1\nregion box block 0 12 0 12 0 12\ncreate_box 2 box\n"
+        "processors * 1 1\nregion box block 0 12 0 12 0 12\ncreate_box 2 box\n"
         "create_atoms 1 single " +
         number(11.6 + shift) +
         " 5 5\n"
@@ -509,4 +510,110 @@ TEST(PIMDAdaptive, potential_view_is_fresh_collective_and_tagged)
         }
         lammps_close(lmp);
     }
+}
+
+TEST(PIMDAdaptive, potential_snapshot_checks_all_beads_and_local_order)
+{
+    const char *previous = std::getenv("LAMMPS_PIMD_PES_SNAPSHOT_EXPERIMENT");
+    const bool had_previous = previous != nullptr;
+    const std::string saved = previous ? previous : "";
+    setenv("LAMMPS_PIMD_PES_SNAPSHOT_EXPERIMENT", "1", 1);
+    int size;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    for (int p : {1, 2, 4}) {
+        if ((p > size) || (size % p)) continue;
+        auto *lmp = open_system(p);
+        if (prepare(lmp)) {
+            auto *fix = lmp->modify->get_fix_by_id("pi");
+            int dim = 0;
+            auto *counts = static_cast<double *>(fix->extract("pimd_pes_snapshot_counts", dim));
+            ASSERT_NE(counts, nullptr);
+            EXPECT_EQ(dim, 1);
+            const bool single = lmp->comm->nprocs == 1;
+            for (int phase = 0; phase < 5; ++phase) {
+                // Reorder on alternating beads, without calling run/map_positions.
+                if ((phase == 1) && single && (lmp->universe->iworld % 2)) {
+                    lmp->atom->avec->grow(lmp->atom->nmax + 100);
+                    lmp->atom->avec->copy(0, 2, 0);
+                    lmp->atom->avec->copy(1, 0, 0);
+                    lmp->atom->avec->copy(2, 1, 0);
+                    lmp->atom->map_set();
+                }
+                // Only one bead mutates: every other bead must also fall back.
+                if ((phase == 2) && (lmp->universe->iworld == 0))
+                    for (int i = 0; i < lmp->atom->nlocal; ++i)
+                        fix->array_atom[i][0] += 0.125;
+                if ((phase == 3) && (lmp->universe->iworld == 0))
+                    for (int i = 0; i < lmp->atom->nlocal; ++i)
+                        fix->array_atom[i][0] -= 0.125;
+                if (phase == 4) EXPECT_TRUE(commands(lmp, "run 0\nrun 2"));
+                const auto before = state(lmp);
+                const double hits = counts[0], misses = counts[1];
+                const auto *view =
+                    static_cast<const PIMDPESView *>(fix->extract("pimd_pes_view_v1", dim));
+                const bool reuse = single && (phase != 2);
+                EXPECT_DOUBLE_EQ(counts[0] - hits, reuse ? 1.0 : 0.0);
+                EXPECT_DOUBLE_EQ(counts[1] - misses, reuse ? 0.0 : 1.0);
+                std::vector<double> reference(3 * lmp->atom->natoms, 0.0);
+                for (int i = 0; i < lmp->atom->nlocal; ++i)
+                    for (int d = 0; d < 3; ++d)
+                        reference[3 * (lmp->atom->tag[i] - 1) + d] = fix->array_atom[i][d] / p;
+                MPI_Allreduce(MPI_IN_PLACE, reference.data(), reference.size(), MPI_DOUBLE, MPI_SUM,
+                              MPI_COMM_WORLD);
+                for (int i = 0; i < view->nlocal; ++i) {
+                    EXPECT_EQ(view->tags[i], lmp->atom->tag[i]);
+                    EXPECT_DOUBLE_EQ(view->amplitude[i], fix->array_atom[i][9]);
+                    for (int d = 0; d < 3; ++d)
+                        EXPECT_NEAR(view->centroid[3 * i + d],
+                                    reference[3 * (view->tags[i] - 1) + d], 1e-13);
+                }
+                equal(before, state(lmp), 0.0);
+            }
+        }
+        lammps_close(lmp);
+    }
+    if (had_previous)
+        setenv("LAMMPS_PIMD_PES_SNAPSHOT_EXPERIMENT", saved.c_str(), 1);
+    else
+        unsetenv("LAMMPS_PIMD_PES_SNAPSHOT_EXPERIMENT");
+}
+
+TEST(PIMDAdaptive, single_rank_collection_tracks_independent_atom_order)
+{
+    int size;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    auto *reference = open_system(size);
+    std::vector<double> expected;
+    if (prepare(reference) && commands(reference, "run 20")) expected = state(reference);
+    lammps_close(reference);
+
+    auto *lmp = open_system(size);
+    if (prepare(lmp)) {
+        ASSERT_EQ(lmp->atom->nlocal, 2);
+        const auto initial = state(lmp);
+        lmp->atom->avec->grow(lmp->atom->nmax + 100);
+        if (lmp->universe->iworld % 2) {
+            lmp->atom->avec->copy(0, 2, 0);
+            lmp->atom->avec->copy(1, 0, 0);
+            lmp->atom->avec->copy(2, 1, 0);
+            lmp->atom->map_set();
+        }
+        if (commands(lmp, "run 0")) equal(initial, state(lmp), 1.0e-12);
+        if (commands(lmp, "run 20")) equal(expected, state(lmp), 1.0e-12);
+    }
+    lammps_close(lmp);
+}
+
+TEST(PIMDAdaptive, single_rank_nonconsecutive_tags_are_rejected)
+{
+    int size;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    auto *lmp = open_system(size);
+    if (prepare(lmp)) {
+        lmp->atom->tag[1] = 3;
+        lmp->atom->map_init();
+        lmp->atom->map_set();
+        expect_error(lmp, "run 0", "consecutive IDs");
+    }
+    lammps_close(lmp);
 }
