@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 
 using namespace LAMMPS_NS;
 
@@ -62,7 +63,10 @@ FixPIMDAdaptive::FixPIMDAdaptive(LAMMPS *lmp, int narg, char **arg) :
   profile_enabled = profile && (std::strcmp(profile, "1") == 0);
   const char *snapshot = std::getenv("LAMMPS_PIMD_PES_SNAPSHOT_EXPERIMENT");
   pes_snapshot_enabled = snapshot && (std::strcmp(snapshot, "1") == 0);
+  const char *summary = std::getenv("LAMMPS_PIMD_FORCE_SUMMARY_EXPERIMENT");
+  force_summary_enabled = summary && (std::strcmp(summary, "1") == 0);
   std::string options = pes_snapshot_enabled ? "snapshot=1;" : "snapshot=0;";
+  options += force_summary_enabled ? "force_summary=1;" : "force_summary=0;";
   for (int i = 3; i < narg; ++i) options += std::to_string(std::strlen(arg[i])) + ":" + arg[i];
   int length = static_cast<int>(options.size());
   MPI_Bcast(&length, 1, MPI_INT, 0, universe->uworld);
@@ -571,18 +575,48 @@ void FixPIMDAdaptive::pullback()
     }
   }
   MPI_Allreduce(&spring, &values[1], 1, MPI_DOUBLE, MPI_SUM, universe->uworld);
-  inter_replica_comm(atom->f);
-  double reaction[3] = {};
+  // The single-rank-per-bead route needs only the force mean and its
+  // contraction with the auxiliary offset. Keep the general gather fallback.
+  const bool reduced = force_summary_enabled && (nprocs_universe == nreplica) &&
+      (ntotal <= std::numeric_limits<int>::max() / 4);
   int invalid = 0;
+  if (reduced) {
+    const std::size_t count = 4 * static_cast<std::size_t>(ntotal);
+    force_summary.resize(std::max<std::size_t>(1, count));
+    for (int i = 0; i < atom->nlocal; ++i) {
+      const std::size_t slot = 4 * static_cast<std::size_t>(atom->tag[i] - 1);
+      double moment = 0.0;
+      for (int d = 0; d < 3; ++d) {
+        const double f = atom->f[i][d];
+        invalid |= !std::isfinite(f);
+        force_summary[slot + d] = inverse_np * f;
+        moment += inverse_np * f * offsets[(i * np + ireplica) * 3 + d];
+      }
+      force_summary[slot + 3] = moment;
+    }
+    MPI_Allreduce(MPI_IN_PLACE, force_summary.data(), static_cast<int>(count),
+                  MPI_DOUBLE, MPI_SUM, rootworld);
+    ++force_summary_counts[0];
+  } else {
+    inter_replica_comm(atom->f);
+    ++force_summary_counts[1];
+  }
+  double reaction[3] = {};
   for (int i = 0; i < atom->nlocal; ++i) {
     double mean[3] = {}, moment = 0.0;
-    for (int b = 0; b < np; ++b)
-      for (int d = 0; d < 3; ++d) {
-        const double f = bufbeads[b][3 * i + d];
-        invalid |= !std::isfinite(f);
-        mean[d] += inverse_np * f;
-        moment += inverse_np * f * offsets[(i * np + b) * 3 + d];
-      }
+    if (reduced) {
+      const std::size_t slot = 4 * static_cast<std::size_t>(atom->tag[i] - 1);
+      for (int d = 0; d < 3; ++d) mean[d] = force_summary[slot + d];
+      moment = force_summary[slot + 3];
+    } else {
+      for (int b = 0; b < np; ++b)
+        for (int d = 0; d < 3; ++d) {
+          const double f = bufbeads[b][3 * i + d];
+          invalid |= !std::isfinite(f);
+          mean[d] += inverse_np * f;
+          moment += inverse_np * f * offsets[(i * np + b) * 3 + d];
+        }
+    }
     for (int d = 0; d < 3; ++d) {
       array_atom[i][6 + d] = PIMDAdaptiveMap::force(array_atom[i][9], atom->f[i][d], mean[d],
                                                     array_atom[i][10 + d], moment);
@@ -670,6 +704,10 @@ void *FixPIMDAdaptive::extract(const char *name, int &dim)
   if (strcmp(name, "pimd_pes_snapshot_counts") == 0) {
     dim = 1;
     return pes_snapshot_counts.data();
+  }
+  if (strcmp(name, "pimd_force_summary_counts") == 0) {
+    dim = 1;
+    return force_summary_counts.data();
   }
   if (strcmp(name, "pimd_adaptive_profile") == 0) {
     dim = 1;
@@ -866,7 +904,8 @@ double FixPIMDAdaptive::memory_usage()
   return static_cast<double>(capacity) * NCOLS * sizeof(double) +
       (offsets.capacity() + centroids.capacity() + mean_velocity.capacity() +
        bias_centers.capacity() + bias_forces.capacity() + normal_mode_forward.capacity() +
-       normal_mode_inverse.capacity() + collective_send.capacity() + collective_values.capacity()) *
+       normal_mode_inverse.capacity() + collective_send.capacity() + collective_values.capacity() +
+       force_summary.capacity()) *
       sizeof(double) +
       (rows.capacity() + bias_force_rows.capacity()) * sizeof(double *) +
       (pes_snapshot_auxiliary.capacity() + pes_snapshot_centroid.capacity()) * sizeof(double) +

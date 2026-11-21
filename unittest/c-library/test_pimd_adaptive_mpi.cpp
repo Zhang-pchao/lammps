@@ -617,3 +617,50 @@ TEST(PIMDAdaptive, single_rank_nonconsecutive_tags_are_rejected)
     }
     lammps_close(lmp);
 }
+
+
+TEST(PIMDAdaptive, force_summary_matches_gather_with_reordered_atoms)
+{
+    const char *name = "LAMMPS_PIMD_FORCE_SUMMARY_EXPERIMENT";
+    const char *previous = std::getenv(name);
+    const bool had_previous = previous != nullptr;
+    const std::string saved = previous ? previous : "";
+    int size;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    for (int p : {1, 2, 4, 16}) {
+        if ((p > size) || (size % p)) continue;
+        for (const std::string region : {"transition", "classical", "quantum", "mobile", "protected"}) {
+            std::vector<double> reference, candidate;
+            for (int enabled : {0, 1}) {
+                setenv(name, enabled ? "1" : "0", 1);
+                auto *lmp = open_system(p);
+                if (prepare(lmp, region)) {
+                    const bool single = lmp->comm->nprocs == 1;
+                    if (single && (lmp->universe->iworld % 2)) {
+                        lmp->atom->avec->grow(lmp->atom->nmax + 100);
+                        lmp->atom->avec->copy(0, 2, 0);
+                        lmp->atom->avec->copy(1, 0, 0);
+                        lmp->atom->avec->copy(2, 1, 0);
+                        lmp->atom->map_set();
+                    }
+                    if (commands(lmp, "run 0\nrun 20")) {
+                        (enabled ? candidate : reference) = state(lmp);
+                        int dim = 0;
+                        auto *counts = static_cast<double *>(
+                            lmp->modify->get_fix_by_id("pi")->extract("pimd_force_summary_counts", dim));
+                        EXPECT_NE(counts, nullptr);
+                        if (counts) {
+                            EXPECT_GT(counts[enabled && single ? 0 : 1], 0.0);
+                            EXPECT_EQ(counts[enabled && single ? 1 : 0], 0.0);
+                        }
+                    }
+                }
+                lammps_close(lmp);
+            }
+            EXPECT_EQ(reference.size(), 44 * p);
+            equal(reference, candidate, 1.0e-11);
+        }
+    }
+    if (had_previous) setenv(name, saved.c_str(), 1);
+    else unsetenv(name);
+}
