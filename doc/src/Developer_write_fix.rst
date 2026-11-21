@@ -243,3 +243,38 @@ files then these additional settings and functions are needed:
 - the functions ``void pack_restart(int i, double *buf)`` and
   ``void unpack_restart(int nlocal, int nth)`` need to be implemented
 
+
+PIMD bias interface
+-------------------
+
+.. versionadded:: TBD
+
+A bias fix can couple to :doc:`fix pimd/langevin <fix_pimd>` through the
+``PIMDBiasInterface`` pointer returned by
+``Fix::extract("pimd_bias_interface", dim)``. Check the returned pointer
+before using it and query the supported modes with ``bias_capabilities()``.
+The implementation in :doc:`fix plumed <fix_plumed>` provides an example.
+
+Register the adapter on every rank of every bead partition. Keep the returned
+shared registration token, and check its owner before accessing the integrator
+or releasing the registration. The token remains valid when either fix is
+deleted; a null owner means the integrator is no longer available.
+
+During the adapter's force callback, obtain a coordinate view and submit the
+bias contribution for that view's generation. Both operations are collective,
+including ranks with no owned atoms. Views borrow the integrator's storage
+and must not be retained across force evaluations or atom migration. Use
+local owned-atom order for the submitted Cartesian forces, and do not modify
+coordinates or ownership between acquisition and submission.
+
+Submit the physical bias energy share for the bead partition, replicated
+on its ranks, and the local physical virial in the order
+``xx, yy, zz, xy, xz, yz``. The integrator applies the bead-count factor
+exactly once and completes the normal-mode force transformation and pressure
+bookkeeping. An adapter must not transform the forces itself.
+The generation identifies a force evaluation rather than a timestep, so a
+repeated ``run 0`` requires a new view and submission. Updating adaptive bias
+history remains the adapter's responsibility.
+
+.. doxygenclass:: LAMMPS_NS::PIMDBiasInterface
+   :members:

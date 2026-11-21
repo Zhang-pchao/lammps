@@ -409,7 +409,8 @@ WARN_LOGFILE           = "../doxygen-warn.log"
 # spaces. See also FILE_PATTERNS and EXTENSION_MAPPING
 # Note: If this tag is empty the current directory is searched.
 
-INPUT                  = @LAMMPS_SOURCE_DIR@/utils.cpp                 \
+INPUT                  = @LAMMPS_SOURCE_DIR@/pimd_bias_interface.h      \
+                         @LAMMPS_SOURCE_DIR@/utils.cpp                 \
                          @LAMMPS_SOURCE_DIR@/utils.h                   \
                          @LAMMPS_SOURCE_DIR@/library.cpp               \
                          @LAMMPS_SOURCE_DIR@/library.h                 \

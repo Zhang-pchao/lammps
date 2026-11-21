@@ -8,6 +8,8 @@
    certain rights in this software. This software is distributed under
    the GNU General Public License.
 
+   Contributing author: Pengchao Zhang (pczhang1997@gmail.com)
+
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
@@ -75,17 +77,31 @@ struct PIMDBiasSubmission {
   const double *virial;
 };
 
+/** Typed contract between a PIMD integrator and an external bias fix.
+ *
+ * Access through Fix::extract("pimd_bias_interface", dim). Registration,
+ * coordinate acquisition and force submission must be called in matching
+ * order on every rank of every bead partition, including empty ranks.
+ * Coordinate views and submitted forces use local owned-atom order.
+ * The integrator applies the bead-count factor and transforms the forces.
+ */
 class PIMDBiasInterface {
  public:
   virtual ~PIMDBiasInterface() noexcept(false) = default;
+  /// Report the modes and coordinate contraction supported by the integrator.
   virtual PIMDBiasCapabilities bias_capabilities() const = 0;
-  // Registration and submission are collective over all bead partitions.
+  /// Register one bias adapter collectively and return its shared lifetime token.
   virtual std::shared_ptr<PIMDBiasRegistration> register_bias(Fix *, PIMDBiasMode, bool) = 0;
+  /// Release this registration; callers must first check that its owner is alive.
   virtual void unregister_bias(PIMDBiasRegistration &) = 0;
-  // Coordinate acquisition is also collective, including ranks with no atoms.
+  /// Acquire borrowed coordinates for the current generation collectively.
   virtual PIMDBiasCoordinates bias_coordinates(const PIMDBiasRegistration &) const = 0;
-  // dynamical_virial is the adapter's Fix::virial output. It is filled before
-  // core pressure/energy refresh, so native thermo sees the same current tally.
+  /** Submit Cartesian bias forces, physical energy and local physical virial.
+   *
+   * The submission generation must match the coordinate view and can be
+   * consumed only once. dynamical_virial is the adapter's Fix::virial output;
+   * it is filled before the integrator refreshes energy and pressure.
+   */
   virtual void submit_bias(const PIMDBiasRegistration &, const PIMDBiasSubmission &,
                            double *dynamical_virial) = 0;
 };
