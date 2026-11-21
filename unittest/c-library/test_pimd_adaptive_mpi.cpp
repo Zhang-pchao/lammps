@@ -21,6 +21,7 @@
 #include "library.h"
 #include "modify.h"
 #include "neighbor.h"
+#include "pimd_bias_interface.h"
 #include "REPLICA/pimd_pes_view.h"
 #include "universe.h"
 
@@ -29,6 +30,7 @@
 #include <cstdio>
 #include <iomanip>
 #include <sstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -38,6 +40,50 @@
 using namespace LAMMPS_NS;
 
 namespace {
+// Independent quadratic physical bias, normalized once by the bead count.
+class AdaptiveTestBias : public Fix {
+public:
+    std::shared_ptr<PIMDBiasRegistration> token;
+    AdaptiveTestBias(LAMMPS *lmp, int narg, char **arg) : Fix(lmp, narg, arg) {}
+    ~AdaptiveTestBias() override
+    {
+        if (token && token->owner) token->owner->unregister_bias(*token);
+    }
+    int setmask() override { return FixConst::POST_FORCE; }
+    void init() override
+    {
+        int dim = 0;
+        auto *core = modify->get_fix_by_id("pi");
+        auto *api = static_cast<PIMDBiasInterface *>(core->extract("pimd_bias_interface", dim));
+        token = api->register_bias(this, PIMDBiasMode::BIAS_MEAN, false);
+    }
+    void setup(int vflag) override { post_force(vflag); }
+    void post_force(int) override
+    {
+        const auto view = token->owner->bias_coordinates(*token);
+        const double factor = 0.03 / token->owner->bias_capabilities().beads;
+        std::vector<double> force(std::max(1, 3 * view.nlocal), 0.0);
+        double energy = 0.0, physical_virial[6] = {};
+        constexpr int row[6] = {0, 1, 2, 0, 0, 1}, column[6] = {0, 1, 2, 1, 2, 2};
+        for (int i = 0; i < view.nlocal; ++i) {
+            for (int d = 0; d < 3; ++d) {
+                const double x = view.beads[i][d];
+                energy += 0.5 * factor * x * x;
+                force[3 * i + d] = -factor * x;
+            }
+            for (int k = 0; k < 6; ++k)
+                physical_virial[k] += view.beads[i][row[k]] * force[3 * i + column[k]];
+        }
+        PIMDBiasSubmission submission{view.generation, view.nlocal, force.data(), energy,
+                                      physical_virial};
+        token->owner->submit_bias(*token, submission, virial);
+    }
+};
+Fix *make_adaptive_test_bias(LAMMPS *lmp, int narg, char **arg)
+{
+    return new AdaptiveTestBias(lmp, narg, arg);
+}
+
 std::string number(double x)
 {
     std::ostringstream stream;
@@ -718,6 +764,84 @@ TEST(PIMDAdaptive, velocity_summary_rejects_rank_mismatch)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     if (size < 2) GTEST_SKIP();
     const char *name = "LAMMPS_PIMD_VELOCITY_SUMMARY_EXPERIMENT";
+    const char *previous = std::getenv(name);
+    const bool had_previous = previous != nullptr;
+    const std::string saved = previous ? previous : "";
+    setenv(name, "0", 1);
+    auto *lmp = open_system(1);
+    if (prepare(lmp) && commands(lmp, "unfix pi")) {
+        setenv(name, rank % 2 ? "1" : "0", 1);
+        expect_error(lmp, options("transition", false), "matching options");
+    }
+    lammps_close(lmp);
+    if (had_previous) setenv(name, saved.c_str(), 1);
+    else unsetenv(name);
+}
+
+TEST(PIMDAdaptive, bias_moment_matches_gather_with_reordered_atoms)
+{
+    const char *name = "LAMMPS_PIMD_BIAS_MOMENT_EXPERIMENT";
+    const char *previous = std::getenv(name);
+    const bool had_previous = previous != nullptr;
+    const std::string saved = previous ? previous : "";
+    Modify::fix_styles().set_plugin("ADAPTIVE/TEST/BIAS", make_adaptive_test_bias);
+    int size;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    for (int p : {1, 2, 4, 16}) {
+        if ((p > size) || (size % p)) continue;
+        for (const std::string region : {"transition", "classical", "quantum", "mobile", "protected"}) {
+            std::vector<double> reference, candidate;
+            for (int enabled : {0, 1}) {
+                setenv(name, enabled ? "1" : "0", 1);
+                auto *lmp = open_system(p);
+                if (prepare(lmp, region, true)) {
+                    const bool single = lmp->comm->nprocs == 1;
+                    if (single && (lmp->universe->iworld % 2)) {
+                        lmp->atom->avec->grow(lmp->atom->nmax + 100);
+                        lmp->atom->avec->copy(0, 2, 0);
+                        lmp->atom->avec->copy(1, 0, 0);
+                        lmp->atom->avec->copy(2, 1, 0);
+                        lmp->atom->map_set();
+                    }
+                    if (commands(lmp, "fix test_bias all ADAPTIVE/TEST/BIAS\nrun 0\nrun 20")) {
+                        (enabled ? candidate : reference) = state(lmp);
+                        std::vector<double> virial(6 * p, 0.0);
+                        auto *adapter = lmp->modify->get_fix_by_id("test_bias");
+                        for (int k = 0; k < 6; ++k)
+                            virial[6 * lmp->universe->iworld + k] = adapter->virial[k];
+                        MPI_Allreduce(MPI_IN_PLACE, virial.data(), virial.size(), MPI_DOUBLE,
+                                      MPI_SUM, MPI_COMM_WORLD);
+                        auto &values = enabled ? candidate : reference;
+                        values.insert(values.end(), virial.begin(), virial.end());
+                        int dim = 0;
+                        auto *counts = static_cast<double *>(
+                            lmp->modify->get_fix_by_id("pi")->extract("pimd_bias_moment_counts", dim));
+                        EXPECT_NE(counts, nullptr);
+                        if (counts) {
+                            EXPECT_GT(counts[enabled && single ? 0 : 1], 0.0);
+                            EXPECT_EQ(counts[enabled && single ? 1 : 0], 0.0);
+                        }
+                    }
+                }
+                lammps_close(lmp);
+            }
+            EXPECT_EQ(reference.size(), 50 * p);
+            equal(reference, candidate, 1.0e-11);
+        }
+    }
+    Modify::fix_styles().clear_plugin("ADAPTIVE/TEST/BIAS");
+    if (had_previous) setenv(name, saved.c_str(), 1);
+    else unsetenv(name);
+}
+
+
+TEST(PIMDAdaptive, bias_moment_rejects_rank_mismatch)
+{
+    int size, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (size < 2) GTEST_SKIP();
+    const char *name = "LAMMPS_PIMD_BIAS_MOMENT_EXPERIMENT";
     const char *previous = std::getenv(name);
     const bool had_previous = previous != nullptr;
     const std::string saved = previous ? previous : "";

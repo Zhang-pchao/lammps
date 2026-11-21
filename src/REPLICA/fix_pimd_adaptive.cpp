@@ -67,9 +67,12 @@ FixPIMDAdaptive::FixPIMDAdaptive(LAMMPS *lmp, int narg, char **arg) :
   force_summary_enabled = summary && (std::strcmp(summary, "1") == 0);
   const char *velocity = std::getenv("LAMMPS_PIMD_VELOCITY_SUMMARY_EXPERIMENT");
   velocity_summary_enabled = velocity && (std::strcmp(velocity, "1") == 0);
+  const char *bias = std::getenv("LAMMPS_PIMD_BIAS_MOMENT_EXPERIMENT");
+  bias_moment_enabled = bias && (std::strcmp(bias, "1") == 0);
   std::string options = pes_snapshot_enabled ? "snapshot=1;" : "snapshot=0;";
   options += force_summary_enabled ? "force_summary=1;" : "force_summary=0;";
   options += velocity_summary_enabled ? "velocity_summary=1;" : "velocity_summary=0;";
+  options += bias_moment_enabled ? "bias_moment=1;" : "bias_moment=0;";
   for (int i = 3; i < narg; ++i) options += std::to_string(std::strlen(arg[i])) + ":" + arg[i];
   int length = static_cast<int>(options.size());
   MPI_Bcast(&length, 1, MPI_INT, 0, universe->uworld);
@@ -738,6 +741,10 @@ void *FixPIMDAdaptive::extract(const char *name, int &dim)
     dim = 1;
     return velocity_summary_counts.data();
   }
+  if (strcmp(name, "pimd_bias_moment_counts") == 0) {
+    dim = 1;
+    return bias_moment_counts.data();
+  }
   if (strcmp(name, "pimd_adaptive_profile") == 0) {
     dim = 1;
     return phase_profile.data();
@@ -855,23 +862,43 @@ void FixPIMDAdaptive::submit_bias(const PIMDBiasRegistration &registration,
       centers[3 * i + d] = c;
       for (int b = 0; b < np; ++b) offsets[(i * np + b) * 3 + d] = bufbeads[b][3 * i + d] - c;
     }
-  bias_forces.resize(std::max(1, 3 * atom->nlocal));
-  bias_force_rows.resize(std::max(1, atom->nlocal), bias_forces.data());
-  auto &forces = bias_forces;
-  auto &force_rows = bias_force_rows;
-  // resize may move the data; refresh even the zero-local-rank sentinel.
-  force_rows[0] = forces.data();
-  for (int i = 0; i < atom->nlocal; ++i) {
-    force_rows[i] = forces.data() + 3 * i;
-    for (int d = 0; d < 3; ++d) force_rows[i][d] = submission.force[3 * i + d];
+  // Only the unnormalized bead sum of the bias force-offset contraction
+  // enters the mapping virial. The later native force scaling by P is unchanged.
+  const bool reduced = bias_moment_enabled && (nprocs_universe == nreplica);
+  if (reduced) {
+    bias_moment.resize(std::max(1, ntotal));
+    for (int i = 0; i < atom->nlocal; ++i) {
+      double moment = 0.0;
+      for (int d = 0; d < 3; ++d)
+        moment += submission.force[3 * i + d] * offsets[(i * np + ireplica) * 3 + d];
+      bias_moment[atom->tag[i] - 1] = moment;
+    }
+    MPI_Allreduce(MPI_IN_PLACE, bias_moment.data(), ntotal, MPI_DOUBLE, MPI_SUM, rootworld);
+    ++bias_moment_counts[0];
+  } else {
+    bias_forces.resize(std::max(1, 3 * atom->nlocal));
+    bias_force_rows.resize(std::max(1, atom->nlocal), bias_forces.data());
+    auto &forces = bias_forces;
+    auto &force_rows = bias_force_rows;
+    // resize may move the data; refresh even the zero-local-rank sentinel.
+    force_rows[0] = forces.data();
+    for (int i = 0; i < atom->nlocal; ++i) {
+      force_rows[i] = forces.data() + 3 * i;
+      for (int d = 0; d < 3; ++d) force_rows[i][d] = submission.force[3 * i + d];
+    }
+    inter_replica_comm(force_rows.data());
+    ++bias_moment_counts[1];
   }
-  inter_replica_comm(force_rows.data());
   for (int k = 0; k < 6; ++k) dynamical_virial[k] = np * submission.virial[k];
   constexpr int row[6] = {0, 1, 2, 0, 0, 1}, column[6] = {0, 1, 2, 1, 2, 2};
   for (int i = 0; i < atom->nlocal; ++i) {
     double moment = 0.0;
-    for (int b = 0; b < np; ++b)
-      for (int d = 0; d < 3; ++d) moment += bufbeads[b][3 * i + d] * offsets[(i * np + b) * 3 + d];
+    if (reduced)
+      moment = bias_moment[atom->tag[i] - 1];
+    else
+      for (int b = 0; b < np; ++b)
+        for (int d = 0; d < 3; ++d)
+          moment += bufbeads[b][3 * i + d] * offsets[(i * np + b) * 3 + d];
     double distance[3];
     for (int d = 0; d < 3; ++d) distance[d] = centers[3 * i + d] - center[d];
     domain->minimum_image(FLERR, distance[0], distance[1], distance[2]);
@@ -934,7 +961,7 @@ double FixPIMDAdaptive::memory_usage()
       (offsets.capacity() + centroids.capacity() + mean_velocity.capacity() +
        bias_centers.capacity() + bias_forces.capacity() + normal_mode_forward.capacity() +
        normal_mode_inverse.capacity() + collective_send.capacity() + collective_values.capacity() +
-       force_summary.capacity() + velocity_summary.capacity()) *
+       force_summary.capacity() + velocity_summary.capacity() + bias_moment.capacity()) *
       sizeof(double) +
       (rows.capacity() + bias_force_rows.capacity()) * sizeof(double *) +
       (pes_snapshot_auxiliary.capacity() + pes_snapshot_centroid.capacity()) * sizeof(double) +
