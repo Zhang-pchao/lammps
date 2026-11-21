@@ -213,6 +213,13 @@ masses of beads, which can be used for the Partial Adiabatic CMD
 :ref:`(Hone) <Hone>`, or to be set as P, which results in the fictitious
 masses to be equal to the real particle masses.
 
+.. versionchanged:: TBD
+
+For *pimd/langevin*, *fmass* must be finite, positive, and no larger than
+:math:`P`.  Normal-mode harmonic propagation uses frequencies proportional
+to :math:`1/\sqrt{\mathrm{fmass}}`, consistently with the fictitious masses.
+This corrects propagation with non-unit *fmass*.
+
 The keyword *fmmode* of *fix pimd/langevin* determines the mode of fictitious
 mass preconditioning. There are two options: *physical* and *normal*. If *fmmode* is
 *physical*, then the physical mass of the particles are used (and then multiplied by
@@ -308,14 +315,14 @@ fix style *pimd/langevin*. It is in time unit. It only works on the
 centroid mode.
 
 The keyword *scale* specifies a scaling parameter for the damping times
-of the non-centroid modes for fix style *pimd/langevin*. The default
-damping time of the non-centroid mode :math:`i` is
-:math:`\frac{P}{\beta\hbar}\sqrt{\lambda_i\times\mathrm{fmass}}`
+of the non-centroid modes for fix style *pimd/langevin*. The frequency
+of non-centroid mode :math:`i` is
+:math:`\omega_i=\frac{P}{\beta\hbar}\sqrt{\lambda_i/\mathrm{fmass}}`
 (*fmmode* is *physical*) or
-:math:`\frac{P}{\beta\hbar}\sqrt{\mathrm{fmass}}` (*fmmode* is
-*normal*). The damping times of all non-centroid modes are the default
-values divided by *scale*. This keyword should be used only with
-*method*=*nmpimd*.
+:math:`\omega_i=\frac{P}{\beta\hbar\sqrt{\mathrm{fmass}}}`
+(*fmmode* is *normal*). Its damping time is
+:math:`1/(2\,\mathrm{scale}\,\omega_i)`.
+This keyword should be used only with *method*=*nmpimd*.
 
 The barostat parameters for fix style *pimd/langevin* with *npt* or
 *nph* ensemble is specified using one of *iso* and *aniso* keywords. A
@@ -416,6 +423,22 @@ Major differences of *fix pimd/nvt* and *fix pimd/langevin* are:
 Initially, the inter-replica communication and normal mode
 transformation parts of *fix pimd/langevin* are written based on those
 of *fix pimd/nvt*, but are significantly revised.
+
+PLUMED coupling
+---------------
+
+.. versionadded:: TBD
+
+The *pimd/langevin* style can exchange coordinates and physical bias forces
+with :doc:`fix plumed <fix_plumed>`.  Define the PIMD fix first and select it
+with the *pimd_fix* keyword of fix plumed.  For normal-mode PIMD the combined
+Cartesian forces are transformed once, after the bias has been added.
+The bias virial contributes to constant-pressure propagation while the
+physical-force kinetic estimators retain their original definition.
+See the path-integral section of :doc:`fix plumed <fix_plumed>` for supported
+ensembles, fixed coordinate contraction, force normalization, and restart
+requirements.
+
 
 Restart, fix_modify, output, run start/stop, minimize info
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""

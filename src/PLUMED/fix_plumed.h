@@ -21,6 +21,7 @@ FixStyle(plumed,FixPlumed);
 #define LMP_FIX_PLUMED_H
 
 #include "fix.h"
+#include "pimd_bias_interface.h"
 
 // forward declaration
 namespace PLMD {
@@ -41,25 +42,49 @@ class FixPlumed : public Fix {
   void post_force_respa(int, int, int) override;
   void min_post_force(int) override;
   double compute_scalar() override;
+  void *extract(const char *, int &) override;
   void reset_dt() override;
   int modify_param(int narg, char **arg) override;
   double memory_usage() override;
 
  private:
-  PLMD::Plumed *p;           // pointer to plumed object
-  int nlocal;                // number of atoms local to this process
-  int natoms;                // total number of atoms
-  int *gatindex;             // array of atom indexes local to this process
-  double *masses;            // array of masses for local atoms
-  double *charges;           // array of charges for local atoms
-  int nlevels_respa;         // this is something to enable respa
-  double bias;               // output bias potential
-  class Compute *c_pe;       // Compute for the energy
-  class Compute *c_press;    // Compute for the pressure
+  enum { PATH_INTEGRAL_OFF, PATH_INTEGRAL_COORDINATE_MEAN, PATH_INTEGRAL_CV_MEAN };
+
+  int path_contraction_flag;
+  double path_contraction;
+  std::vector<double> contracted_positions, contracted_forces, contraction_mean;
+
+  PLMD::Plumed *p;                 // pointer to plumed object
+  PIMDBiasInterface *pimd_core;    // typed capability, refreshed during init
+  std::shared_ptr<PIMDBiasRegistration> pimd_registration;
+  bigint last_pimd_update_step;    // history updates are distinct from force evaluations
+  std::vector<double> bias_positions, bias_forces;
+  int nlocal;                     // number of atoms local to this process
+  int natoms;                     // total number of atoms
+  int path_integral_mode;         // path-integral coupling mode
+  int plumed_active;              // this partition runs a PLUMED instance
+  int *gatindex;                  // array of atom indexes local to this process
+  double *masses;                 // array of masses for local atoms
+  double *charges;                // array of charges for local atoms
+  double *centroid_positions;     // local centroid coordinates passed to PLUMED
+  double *centroid_forces;        // local centroid forces returned by PLUMED
+  double *centroid_forces_all;    // tag-ordered centroid forces shared by all beads
+  int nlevels_respa;              // this is something to enable respa
+  double bias;                    // output bias potential
+  class Compute *c_pe;            // Compute for the energy
+  class Compute *c_press;         // Compute for the pressure
+  int plumedStopCondition = 0;
   int plumedNeedsEnergy;     // Flag to trigger calculation of the
                              // energy and virial
-  int plumedStopCondition;   // early stop flag, PLUMED keeps a pointer to it
   char *id_pe, *id_press;    // ID for potential energy and pressure compute
+  char *id_pimd;             // ID for the coupled PIMD integrator
+
+  void check_path_integral_compatibility();
+  void update_atom_data();
+  void post_force_beads(const PIMDBiasCoordinates &);
+  void post_force_centroid(const PIMDBiasCoordinates &);
+  void prepare_contracted_coordinates(const PIMDBiasCoordinates &);
+  void pullback_contracted_forces();
 };
 
 };    // namespace LAMMPS_NS

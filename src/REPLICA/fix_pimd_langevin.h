@@ -21,10 +21,11 @@ FixStyle(pimd/langevin,FixPIMDLangevin);
 #define FIX_PIMD_LANGEVIN_H
 
 #include "fix.h"
+#include "pimd_bias_interface.h"
 
 namespace LAMMPS_NS {
 
-class FixPIMDLangevin : public Fix {
+class FixPIMDLangevin : public Fix, public PIMDBiasInterface {
  public:
   FixPIMDLangevin(class LAMMPS *, int, char **);
   ~FixPIMDLangevin() override;
@@ -50,8 +51,25 @@ class FixPIMDLangevin : public Fix {
   void restart(char *buf) override;
 
   double compute_vector(int) override;
+  void *extract(const char *, int &) override;
+  void post_run() override;
+  PIMDBiasCapabilities bias_capabilities() const override;
+  std::shared_ptr<PIMDBiasRegistration> register_bias(Fix *, PIMDBiasMode, bool) override;
+  void unregister_bias(PIMDBiasRegistration &) override;
+  PIMDBiasCoordinates bias_coordinates(const PIMDBiasRegistration &) const override;
+  void submit_bias(const PIMDBiasRegistration &, const PIMDBiasSubmission &, double *) override;
 
  protected:
+  std::shared_ptr<PIMDBiasRegistration> bias_registration;
+  std::uint64_t bias_generation = 0;
+  bool bias_pending = false;
+  bool force_ready = true;
+  double bias_energy = 0.0;
+  void validate_partition_topology(bool);
+  void check_atom_consistency();
+  void validate_bias_order(Fix *) const;
+  void require_force_completion() const;
+  void complete_force_evaluation();
   // System setting variables
   int method;                              // PIMD or NMPIMD or CMD
   int fmmode;                              // physical or normal
@@ -104,10 +122,7 @@ class FixPIMDLangevin : public Fix {
   void comm_init();
   virtual void prepare_coordinates();
   void inter_replica_comm(double **ptr);
-  void ring_collect(const std::vector<tagint> &miss_tag,
-                                            double **ptr,
-                                            std::vector<tagint> &rep_tag,
-                                            std::vector<double> &rep_val);
+  void ring_collect(const std::vector<tagint> &, double **, std::vector<double> &);
   void virtual spring_force();
 
   /* normal-mode operations */
@@ -147,7 +162,7 @@ class FixPIMDLangevin : public Fix {
   int pdim;
   int p_flag[6];
   double p_target[6];
-  double vw[6];               // barostat velocity
+  double vw[6] = {};          // barostat velocity
   double ke_tensor[6];        // kinetic energy tensor
   double c_vir_tensor[6];     // centroid-virial tensor
   double stress_tensor[6];    // path integral centroid-virial stress tensor
