@@ -22,7 +22,11 @@ permissions:
 jobs:
   build:
     name: Programming Style Conformance
-    if: ${{ github.repository == 'lammps/lammps' }}
+    if: >-
+      ${{ github.repository == 'lammps/lammps' ||
+          (github.repository == 'Zhang-pchao/lammps' &&
+           github.event_name == 'workflow_dispatch' &&
+           github.ref == 'refs/heads/mixpimd/main') }}
     runs-on: ubuntu-latest
 
     steps:
