@@ -1,0 +1,29 @@
+# Four-bead PLUMED bias with fixed coordinate contraction.
+# Override ensemble and contraction with -var ensemble npt -var contraction 0.5.
+variable ensemble index nvt
+variable contraction index 0.5
+variable shift world -0.05 0.05 -0.03 0.03
+variable x2 equal 4.5+v_shift
+variable pressure string ""
+if "${ensemble} == npt" then "variable pressure string 'iso 0.0 barostat BZP taup 1.0'"
+units lj
+atom_style atomic
+atom_modify map array
+region box block 0 8 0 8 0 8
+create_box 1 box
+create_atoms 1 single 3.5 4 4
+create_atoms 1 single ${x2} 4 4
+mass 1 1.0
+pair_style lj/cut 2.5
+pair_coeff * * 0.05 1.0
+velocity all set 0.01 0.0 0.0
+timestep 0.001
+fix dynamics all pimd/langevin method nmpimd ensemble ${ensemble} &
+    integrator obabo fmmode physical fmass 1.0 sp 1.0 temp 1.0 &
+    thermostat PILE_L 2468 tau 1.0 fixcom no ${pressure}
+fix bias all plumed plumedfile plumed.dat outfile plumed.log &
+    path_integral cv_mean pimd_fix dynamics path_contraction ${contraction}
+fix_modify bias energy yes
+thermo_style custom step f_bias f_dynamics[10] vol
+thermo 5
+run 10

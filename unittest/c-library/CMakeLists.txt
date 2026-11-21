@@ -109,3 +109,18 @@ if(BUILD_MPI)
     ENVIRONMENT "TSAN_OPTIONS=ignore_noninstrumented_modules=1;HWLOC_HIDE_ERRORS=2"
     PASS_REGULAR_EXPRESSION "LAMMPS \\([0-9]+ [A-Za-z]+ 2[0-9][0-9][0-9]( - Update [0-9]+)?( - Development.*)?( - Maintenance.*)?\\)")
 endif()
+
+# Native multi-partition tests for the external PIMD bias contract.
+if(BUILD_MPI AND PKG_REPLICA)
+  add_executable(test_pimd_bias_interface_mpi test_pimd_bias_interface_mpi.cpp)
+  target_link_libraries(test_pimd_bias_interface_mpi PRIVATE lammps GTest::GMock)
+  target_compile_definitions(test_pimd_bias_interface_mpi PRIVATE MPICH_SKIP_MPICXX=1 OMPI_SKIP_MPICXX=1)
+  add_mpi_test(NAME PIMDBiasMPI NUM_PROCS 4 COMMAND $<TARGET_FILE:test_pimd_bias_interface_mpi>)
+  if(PKG_PLUMED)
+    add_executable(test_plumed_path_contraction_mpi test_plumed_path_contraction_mpi.cpp)
+    target_link_libraries(test_plumed_path_contraction_mpi PRIVATE lammps GTest::GMock)
+    target_compile_definitions(test_plumed_path_contraction_mpi PRIVATE MPICH_SKIP_MPICXX=1 OMPI_SKIP_MPICXX=1)
+    add_mpi_test(NAME PlumedPathContractionMPI NUM_PROCS 4 COMMAND $<TARGET_FILE:test_plumed_path_contraction_mpi>)
+    add_mpi_test(NAME PlumedPathContractionOddMPI NUM_PROCS 6 COMMAND $<TARGET_FILE:test_plumed_path_contraction_mpi>)
+  endif()
+endif()

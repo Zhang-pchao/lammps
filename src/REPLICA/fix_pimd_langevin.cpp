@@ -43,6 +43,7 @@
 #include "universe.h"
 #include "update.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -69,11 +70,11 @@ constexpr int TAG_INTER_REPLICA_COUNT = 10;
 constexpr int TAG_INTER_REPLICA_TAGS  = 11;
 constexpr int TAG_INTER_REPLICA_VALS  = 12;
 
-constexpr int TAG_RING_MISS_COUNT = 400;
-constexpr int TAG_RING_MISS_TAGS  = 401;
-constexpr int TAG_RING_REP_COUNT  = 402;
-constexpr int TAG_RING_REP_TAGS   = 403;
-constexpr int TAG_RING_REP_VALS   = 404;
+constexpr int TAG_RING_PENDING_COUNT = 400;
+constexpr int TAG_RING_FOUND_COUNT = 401;
+constexpr int TAG_RING_PENDING = 402;
+constexpr int TAG_RING_FOUND_TAGS = 403;
+constexpr int TAG_RING_FOUND_VALUES = 404;
 } // namespace
 
 /* ---------------------------------------------------------------------- */
@@ -173,7 +174,7 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg) :
                                         style));
     } else if (strcmp(arg[i], "fmass") == 0) {
       fmass = utils::numeric(FLERR, arg[i + 1], false, lmp);
-      if (fmass < 0.0 || fmass > np)
+      if (!std::isfinite(fmass) || fmass <= 0.0 || fmass > np)
         error->universe_all(FLERR, fmt::format("Invalid fmass value for fix {}", style));
     } else if (strcmp(arg[i], "sp") == 0) {
       sp = utils::numeric(FLERR, arg[i + 1], false, lmp);
@@ -353,6 +354,7 @@ FixPIMDLangevin::FixPIMDLangevin(LAMMPS *lmp, int narg, char **arg) :
 
 FixPIMDLangevin::~FixPIMDLangevin()
 {
+  if (bias_registration) bias_registration->owner = nullptr;
   modify->delete_compute(id_pe);
   modify->delete_compute(id_press);
   delete[] id_pe;
@@ -398,6 +400,7 @@ int FixPIMDLangevin::setmask()
   mask |= INITIAL_INTEGRATE;
   mask |= FINAL_INTEGRATE;
   mask |= END_OF_STEP;
+  mask |= POST_RUN;
   return mask;
 }
 
@@ -405,6 +408,7 @@ int FixPIMDLangevin::setmask()
 
 void FixPIMDLangevin::init()
 {
+  if (bias_registration) validate_partition_topology(true);
   if (atom->map_style == Atom::MAP_NONE)
     error->all(FLERR, fmt::format("Fix {} requires an atom map, see atom_modify", style));
   if (atom->tag_consecutive() == 0)
@@ -500,10 +504,12 @@ void FixPIMDLangevin::setup(int vflag)
       nmpimd_transform(bufbeads, x, M_x2xp[universe->iworld]);
   } else if (method == PIMD) {
     prepare_coordinates();
-    if (cmode == SINGLE_PROC)
-      spring_force();
-    else if (cmode == MULTI_PROC)
-      error->universe_all(FLERR, "Method pimd only supports a single processor per bead");
+    if (!bias_registration) {
+      if (cmode == SINGLE_PROC)
+        spring_force();
+      else if (cmode == MULTI_PROC)
+        error->universe_all(FLERR, "Method pimd only supports a single processor per bead");
+    }
   } else {
     error->universe_all(
         FLERR,
@@ -527,7 +533,7 @@ void FixPIMDLangevin::setup(int vflag)
 
   post_force(vflag);
   compute_totke();
-  end_of_step();
+  if (!bias_pending) end_of_step();
   c_pe->addstep(update->ntimestep + 1);
   c_press->addstep(update->ntimestep + 1);
 }
@@ -536,6 +542,7 @@ void FixPIMDLangevin::setup(int vflag)
 
 void FixPIMDLangevin::initial_integrate(int /*vflag*/)
 {
+  require_force_completion();
   int nlocal = atom->nlocal;
   double **x = atom->x;
   imageint *image = atom->image;
@@ -643,6 +650,7 @@ void FixPIMDLangevin::initial_integrate(int /*vflag*/)
 
 void FixPIMDLangevin::final_integrate()
 {
+  require_force_completion();
   if (pstat_flag) {
     compute_totke();
     compute_p_cv();
@@ -695,10 +703,21 @@ void FixPIMDLangevin::post_force(int /*flag*/)
     xc[i][2] = xcall[3 * (tag[i] - 1) + 2];
   }
 
+  if (bias_registration) {
+    if (atom->natoms != ntotal) error->all(FLERR, "External PIMD bias requires a fixed atom count");
+    bias_energy = 0.0;
+    for (double &value : bias_registration->adapter->virial) value = 0.0;
+  }
   compute_vir();
   compute_xf_vir();
   compute_cvir();
   compute_t_vir();
+  if (bias_registration) {
+    bias_pending = true;
+    force_ready = false;
+    ++bias_generation;
+    return;
+  }
 
   if (method == PIMD) {
     if (mapflag) {
@@ -729,6 +748,7 @@ void FixPIMDLangevin::post_force(int /*flag*/)
 
 void FixPIMDLangevin::end_of_step()
 {
+  require_force_completion();
   compute_totke();
   compute_p_cv();
   compute_tote();
@@ -742,26 +762,42 @@ void FixPIMDLangevin::collect_xc()
   int nlocal = atom->nlocal;
   double **x = atom->x;
   tagint *tag = atom->tag;
-  if (ireplica == 0) {
-    if (cmode == SINGLE_PROC) {
+
+  if (method == PIMD) {
+    inter_replica_comm(x);
+    if (ireplica == 0) {
+      for (int i = 0; i < ntotal * 3; i++) xcall[i] = 0.0;
+      if (cmode == SINGLE_PROC) {
+        for (int i = 0; i < ntotal; i++) {
+          for (int d = 0; d < 3; d++) {
+            for (int bead = 0; bead < np; bead++)
+              xcall[3 * i + d] += bufsortedall[bead * ntotal + i][d] * inverse_np;
+          }
+        }
+      } else {
+        for (int i = 0; i < nlocal; i++) {
+          const int index = tag[i] - 1;
+          for (int d = 0; d < 3; d++) {
+            for (int bead = 0; bead < np; bead++)
+              xcall[3 * index + d] += bufbeads[bead][3 * i + d] * inverse_np;
+          }
+        }
+        MPI_Allreduce(MPI_IN_PLACE, xcall, ntotal * 3, MPI_DOUBLE, MPI_SUM, world);
+      }
+    }
+  } else {
+    if (ireplica == 0) {
+      for (int i = 0; i < ntotal; i++) xcall[3 * i + 0] = xcall[3 * i + 1] = xcall[3 * i + 2] = 0.0;
+
+      const double sqrtnp = sqrt((double) np);
       for (int i = 0; i < nlocal; i++) {
-        xcall[3 * i + 0] = xcall[3 * i + 1] = xcall[3 * i + 2] = 0.0;
+        xcall[3 * (tag[i] - 1) + 0] = x[i][0] / sqrtnp;
+        xcall[3 * (tag[i] - 1) + 1] = x[i][1] / sqrtnp;
+        xcall[3 * (tag[i] - 1) + 2] = x[i][2] / sqrtnp;
       }
-    } else if (cmode == MULTI_PROC) {
-      for (int i = 0; i < ntotal; i++) {
-        xcall[3 * i + 0] = xcall[3 * i + 1] = xcall[3 * i + 2] = 0.0;
-      }
-    }
 
-    const double sqrtnp = sqrt((double) np);
-    for (int i = 0; i < nlocal; i++) {
-      xcall[3 * (tag[i] - 1) + 0] = x[i][0] / sqrtnp;
-      xcall[3 * (tag[i] - 1) + 1] = x[i][1] / sqrtnp;
-      xcall[3 * (tag[i] - 1) + 2] = x[i][2] / sqrtnp;
-    }
-
-    if (cmode == MULTI_PROC) {
-      MPI_Allreduce(MPI_IN_PLACE, xcall, ntotal * 3, MPI_DOUBLE, MPI_SUM, world);
+      if (cmode == MULTI_PROC)
+        MPI_Allreduce(MPI_IN_PLACE, xcall, ntotal * 3, MPI_DOUBLE, MPI_SUM, world);
     }
   }
   MPI_Bcast(xcall, ntotal * 3, MPI_DOUBLE, 0, universe->uworld);
@@ -1018,8 +1054,11 @@ void FixPIMDLangevin::langevin_init()
 {
   double beta = 1.0 / kt;
   const double _omega_np = np / beta / hbar;
-  double _omega_np_dt_half = _omega_np * update->dt * 0.5;
+  double _omega_np_dt_half = _omega_np * update->dt * 0.5 / sqrt(fmass);
 
+  delete[] _omega_k;
+  delete[] Lan_c;
+  delete[] Lan_s;
   _omega_k = new double[np];
   Lan_c = new double[np];
   Lan_s = new double[np];
@@ -1062,6 +1101,9 @@ void FixPIMDLangevin::langevin_init()
     std::string out = "Initializing PI Langevin equation thermostat...\n";
     out += "  Bead ID    |    omega    |    tau    |    c1    |    c2\n";
     if (method == NMPIMD) {
+      delete[] tau_k;
+      delete[] c1_k;
+      delete[] c2_k;
       tau_k = new double[np];
       c1_k = new double[np];
       c2_k = new double[np];
@@ -1240,24 +1282,33 @@ void FixPIMDLangevin::spring_force()
 
   for (int i = 0; i < nlocal; i++) {
     if (mask[i] & groupbit) {
-      double delx1 = bufsortedall[x_last * nlocal + tagtmp[i] - 1][0] - x[i][0];
-      double dely1 = bufsortedall[x_last * nlocal + tagtmp[i] - 1][1] - x[i][1];
-      double delz1 = bufsortedall[x_last * nlocal + tagtmp[i] - 1][2] - x[i][2];
+      const double *xlast;
+      const double *xnext;
+      if (cmode == SINGLE_PROC) {
+        xlast = bufsortedall[x_last * ntotal + tagtmp[i] - 1];
+        xnext = bufsortedall[x_next * ntotal + tagtmp[i] - 1];
+      } else {
+        xlast = &bufbeads[x_last][3 * i];
+        xnext = &bufbeads[x_next][3 * i];
+      }
 
-      double delx2 = bufsortedall[x_next * nlocal + tagtmp[i] - 1][0] - x[i][0];
-      double dely2 = bufsortedall[x_next * nlocal + tagtmp[i] - 1][1] - x[i][1];
-      double delz2 = bufsortedall[x_next * nlocal + tagtmp[i] - 1][2] - x[i][2];
+      double delx1 = xlast[0] - x[i][0];
+      double dely1 = xlast[1] - x[i][1];
+      double delz1 = xlast[2] - x[i][2];
+
+      double delx2 = xnext[0] - x[i][0];
+      double dely2 = xnext[1] - x[i][1];
+      double delz2 = xnext[2] - x[i][2];
 
       double ff = fbond * _mass[type[i]];
-      // double ff = 0;
 
       double dx = delx1 + delx2;
       double dy = dely1 + dely2;
       double dz = delz1 + delz2;
 
-      f[i][0] += dx*ff;
-      f[i][1] += dy*ff;
-      f[i][2] += dz*ff;
+      f[i][0] += dx * ff;
+      f[i][1] += dy * ff;
+      f[i][2] += dz * ff;
 
       spring_energy += 0.5 * ff * (delx2 * delx2 + dely2 * dely2 + delz2 * delz2);
     }
@@ -1317,7 +1368,7 @@ void FixPIMDLangevin::comm_init()
 
 void FixPIMDLangevin::reallocate_xc()
 {
-  maxxc = atom->nmax;
+  maxxc = std::max(1, atom->nmax);
   memory->destroy(xc);
   memory->create(xc, maxxc, 3, "FixPIMDLangevin:xc");
 }
@@ -1326,7 +1377,7 @@ void FixPIMDLangevin::reallocate_xc()
 
 void FixPIMDLangevin::reallocate_x_unwrap()
 {
-  maxunwrap = atom->nmax;
+  maxunwrap = std::max(1, atom->nmax);
   memory->destroy(x_unwrap);
   memory->create(x_unwrap, maxunwrap, 3, "FixPIMDLangevin:x_unwrap");
 }
@@ -1335,22 +1386,23 @@ void FixPIMDLangevin::reallocate_x_unwrap()
 
 void FixPIMDLangevin::reallocate()
 {
-  maxlocal = atom->nmax;
+  maxlocal = std::max(1, atom->nmax);
+  maxsend = std::max(maxsend, maxlocal);
   ntotal = atom->natoms;
   if (cmode == SINGLE_PROC) {
     memory->destroy(bufsorted);
     memory->destroy(bufsortedall);
-    memory->create(bufsorted, ntotal, 3, "FixPIMDLangevin:bufsorted");
-    memory->create(bufsortedall, nreplica * ntotal, 3, "FixPIMDLangevin:bufsortedall");
+    memory->create(bufsorted, std::max(1, ntotal), 3, "FixPIMDLangevin:bufsorted");
+    memory->create(bufsortedall, std::max(1, nreplica * ntotal), 3, "FixPIMDLangevin:bufsortedall");
   } else if (cmode == MULTI_PROC) {
     memory->destroy(bufsend);
     memory->destroy(bufrecv);
     memory->destroy(tagsend);
     memory->destroy(tagrecv);
     memory->destroy(bufbeads);
-    memory->create(bufsend, maxlocal*3, "FixPIMDLangevin:bufsend");
-    memory->create(bufrecv, maxlocal*3, "FixPIMDLangevin:bufrecv");
-    memory->create(tagsend, maxlocal, "FixPIMDLangevin:tagsend");
+    memory->create(bufsend, maxsend * 3, "FixPIMDLangevin:bufsend");
+    memory->create(bufrecv, maxlocal * 3, "FixPIMDLangevin:bufrecv");
+    memory->create(tagsend, maxsend, "FixPIMDLangevin:tagsend");
     memory->create(tagrecv, maxlocal, "FixPIMDLangevin:tagrecv");
     memory->create(bufbeads, nreplica, maxlocal * 3, "FixPIMDLangevin:bufrecv");
   }
@@ -1360,7 +1412,10 @@ void FixPIMDLangevin::reallocate()
 
 void FixPIMDLangevin::inter_replica_comm(double **ptr)
 {
-  if (atom->nmax > maxlocal) reallocate();
+  if (!bufsend && !bufsorted)
+    reallocate();
+  else if (atom->nmax > maxlocal)
+    reallocate();
   int nlocal = atom->nlocal;
   tagint *tag = atom->tag;
   int i, m;
@@ -1391,11 +1446,9 @@ void FixPIMDLangevin::inter_replica_comm(double **ptr)
 
       // 1) exchange local counts between the paired ranks in universe->uworld
       int nsend = 0;
-      MPI_Sendrecv((void*)&nlocal, 1, MPI_INT,
-                  plansend[iplan], TAG_INTER_REPLICA_COUNT,
-                  (void*)&nsend, 1, MPI_INT,
-                  planrecv[iplan], TAG_INTER_REPLICA_COUNT,
-                  universe->uworld, MPI_STATUS_IGNORE);
+      MPI_Sendrecv((void *) &nlocal, 1, MPI_INT, plansend[iplan], TAG_INTER_REPLICA_COUNT,
+                   (void *) &nsend, 1, MPI_INT, planrecv[iplan], TAG_INTER_REPLICA_COUNT,
+                   universe->uworld, MPI_STATUS_IGNORE);
 
       // 2) ensure buffers sized for nsend
       if (nsend > maxsend) {
@@ -1409,11 +1462,9 @@ void FixPIMDLangevin::inter_replica_comm(double **ptr)
       // 3) exchange tags:
       //    send my local tags (atom->tag[0..nlocal-1])
       //    receive remote rank's local tags into tagsend[0..nsend-1]
-      MPI_Sendrecv((void*)atom->tag, nlocal, MPI_LMP_TAGINT,
-                  plansend[iplan], TAG_INTER_REPLICA_TAGS,
-                  (void*)tagsend, nsend, MPI_LMP_TAGINT,
-                  planrecv[iplan], TAG_INTER_REPLICA_TAGS,
-                  universe->uworld, MPI_STATUS_IGNORE);
+      MPI_Sendrecv((void *) atom->tag, nlocal, MPI_LMP_TAGINT, plansend[iplan],
+                   TAG_INTER_REPLICA_TAGS, (void *) tagsend, nsend, MPI_LMP_TAGINT, planrecv[iplan],
+                   TAG_INTER_REPLICA_TAGS, universe->uworld, MPI_STATUS_IGNORE);
 
       // 4) pack ptr for the tags the remote rank needs from me
       //    For each received tag, find my local index and copy ptr[index][0..2]
@@ -1425,39 +1476,29 @@ void FixPIMDLangevin::inter_replica_comm(double **ptr)
       for (int i = 0; i < nsend; i++) {
         const int idx = atom->map(tagsend[i]);
         if (idx >= 0 && idx < nlocal) {
-          bufsend[3*i + 0] = ptr[idx][0];
-          bufsend[3*i + 1] = ptr[idx][1];
-          bufsend[3*i + 2] = ptr[idx][2];
+          bufsend[3 * i + 0] = ptr[idx][0];
+          bufsend[3 * i + 1] = ptr[idx][1];
+          bufsend[3 * i + 2] = ptr[idx][2];
         } else {
-          miss_idx.push_back(i);   // remember which slot in bufsend needs collect
-          miss_tag.push_back(tagsend[i]);   // remember which tag that slot corresponds to
+          miss_idx.push_back(i);             // remember which slot in bufsend needs collect
+          miss_tag.push_back(tagsend[i]);    // remember which tag that slot corresponds to
         }
       }
 
       // 5) collect missing tags within this world (local-only claiming)
+      // Every rank must forward ring requests, even if its own list is empty.
+      int has_missing_tags = miss_tag.empty() ? 0 : 1;
+      MPI_Allreduce(MPI_IN_PLACE, &has_missing_tags, 1, MPI_INT, MPI_MAX, world);
+
+      std::vector<double> collected_values;
+      if (has_missing_tags) ring_collect(miss_tag, ptr, collected_values);
+
       if (!miss_tag.empty()) {
-        std::vector<tagint> rep_tag;
-        std::vector<double> rep_val;
-        ring_collect(miss_tag, ptr, rep_tag, rep_val);
-
-        // fill missing slots in bufsend by tag lookup (missing is small)
-        // Use a simple O(N^2) search since missing tags expected to be few
-        for (int k = 0; k < (int)miss_tag.size(); k++) {
-          const tagint t = miss_tag[k];
-          int pos = -1;
-          for (int j = 0; j < (int)rep_tag.size(); j++) {
-            if (rep_tag[j] == t) { pos = j; break; }
-          }
-          if (pos < 0) {
-            auto mesg = fmt::format("collect failed: tag {} not returned on world [{}] rank [{}]\n",
-                                    (int)t, universe->iworld, comm->me);
-            error->universe_one(FLERR, mesg);
-          }
-
+        for (int k = 0; k < static_cast<int>(miss_tag.size()); k++) {
           const int i = miss_idx[k];
-          bufsend[3*i + 0] = rep_val[3*pos + 0];
-          bufsend[3*i + 1] = rep_val[3*pos + 1];
-          bufsend[3*i + 2] = rep_val[3*pos + 2];
+          bufsend[3 * i + 0] = collected_values[3 * k + 0];
+          bufsend[3 * i + 1] = collected_values[3 * k + 1];
+          bufsend[3 * i + 2] = collected_values[3 * k + 2];
         }
       }
 
@@ -1465,14 +1506,12 @@ void FixPIMDLangevin::inter_replica_comm(double **ptr)
       //    - send bufsend (3*nsend) to planrecv[iplan]
       //    - receive bufrecv (3*nlocal) from plansend[iplan]
       //
-      // This mirrors your reference's direction choices.
-      MPI_Sendrecv((void*)bufsend, 3*nsend, MPI_DOUBLE,
-                  planrecv[iplan], TAG_INTER_REPLICA_VALS,
-                  (void*)bufrecv, 3*nlocal, MPI_DOUBLE,
-                  plansend[iplan], TAG_INTER_REPLICA_VALS,
-                  universe->uworld, MPI_STATUS_IGNORE);
+      // Exchange values with the corresponding rank in the target bead.
+      MPI_Sendrecv((void *) bufsend, 3 * nsend, MPI_DOUBLE, planrecv[iplan], TAG_INTER_REPLICA_VALS,
+                   (void *) bufrecv, 3 * nlocal, MPI_DOUBLE, plansend[iplan],
+                   TAG_INTER_REPLICA_VALS, universe->uworld, MPI_STATUS_IGNORE);
 
-      // 6) store received x/f for this plan into bufbeads[modeindex[iplan]]
+      // 7) store received x/f for this plan into bufbeads[modeindex[iplan]]
       memcpy(bufbeads[modeindex[iplan]], bufrecv, sizeof(double) * 3 * nlocal);
     }
   }
@@ -1480,103 +1519,92 @@ void FixPIMDLangevin::inter_replica_comm(double **ptr)
 
 /* ---------------------------------------------------------------------- */
 
-void FixPIMDLangevin::ring_collect(const std::vector<tagint> &miss_tag,
-                                            double **ptr,
-                                            std::vector<tagint> &rep_tag,
-                                            std::vector<double> &rep_val)
+void FixPIMDLangevin::ring_collect(const std::vector<tagint> &requested_tags, double **source,
+                                   std::vector<double> &requested_values)
 {
-  // ring-collection: collect missing atoms from other ranks in this world
-  // by passing missing tag lists and found values in a ring
   const int me = comm->me;
-  const int P  = comm->nprocs;
-  const int next = (me + 1) % P;
-  const int prev = (me - 1 + P) % P;
+  const int nprocs = comm->nprocs;
+  const int next = (me + 1) % nprocs;
+  const int prev = (me - 1 + nprocs) % nprocs;
   const int nlocal = atom->nlocal;
+  tagint unused_tag = 0;
+  double unused_value = 0.0;
+  const auto tag_buffer = [&unused_tag](std::vector<tagint> &values) {
+    return values.empty() ? &unused_tag : values.data();
+  };
+  const auto value_buffer = [&unused_value](std::vector<double> &values) {
+    return values.empty() ? &unused_value : values.data();
+  };
 
-  // Token state for this rank's missing tags
-  std::vector<tagint> tok_missing = miss_tag;
-  std::vector<tagint> tok_found_tags;
-  std::vector<double> tok_found_vals;   // 3 per found tag
+  int too_many = requested_tags.size() > static_cast<std::size_t>(MAXSMALLINT / 3);
+  MPI_Allreduce(MPI_IN_PLACE, &too_many, 1, MPI_INT, MPI_MAX, lmp->world);
+  if (too_many) lmp->error->all(FLERR, "Fix {} has too many atom vector requests", style);
 
-  // If missing is tiny as expected, reserve to reduce realloc
-  tok_found_tags.reserve(tok_missing.size());
-  tok_found_vals.reserve(3 * tok_missing.size());
+  std::vector<tagint> pending(requested_tags);
+  std::vector<tagint> found_tags;
+  std::vector<double> found_values;
+  found_tags.reserve(pending.size());
+  found_values.reserve(3 * pending.size());
 
-  // Move one hop per iteration; after P hops, your token returns to you.
-  for (int hop = 0; hop < P; hop++) {
+  for (int hop = 0; hop < nprocs; hop++) {
+    const int send_pending = static_cast<int>(pending.size());
+    const int send_found = static_cast<int>(found_tags.size());
+    int recv_pending, recv_found;
 
-    // 1) exchange sizes
-    int sm = (int) tok_missing.size();
-    int sf = (int) tok_found_tags.size();
-    int rm = 0, rf = 0;
+    MPI_Sendrecv(&send_pending, 1, MPI_INT, next, TAG_RING_PENDING_COUNT, &recv_pending, 1, MPI_INT,
+                 prev, TAG_RING_PENDING_COUNT, lmp->world, MPI_STATUS_IGNORE);
+    MPI_Sendrecv(&send_found, 1, MPI_INT, next, TAG_RING_FOUND_COUNT, &recv_found, 1, MPI_INT, prev,
+                 TAG_RING_FOUND_COUNT, lmp->world, MPI_STATUS_IGNORE);
 
-    MPI_Sendrecv(&sm, 1, MPI_INT, next, TAG_RING_MISS_COUNT,
-                 &rm, 1, MPI_INT, prev, TAG_RING_MISS_COUNT,
-                 world, MPI_STATUS_IGNORE);
+    std::vector<tagint> incoming_pending(recv_pending);
+    std::vector<tagint> incoming_found_tags(recv_found);
+    std::vector<double> incoming_found_values(3 * static_cast<std::size_t>(recv_found));
 
-    MPI_Sendrecv(&sf, 1, MPI_INT, next, TAG_RING_MISS_TAGS,
-                 &rf, 1, MPI_INT, prev, TAG_RING_MISS_TAGS,
-                 world, MPI_STATUS_IGNORE);
+    MPI_Sendrecv(tag_buffer(pending), send_pending, MPI_LMP_TAGINT, next, TAG_RING_PENDING,
+                 tag_buffer(incoming_pending), recv_pending, MPI_LMP_TAGINT, prev, TAG_RING_PENDING,
+                 lmp->world, MPI_STATUS_IGNORE);
+    MPI_Sendrecv(tag_buffer(found_tags), send_found, MPI_LMP_TAGINT, next, TAG_RING_FOUND_TAGS,
+                 tag_buffer(incoming_found_tags), recv_found, MPI_LMP_TAGINT, prev,
+                 TAG_RING_FOUND_TAGS, lmp->world, MPI_STATUS_IGNORE);
+    MPI_Sendrecv(value_buffer(found_values), 3 * send_found, MPI_DOUBLE, next,
+                 TAG_RING_FOUND_VALUES, value_buffer(incoming_found_values), 3 * recv_found,
+                 MPI_DOUBLE, prev, TAG_RING_FOUND_VALUES, lmp->world, MPI_STATUS_IGNORE);
 
-    // 2) prepare recv buffers
-    std::vector<tagint> in_missing(rm);
-    std::vector<tagint> in_found_tags(rf);
-    std::vector<double> in_found_vals(3 * (size_t)rf);
-
-    // 3) exchange payloads
-    MPI_Sendrecv(tok_missing.data(), sm, MPI_LMP_TAGINT, next, TAG_RING_REP_COUNT,
-                 in_missing.data(), rm, MPI_LMP_TAGINT, prev, TAG_RING_REP_COUNT,
-                 world, MPI_STATUS_IGNORE);
-
-    MPI_Sendrecv(tok_found_tags.data(), sf, MPI_LMP_TAGINT, next, TAG_RING_REP_TAGS,
-                 in_found_tags.data(), rf, MPI_LMP_TAGINT, prev, TAG_RING_REP_TAGS,
-                 world, MPI_STATUS_IGNORE);
-
-    MPI_Sendrecv(tok_found_vals.data(), 3*sf, MPI_DOUBLE, next, TAG_RING_REP_VALS,
-                 in_found_vals.data(), 3*rf, MPI_DOUBLE, prev, TAG_RING_REP_VALS,
-                 world, MPI_STATUS_IGNORE);
-
-    // 4) process received token: claim only if local owner
-    std::vector<tagint> out_missing;
-    out_missing.reserve(in_missing.size());
-
-    for (tagint t : in_missing) {
-      const int idx = atom->map(t);
-
-      // local-only claim (ignore ghosts)
-      // When excecuting this function at the end of initial_integrate,
-      // where the coordinates of local atoms are updated while those of ghost atoms are not,
-      // considering ghost atoms lead to incorrect coordinates.
-      if (idx >= 0 && idx < nlocal) {
-        in_found_tags.push_back(t);
-        in_found_vals.push_back(ptr[idx][0]);
-        in_found_vals.push_back(ptr[idx][1]);
-        in_found_vals.push_back(ptr[idx][2]);
+    std::vector<tagint> still_pending;
+    still_pending.reserve(incoming_pending.size());
+    for (tagint tag : incoming_pending) {
+      const int index = atom->map(tag);
+      if (index >= 0 && index < nlocal) {
+        incoming_found_tags.push_back(tag);
+        incoming_found_values.push_back(source[index][0]);
+        incoming_found_values.push_back(source[index][1]);
+        incoming_found_values.push_back(source[index][2]);
       } else {
-        out_missing.push_back(t);
+        still_pending.push_back(tag);
       }
     }
 
-    // 5) forward updated token
-    tok_missing.swap(out_missing);
-    tok_found_tags.swap(in_found_tags);
-    tok_found_vals.swap(in_found_vals);
+    pending.swap(still_pending);
+    found_tags.swap(incoming_found_tags);
+    found_values.swap(incoming_found_values);
   }
 
-  // After full ring, the token for this rank should be back here.
-  // Now we have the resolved list for this rank.
-  rep_tag.swap(tok_found_tags);
-  rep_val.swap(tok_found_vals);
+  if (!pending.empty())
+    lmp->error->universe_one(FLERR,
+                             fmt::format("Fix {} could not find atom ID {} in partition {}", style,
+                                         pending[0], universe->iworld));
 
-  // If anything still missing, it's a real error (tag not present in this world).
-  if (!tok_missing.empty()) {
-    // Print a small sample to help debug
-    const tagint t0 = tok_missing[0];
-    auto mesg = fmt::format(
-      "ring_collect: unresolved {} tags after {} hops on world [{}] rank [{}]. "
-      "Example tag = {}.\n",
-      (int)tok_missing.size(), P, universe->iworld, me, (int)t0);
-    error->universe_one(FLERR, mesg);
+  requested_values.resize(3 * requested_tags.size());
+  for (std::size_t i = 0; i < requested_tags.size(); i++) {
+    const auto iter = std::find(found_tags.begin(), found_tags.end(), requested_tags[i]);
+    if (iter == found_tags.end())
+      lmp->error->universe_one(FLERR,
+                               fmt::format("Fix {} could not collect atom ID {} in partition {}",
+                                           style, requested_tags[i], universe->iworld));
+    const std::size_t index = std::distance(found_tags.begin(), iter);
+    requested_values[3 * i] = found_values[3 * index];
+    requested_values[3 * i + 1] = found_values[3 * index + 1];
+    requested_values[3 * i + 2] = found_values[3 * index + 2];
   }
 }
 
@@ -1778,6 +1806,12 @@ void FixPIMDLangevin::compute_pote()
   pote = 0.0;
   c_pe->compute_scalar();
   pe_bead = c_pe->scalar;
+  // The adapter reports physical B; this beta/P Hamiltonian contains P*B.
+  if (bias_registration) {
+    const auto *adapter = bias_registration->adapter;
+    const bool tallied = adapter->energy_global_flag && adapter->thermo_energy;
+    pe_bead += (np - (tallied ? 1 : 0)) * bias_energy;
+  }
   double pot_energy_partition = pe_bead / universe->procs_per_world[universe->iworld];
   MPI_Allreduce(&pot_energy_partition, &pote, 1, MPI_DOUBLE, MPI_SUM, universe->uworld);
 }
@@ -1905,6 +1939,7 @@ void FixPIMDLangevin::restart(char *buf)
 
 double FixPIMDLangevin::compute_vector(int n)
 {
+  require_force_completion();
   if (n == 0) return ke_bead;
   if (n == 1) return se_bead;
   if (n == 2) return pe_bead;
@@ -1942,4 +1977,308 @@ double FixPIMDLangevin::compute_vector(int n)
     }
   }
   return 0.0;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPIMDLangevin::validate_partition_topology(bool require_consecutive_tags)
+{
+  int min_ranks, max_ranks;
+  MPI_Allreduce(&comm->nprocs, &min_ranks, 1, MPI_INT, MPI_MIN, universe->uworld);
+  MPI_Allreduce(&comm->nprocs, &max_ranks, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (min_ranks != max_ranks)
+    error->all(FLERR, "External PIMD bias requires equal MPI ranks per partition");
+  if (!atom->mass || atom->rmass_flag)
+    error->all(FLERR, "External PIMD bias requires masses defined by atom type");
+  bigint min_natoms, max_natoms;
+  MPI_Allreduce(&atom->natoms, &min_natoms, 1, MPI_LMP_BIGINT, MPI_MIN, universe->uworld);
+  MPI_Allreduce(&atom->natoms, &max_natoms, 1, MPI_LMP_BIGINT, MPI_MAX, universe->uworld);
+  if (min_natoms != max_natoms)
+    error->all(FLERR,
+               fmt::format("Fix {} requires the same number of atoms in every partition", style));
+
+  double cell[9] = {domain->boxlo[0], domain->boxlo[1], domain->boxlo[2],
+                    domain->boxhi[0], domain->boxhi[1], domain->boxhi[2],
+                    domain->xy,       domain->xz,       domain->yz};
+  double min_cell[9], max_cell[9];
+  MPI_Allreduce(cell, min_cell, 9, MPI_DOUBLE, MPI_MIN, universe->uworld);
+  MPI_Allreduce(cell, max_cell, 9, MPI_DOUBLE, MPI_MAX, universe->uworld);
+  int cell_mismatch = 0;
+  for (int i = 0; i < 9; i++)
+    if (min_cell[i] != max_cell[i]) cell_mismatch = 1;
+
+  int cell_flags[8] = {domain->triclinic,      domain->triclinic_general, domain->boundary[0][0],
+                       domain->boundary[0][1], domain->boundary[1][0],    domain->boundary[1][1],
+                       domain->boundary[2][0], domain->boundary[2][1]};
+  int min_flags[8], max_flags[8];
+  MPI_Allreduce(cell_flags, min_flags, 8, MPI_INT, MPI_MIN, universe->uworld);
+  MPI_Allreduce(cell_flags, max_flags, 8, MPI_INT, MPI_MAX, universe->uworld);
+  for (int i = 0; i < 8; i++)
+    if (min_flags[i] != max_flags[i]) cell_mismatch = 1;
+  if (cell_mismatch)
+    error->all(FLERR,
+               fmt::format("Fix {} requires the same simulation cell in every partition", style));
+
+  int min_ntypes, max_ntypes;
+  MPI_Allreduce(&atom->ntypes, &min_ntypes, 1, MPI_INT, MPI_MIN, universe->uworld);
+  MPI_Allreduce(&atom->ntypes, &max_ntypes, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (min_ntypes != max_ntypes)
+    error->all(FLERR,
+               fmt::format("Fix {} requires the same atom masses in every partition", style));
+
+  std::vector<double> min_mass(atom->ntypes), max_mass(atom->ntypes);
+  MPI_Allreduce(atom->mass + 1, min_mass.data(), atom->ntypes, MPI_DOUBLE, MPI_MIN,
+                universe->uworld);
+  MPI_Allreduce(atom->mass + 1, max_mass.data(), atom->ntypes, MPI_DOUBLE, MPI_MAX,
+                universe->uworld);
+  for (int i = 0; i < atom->ntypes; i++)
+    if (min_mass[i] != max_mass[i])
+      error->all(FLERR,
+                 fmt::format("Fix {} requires the same atom masses in every partition", style));
+
+  if (atom->map_style == Atom::MAP_NONE)
+    error->all(FLERR, fmt::format("Fix {} requires an atom map, see atom_modify", style));
+  if (require_consecutive_tags && atom->tag_consecutive() == 0)
+    error->all(FLERR, "Atom IDs must be consecutive for fix {}", style);
+  check_atom_consistency();
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPIMDLangevin::check_atom_consistency()
+{
+  if (atom->natoms >= MAXSMALLINT)
+    lmp->error->all(FLERR, "Fix {} atom type consistency check supports fewer than {} atoms", style,
+                    MAXSMALLINT);
+  const int natoms = static_cast<int>(atom->natoms);
+
+  std::vector<tagint> tags(natoms);
+  if (universe->iworld == 0) {
+    std::vector<int> counts(comm->nprocs), displacements(comm->nprocs);
+    MPI_Allgather(&atom->nlocal, 1, MPI_INT, counts.data(), 1, MPI_INT, lmp->world);
+    for (int i = 1; i < comm->nprocs; i++) displacements[i] = displacements[i - 1] + counts[i - 1];
+    MPI_Allgatherv(atom->tag, atom->nlocal, MPI_LMP_TAGINT, tags.data(), counts.data(),
+                   displacements.data(), MPI_LMP_TAGINT, lmp->world);
+    std::sort(tags.begin(), tags.end());
+  }
+  MPI_Bcast(tags.data(), natoms, MPI_LMP_TAGINT, 0, universe->uworld);
+
+  std::vector<int> types(natoms, 0), members(natoms, 0);
+  for (int i = 0; i < natoms; i++) {
+    const int index = atom->map(tags[i]);
+    if (index >= 0 && index < atom->nlocal) {
+      types[i] = atom->type[index];
+      members[i] = (atom->mask[index] & groupbit) ? 1 : 0;
+    }
+  }
+  MPI_Allreduce(MPI_IN_PLACE, types.data(), natoms, MPI_INT, MPI_SUM, lmp->world);
+  MPI_Allreduce(MPI_IN_PLACE, members.data(), natoms, MPI_INT, MPI_SUM, lmp->world);
+
+  std::vector<int> reference_types(types);
+  MPI_Bcast(reference_types.data(), natoms, MPI_INT, 0, universe->uworld);
+  int mismatch = (types != reference_types) ? 1 : 0;
+  MPI_Allreduce(MPI_IN_PLACE, &mismatch, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (mismatch)
+    lmp->error->all(
+        FLERR, "Fix {} requires the same atom types for every atom ID in every partition", style);
+
+  std::vector<int> reference_members(members);
+  MPI_Bcast(reference_members.data(), natoms, MPI_INT, 0, universe->uworld);
+  mismatch = (members != reference_members) ? 1 : 0;
+  MPI_Allreduce(MPI_IN_PLACE, &mismatch, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (mismatch)
+    lmp->error->all(
+        FLERR, "Fix {} requires the same group membership for every atom ID in every partition",
+        style);
+}
+
+/* ---------------------------------------------------------------------- */
+
+std::shared_ptr<PIMDBiasRegistration>
+FixPIMDLangevin::register_bias(Fix *adapter, PIMDBiasMode mode, bool contraction)
+{
+  const auto capabilities = bias_capabilities();
+  const bool supported = mode == PIMDBiasMode::COORDINATE_MEAN ? capabilities.coordinate_mean
+                                                               : capabilities.bead_modes;
+  int settings[2] = {static_cast<int>(mode), contraction ? 1 : 0};
+  int minimum[2], maximum[2];
+  MPI_Allreduce(settings, minimum, 2, MPI_INT, MPI_MIN, universe->uworld);
+  MPI_Allreduce(settings, maximum, 2, MPI_INT, MPI_MAX, universe->uworld);
+  if ((minimum[0] != maximum[0]) || (minimum[1] != maximum[1]))
+    error->all(FLERR, "External PIMD bias settings must match in all partitions");
+  int invalid = !supported ? 1 : 0;
+  if (contraction && !capabilities.contraction) invalid = 2;
+  if (bias_registration &&
+      ((bias_registration->adapter != adapter) || (bias_registration->mode != mode) ||
+       (bias_registration->contraction != contraction)))
+    invalid = 3;
+  MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (invalid == 3)
+    error->all(FLERR, "Fix {} already has a different external bias registration", style);
+  if (invalid == 2)
+    error->all(FLERR, "Fix {} external bias contraction requires a supported PIMD ensemble", style);
+  if (invalid == 1)
+    error->all(FLERR, "Fix {} does not support the requested external PIMD bias mode", style);
+
+  // Publish a token only after validation, so a failed init leaves no registration.
+  validate_partition_topology(true);
+  if (pstat_flag && domain->triclinic)
+    error->all(FLERR, "External PIMD bias with pressure control requires an orthogonal cell");
+  if (pstat_flag && barostat != BZP)
+    error->all(FLERR, "External PIMD bias with pressure control requires barostat BZP");
+  for (const auto &fix : modify->get_fix_list())
+    if ((fix != this) && fix->box_change)
+      error->all(FLERR, "External PIMD bias cannot be combined with another cell-changing fix");
+  validate_bias_order(adapter);
+  if (!bias_registration) {
+    bias_registration = std::make_shared<PIMDBiasRegistration>();
+    bias_registration->owner = this;
+    bias_registration->adapter = adapter;
+    bias_registration->mode = mode;
+    bias_registration->contraction = contraction;
+  }
+  return bias_registration;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPIMDLangevin::unregister_bias(PIMDBiasRegistration &registration)
+{
+  if (bias_registration.get() != &registration) return;
+  registration.owner = nullptr;
+  registration.adapter = nullptr;
+  bias_registration.reset();
+  bias_pending = false;
+  bias_energy = 0.0;
+}
+
+/* ---------------------------------------------------------------------- */
+
+PIMDBiasCoordinates
+FixPIMDLangevin::bias_coordinates(const PIMDBiasRegistration &registration) const
+{
+  int state_error = !bias_pending ? 1 : 0;
+  if ((bias_registration.get() != &registration) || (registration.owner != this)) state_error = 2;
+  MPI_Allreduce(MPI_IN_PLACE, &state_error, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (state_error == 2) error->all(FLERR, "Stale external PIMD bias registration");
+  if (state_error == 1) error->all(FLERR, "No pending external PIMD bias force evaluation");
+  return {bias_generation, update->ntimestep, atom->nlocal, atom->tag, atom->x, x_unwrap, xcall};
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPIMDLangevin::submit_bias(const PIMDBiasRegistration &registration,
+                                  const PIMDBiasSubmission &submission, double *dynamical_virial)
+{
+  int state_error = 0;
+  if (!bias_pending) state_error = 1;
+  if (submission.generation != bias_generation) state_error = 2;
+  if ((bias_registration.get() != &registration) || (registration.owner != this)) state_error = 3;
+  MPI_Allreduce(MPI_IN_PLACE, &state_error, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (state_error == 3) error->all(FLERR, "Stale external PIMD bias registration");
+  if (state_error == 2) error->all(FLERR, "Stale external PIMD bias force evaluation");
+  if (state_error == 1) error->all(FLERR, "Duplicate external PIMD bias force submission");
+  int invalid = (submission.nlocal != atom->nlocal) || !submission.virial || !dynamical_virial ||
+      (atom->nlocal && !submission.force) || !std::isfinite(submission.energy);
+  if (!invalid) {
+    for (int i = 0; i < 3 * atom->nlocal; ++i)
+      if (!std::isfinite(submission.force[i])) invalid = 1;
+    for (int i = 0; i < 6; ++i)
+      if (!std::isfinite(submission.virial[i])) invalid = 1;
+  }
+  MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (invalid) error->all(FLERR, "Invalid external PIMD bias submission");
+  bias_energy = submission.energy;
+  for (int i = 0; i < atom->nlocal; ++i)
+    for (int d = 0; d < 3; ++d) atom->f[i][d] += np * submission.force[3 * i + d];
+  for (int d = 0; d < 6; ++d) dynamical_virial[d] = np * submission.virial[d];
+
+  // Keep the physical kinetic estimators captured before external forces.
+  // Refresh only biased pressure from Cartesian forces, before adding springs
+  // or changing the force representation.
+  c_press->invoked_vector = -1;
+  c_pe->invoked_scalar = -1;
+  compute_vir();
+  compute_cvir();
+  bias_pending = false;
+  complete_force_evaluation();
+  end_of_step();
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPIMDLangevin::require_force_completion() const
+{
+  if (!force_ready) error->all(FLERR, "Missing external PIMD bias force submission");
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPIMDLangevin::post_run()
+{
+  require_force_completion();
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixPIMDLangevin::complete_force_evaluation()
+{
+  if (method == PIMD) {
+    if (mapflag)
+      for (int i = 0; i < atom->nlocal; ++i) domain->unmap(atom->x[i], atom->image[i]);
+    prepare_coordinates();
+    spring_force();
+    compute_spring_energy();
+    compute_t_prim();
+    compute_p_prim();
+    if (mapflag)
+      for (int i = 0; i < atom->nlocal; ++i) domain->unmap_inv(atom->x[i], atom->image[i]);
+  } else if (method == NMPIMD) {
+    inter_replica_comm(atom->f);
+    nmpimd_transform((cmode == SINGLE_PROC ? bufsortedall : bufbeads), atom->f,
+                     M_x2xp[universe->iworld]);
+  }
+  compute_pote();
+  c_pe->addstep(update->ntimestep + 1);
+  c_press->addstep(update->ntimestep + 1);
+  force_ready = true;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void *FixPIMDLangevin::extract(const char *name, int &dim)
+{
+  dim = 0;
+  if (strcmp(name, "pimd_bias_interface") == 0) return static_cast<PIMDBiasInterface *>(this);
+  return Fix::extract(name, dim);
+}
+
+PIMDBiasCapabilities FixPIMDLangevin::bias_capabilities() const
+{
+  const bool supported = (strcmp(style, "pimd/langevin") == 0) && (igroup == 0) &&
+      (((method == PIMD) && (ensemble == NVT)) ||
+       ((method == NMPIMD) && ((ensemble == NVT) || (ensemble == NPT) || (ensemble == NPH))));
+  return {np, supported, supported, supported};
+}
+
+void FixPIMDLangevin::validate_bias_order(Fix *adapter) const
+{
+  bool found_core = false, found_adapter = false, correct_order = false;
+  int invalid = 0;
+  for (const auto &fix : modify->get_fix_list()) {
+    if (fix == this) found_core = true;
+    if (fix == adapter) {
+      correct_order = found_core;
+      found_adapter = true;
+    } else if (found_adapter && (modify->get_fix_mask(fix) & POST_FORCE) &&
+               (strcmp(fix->style, "GROUP") != 0))
+      invalid = 2;
+  }
+  if (!found_core || !found_adapter || !correct_order) invalid = 1;
+  MPI_Allreduce(MPI_IN_PLACE, &invalid, 1, MPI_INT, MPI_MAX, universe->uworld);
+  if (invalid == 1)
+    error->all(FLERR, "External PIMD bias adapter must be defined after its integrator");
+  if (invalid == 2)
+    error->all(FLERR,
+               "External PIMD bias adapter must be defined after all other post-force fixes");
 }

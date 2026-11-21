@@ -1,0 +1,20 @@
+Fixed path contraction with PLUMED
+=================================
+
+Build LAMMPS with the REPLICA and PLUMED packages and use an MPI-enabled
+PLUMED kernel with ENSEMBLE support. Run from a writable copy of this folder:
+
+  mpiexec -n 4 lmp -partition 4x1 -in in.pimd
+  mpiexec -n 4 lmp -partition 4x1 -var ensemble npt -in in.pimd
+  mpiexec -n 8 lmp -partition 4x2 -var contraction 0.0 -in in.pimd
+
+The NPT variant uses the BZP barostat with an orthogonal simulation cell.
+
+The default fixed contraction is 0.5. Values 0 and 1 give centroid-CV and
+bead-mean-CV biases through the same PLUMED graph. The dynamics and bias
+names are arbitrary fix IDs. The example uses reduced Lennard-Jones units.
+
+The scalar f_bias reports the whole-path physical bias on the first bead
+partition and zero on the others. f_dynamics[10] is the PIMD centroid-virial
+pressure estimator. This short example demonstrates the interface; it is
+not an equilibrium sampling or convergence test.
