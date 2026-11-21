@@ -275,6 +275,3 @@ bookkeeping. An adapter must not transform the forces itself.
 The generation identifies a force evaluation rather than a timestep, so a
 repeated ``run 0`` requires a new view and submission. Updating adaptive bias
 history remains the adapter's responsibility.
-
-.. doxygenclass:: LAMMPS_NS::PIMDBiasInterface
-   :members:

@@ -1,3 +1,18 @@
+/* -*- c++ -*- ----------------------------------------------------------
+   LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
+   https://www.lammps.org/, Sandia National Laboratories
+   LAMMPS development team: developers@lammps.org
+
+   Copyright (2003) Sandia Corporation. Under the terms of Contract
+   DE-AC04-94AL85000 with Sandia Corporation, the U.S. Government retains
+   certain rights in this software. This software is distributed under
+   the GNU General Public License.
+
+   Contributing author: Pengchao Zhang (pczhang1997@gmail.com)
+
+   See the README file in the top-level LAMMPS directory.
+------------------------------------------------------------------------- */
+
 // Coordinate-map and conservative-force tests for partially contracted paths.
 #define LAMMPS_LIB_MPI 1
 #include "atom.h"
